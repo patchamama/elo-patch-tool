@@ -1,0 +1,418 @@
+<!doctype html>
+<!-- Integration contract (no external assets or shared state):
+ Serve this page from the same loopback origin as /api; open /#token=<URL-encoded token>.
+ The fragment is removed immediately. Authentication is X-Session-Token only.
+ GET status -> {state: idle|scanning|cancelling|completed|cancelled|error,
+                progress?: number (0..100), checked?: nonnegative integer}.
+ GET results -> {results:[{id,path,runtimeRoot,version,vendor,architecture,status,
+                         eloRationale:{en,de},classificationEvidence:{en,de}}],
+                 security:{verifiedOn: YYYY-MM-DD|null,
+                           advisories:[{id,title:{en,de},url}]}}.
+ Limits (UTF-16 code units): <=250 JVMs; id 1..128 [A-Za-z0-9_-]; path/root
+ 1..1024; version 1..128; vendor 1..256; rationale 1..2048 per language;
+ classification evidence 1..4096 per language. architecture: x86|x64|arm64|unknown.
+ status: vulnerable|patched|not-affected|inconclusive|mitigated|unsupported|safe.
+ Unknown classifications or missing evidence fail closed, never imply safety.
+ Every result is one JVM; path is its ELO installation path; runtimeRoot is its
+ actual Java root. Evidence must explain association and classification, including
+ uncertainty; use explicit unknown text + inconclusive when not determinable.
+ security: <=16 advisories, id <=128, title 1..256 per language, URL <=512.
+ Nonempty advisories require a real verification date from 2000 through today (UTC).
+ Empty advisories require verifiedOn:null. Backend owns actual source verification;
+ the UI validates format/official-host allowlist, not the truth of an advisory.
+ Allowed URLs: HTTPS, no credentials/port/query/fragment, canonical paths under
+ www.oracle.com/security-alerts/ or openjdk.org/groups/vulnerability/advisories/,
+ plus these exact parent-verified vendor advisories (no other Adoptium or
+ linux.oracle.com URLs):
+ https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/
+ https://linux.oracle.com/cve/CVE-2026-114938.html
+ All response objects use only documented keys; text is nonblank and forbids control
+ characters except tab/newline/CR for readable evidence. JSON bodies <=4 MiB UTF-8;
+ never silently truncate JVMs or evidence: report a failure and narrow the scan root
+ if limits are exceeded (this frontend has no pagination).
+ preview summary 1..4096 per language, <=16 warnings of 1..2048 per language.
+ POST scan -> {} for all available drives, or {searchPath: absolute local Windows
+ directory} for an optional manual root (1..1024, no controls/wildcards/device/UNC/
+ relative paths). This is the ONLY path input. Preserve spaces; treat as plain JSON
+ data, never shell/PowerShell text or a command. Backend MUST independently validate
+ and canonicalize, enforce local read-only traversal, handle reparse points safely,
+ and reject invalid/inaccessible roots. Do not echo the root into activity logs.
+ POST cancel -> {}; both respond {ok:true}. Cancel is a request, not completion.
+ POST preview -> {actionId: mitigate|update-runtime, resultId}; response
+ {previewId, summary:{en,de}, warnings:[{en,de}]}. Preview must be read-only and
+ explain exact scope, backup, rollback, compatibility and provenance as applicable.
+ POST action -> {actionId, resultId, previewId}; response {ok:true} ONLY on completion.
+ All POSTs use application/json. Apart from scan.searchPath, no paths are sent.
+ No commands or arbitrary URLs are sent. Preview/action still accept narrow IDs only.
+ Server must authenticate every route, enforce loopback/Host/Origin, validate IDs,
+ bind single-use expiring previews to the session + target + exact change, revalidate
+ targets and reject replay/stale previews. Every success has a JSON object body,
+ not HTTP 204. Current server: status returns {state}; progress/checked are optional.
+ Every non-2xx response is {error:<stable code>,warnings:[{en,de}]} (exact keys).
+ Error JSON is capped at 256 KiB UTF-8; codes are 1..128 lowercase ASCII letters/
+ digits/underscores, accepted only from the errorMessages map below; warnings are
+ <=16 bilingual nonblank entries, <=2048 code units per language. Validated warning
+ text is displayed via textContent with token redaction, NEVER added to logs.
+ 401 authentication_required is distinct from 403 administrator_required/access_denied
+ and boundary rejections. 409 may mean stale preview, ineligible target, ambiguous
+ options, busy scan or manual recovery: never infer expiry solely from HTTP status.
+ 422 verification_failed_rolled_back means the previous environment value AND type
+ were restored/read back; probe_failed_no_change means no write occurred. 500
+ rollback_failed_manual_recovery_required and 409 manual_recovery_required_close_session
+ latch a visible manual-recovery lock for this page lifetime, including across polling
+ success/network errors. Malformed warnings on recognized recovery errors are discarded
+ without hiding that lock. Other malformed/unknown error bodies discard all server text;
+ fallback is auth for 401, access denied for 403, otherwise generic failure.
+ 503 update_unavailable_provenance_compatibility_backup_replacement_rollback_not_verified
+ means automatic update is unavailable (no download/replacement). This server currently
+ supports mitigation only. Request errors remain visible through successful background
+ polls until another explicit request; poll errors clear on a validated refresh.
+ No backend diagnostic text is logged. JSON export retains all documented JVM
+ evidence and advisory metadata, lastSuccessfulRefresh (ISO timestamp|null) and
+ assessmentComplete (false for active/cancelled/failed scans or stale snapshots),
+ and recoveryRequired (a sticky client-side safety lock, not proof of recovery).
+ Activity export contains fixed translated events only.
+ This UI does not implement backend scanning, updates, rollback or BAT extraction.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<title>ELO Patch Tools</title>
+<style>
+body{font:16px system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;color:#202830;background:#f5f7fa}section{background:white;padding:1rem;margin:1rem 0;border:1px solid #ccd3dc;border-radius:.4rem}button,select{font:inherit;padding:.5rem;margin:.3rem}button:disabled{opacity:.55}pre{white-space:pre-wrap;overflow-wrap:anywhere}label{display:block;margin:.5rem 0}#error{color:#a01818}progress{width:100%}small{display:block}h1,h2{line-height:1.2}input[type=text]{font:inherit;width:min(95%,45rem);padding:.5rem}.table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%}th,td{padding:.5rem;border:1px solid #ccd3dc;text-align:left;vertical-align:top;white-space:pre-wrap;overflow-wrap:anywhere}td{min-width:7rem}a{color:#174f92}
+</style>
+</head>
+<body>
+<h1>ELO Patch Tools</h1>
+<label><span data-i18n="language">Language</span> <select id="language"><option value="en">English</option><option value="de">Deutsch</option></select></label>
+<p data-i18n="intro"></p>
+<pre id="error" role="alert"></pre>
+<pre id="recoveryNotice" role="alert"></pre>
+<section aria-labelledby="scanHeading">
+<h2 id="scanHeading" data-i18n="scanHeading"></h2>
+<p id="status" role="status" aria-live="polite"></p>
+<progress id="progress" max="100" aria-label="Progress"></progress><p id="progressText"></p>
+<label><span data-i18n="searchPath"></span><input id="searchPath" type="text" maxlength="1024" autocomplete="off" spellcheck="false" aria-describedby="searchHelp"></label>
+<p id="searchHelp" data-i18n="searchHelp"></p>
+<button id="scan" data-i18n="scan"></button><button id="cancel" data-i18n="cancel" disabled></button>
+<label><span data-i18n="results"></span><select id="results"></select></label>
+<p id="resultNotice" role="status"></p>
+<div class="table-wrap"><table><caption data-i18n="jvmTable"></caption><thead><tr><th scope="col" data-i18n="path"></th><th scope="col" data-i18n="runtimeRoot"></th><th scope="col" data-i18n="version"></th><th scope="col" data-i18n="vendor"></th><th scope="col" data-i18n="architecture"></th><th scope="col" data-i18n="classification"></th><th scope="col" data-i18n="eloRationale"></th><th scope="col" data-i18n="classificationEvidence"></th></tr></thead><tbody id="jvmRows"></tbody></table></div>
+<pre id="details"></pre>
+</section>
+<section aria-labelledby="actionHeading">
+<h2 id="actionHeading" data-i18n="actionHeading"></h2>
+<p data-i18n="warning"></p>
+<button id="mitigate" data-i18n="mitigate" disabled></button><button id="update" data-i18n="update" disabled></button>
+<h3 data-i18n="preview"></h3><pre id="preview"></pre>
+<label><input id="confirm" type="checkbox" disabled><span id="confirmation"></span></label>
+<button id="apply" data-i18n="apply" disabled></button>
+</section>
+<section aria-labelledby="securityHeading"><h2 id="securityHeading" data-i18n="securityHeading"></h2><p data-i18n="securityHelp"></p><p id="verifiedOn"></p><ul id="advisories"></ul></section>
+<section aria-labelledby="manualHeading"><h2 id="manualHeading" data-i18n="manualHeading"></h2><p data-i18n="manualIntro"></p><ol id="manual"></ol></section>
+<section aria-labelledby="exportHeading"><h2 id="exportHeading" data-i18n="exportHeading"></h2><button id="exportTechnical" data-i18n="technicalReport"></button><button id="exportJson" data-i18n="exportJson"></button><button id="exportLog" data-i18n="exportLog"></button><pre id="activity" aria-live="polite"></pre></section>
+<script>
+'use strict';
+(() => {
+const messages = {
+ en: {
+ language:'Language',intro:'Local, read-only discovery. No change is made by scanning or previewing. Keep this session open while work is running.',
+ technicalReport:'Download technical HTML report',scanHeading:'Discovery',scan:'Start read-only scan',cancel:'Cancel scan',results:'Select JVM for preview',none:'No JVMs found',
+ actionHeading:'Separate, optional changes',warning:'Temporary mitigation is not a runtime update. Updating may affect compatibility and vendor support. Nothing is applied automatically.',
+ mitigate:'Preview temporary mitigation',update:'Preview runtime update',preview:'Change preview',apply:'Apply confirmed change',
+ confirmMitigation:'I reviewed the mitigation preview, backup and rollback plan and authorize this change.',confirmUpdate:'I reviewed the update preview, compatibility risks, backup and rollback plan and authorize this runtime update.',
+ noPreview:'Select a JVM and preview one change. A new scan, search root, selection or preview clears confirmation.',
+ manualHeading:'Manual patch instructions',manualIntro:'These instructions do not execute commands or change the system. Follow ELO and runtime vendor guidance for your exact installation.',
+ manual:['Identify the affected ELO service and its actual Java runtime from the scan. Verify the version against vendor advisories; a potential finding is not proof of exploitability.',
+ 'Plan a maintenance window. Record existing JVM options and environment settings. Back up the service configuration and runtime; verify a rollback procedure before changing anything.',
+ 'Temporary mitigation: in the affected service’s supported JVM configuration, add -XX:-UseBASE64Intrinsics without replacing existing options or global environment values. Confirm that the runtime supports this flag. This is not a permanent fix.',
+ 'Separate runtime update: obtain a vendor-approved, compatible patched runtime from a trusted vendor source. Verify integrity, architecture and ELO support. Do not replace a running runtime or use an arbitrary download.',
+ 'Stop only the affected service during the approved window, apply the chosen change using the vendor procedure, then restart. Check service health and effective JVM options/version. If checks fail, stop and restore the saved configuration/runtime.',
+ 'Rescan and document the outcome. Keep the backup until validated. Contact ELO support if paths, service ownership or compatibility are uncertain.'],
+ exportHeading:'Reports',exportJson:'Export JSON results',exportLog:'Export activity log',
+ idle:'Ready',scanning:'Scanning',cancelling:'Cancellation requested; waiting for the scanner',completed:'Scan completed',cancelled:'Scan cancelled; results may be incomplete',error:'Operation failed',unknown:'Unknown',
+ vulnerable:'Potentially vulnerable',safe:'No vulnerability detected by current rules',mitigated:'Mitigation detected',unsupported:'Unsupported runtime',
+ progress:'Progress',indeterminate:'Progress unavailable',path:'Installation path',version:'Runtime version',classification:'Assessment',
+ auth:'Missing or rejected session token. Reopen the local session link.',network:'Cannot reach the local service. Check that the BAT is still running.',
+ invalid:'The local service returned an invalid response.',failed:'The request failed. Check the local service and retry.',expired:'The preview expired or no longer matches the target. Request a fresh preview.',
+ accessDenied:'Access denied. Check elevation and filesystem/registry permissions without bypassing access controls. No protection is claimed.',
+ adminNeeded:'Mitigation requires an elevated administrator session. Read-only scanning does not require elevation. This is not a session-token error.',
+ boundaryRejected:'The local service rejected the request boundary. Reopen the original local session link; do not bypass origin or host checks.',
+ rollbackFailed:'Rollback failed — manual recovery is required.',manualRecovery:'Manual recovery is required before any further change.',
+ recoveryGuidance:'CRITICAL: JAVA_TOOL_OPTIONS may still be changed. Further requests that could change state are locked in this page. Restore the exact previous value AND registry type saved from the preview using an approved Registry Editor procedure, with your administrator. Verify manually before closing this session and starting another. Opening a new session alone does not restore the environment. Existing JVM protection is not claimed.',
+ rolledBack:'Verification failed. The exact previous environment value and registry type were restored and read back. No protection is claimed.',
+ probeFailed:'JVM-option verification failed before any change. No protection is claimed.',
+ updateUnavailable:'Automatic runtime update is unavailable: provenance, ELO compatibility, backup, replacement and rollback have not been verified. Nothing was downloaded or replaced. Use the manual instructions and vendor support.',
+ incompleteScan:'The scan is incomplete or exceeds evidence limits. Choose a narrower accessible local directory and review permissions without bypassing access controls.',
+ inaccessiblePath:'The selected local directory is missing or inaccessible. Check the directory and permissions.',
+ scanBusy:'A scan is already running. Wait for completion or request cancellation.',completedScan:'Complete a successful scan before requesting a change.',
+ targetIneligible:'The selected JVM is not eligible for mitigation. Review the scan evidence.',optionsUnsupported:'Existing JVM/environment settings are ambiguous or unsupported. Review them with your administrator before making changes.',
+ scanSent:'Scan requested',cancelSent:'Cancellation requested',previewReady:'Preview received',actionSent:'Confirmed action completed',connected:'Session connected',report:'Report exported',log:'Activity log exported',
+ units:'items checked',previewKind:'Selected change',mitigation:'Temporary mitigation',runtimeUpdate:'Runtime update',
+ searchPath:'Optional local search directory',searchHelp:'Leave empty to discover all available drives. Or enter an absolute local directory, e.g. C:\\ELO data. It is read-only search data, never a command. Network/device paths and wildcards are not accepted.',
+ invalidPath:'Enter an absolute local Windows directory of at most 1024 characters, without controls, wildcards or relative segments.',
+ jvmTable:'Discovered JVMs and evidence',runtimeRoot:'Runtime root',vendor:'Vendor',architecture:'Architecture',eloRationale:'ELO association rationale',classificationEvidence:'Classification evidence',
+ patched:'Patched', 'not-affected':'Not affected',inconclusive:'Inconclusive',
+ securityHeading:'Security information',securityHelp:'Official advisory links and verification date are supplied and verified by the backend maintainer. This UI checks their format and official host, not their live content or applicability. Links open only on request; no remote assets are loaded. Review evidence and vendor support before acting.',
+ resultNotice:'Results may be incomplete or stale during a scan, after cancellation or after an error. They are not a fresh, complete assessment.',
+ verifiedDate:'Source verification date (UTC)',noAdvisories:'No verified advisory information supplied. Do not infer that this runtime is safe.'
+ },
+ de: {
+ language:'Sprache',intro:'Lokale, schreibgeschützte Suche. Scan und Vorschau ändern nichts. Lassen Sie diese Sitzung während laufender Vorgänge geöffnet.',
+ technicalReport:'Technischen HTML-Bericht herunterladen',scanHeading:'Suche',scan:'Schreibgeschützten Scan starten',cancel:'Scan abbrechen',results:'JVM für Vorschau auswählen',none:'Keine JVMs gefunden',
+ actionHeading:'Getrennte, optionale Änderungen',warning:'Die vorübergehende Risikominderung ist kein Laufzeit-Update. Ein Update kann Kompatibilität und Herstellersupport beeinträchtigen. Nichts wird automatisch angewendet.',
+ mitigate:'Vorübergehende Risikominderung prüfen',update:'Laufzeit-Update prüfen',preview:'Änderungsvorschau',apply:'Bestätigte Änderung anwenden',
+ confirmMitigation:'Ich habe die Vorschau zur Risikominderung sowie Sicherung und Wiederherstellung geprüft und genehmige diese Änderung.',confirmUpdate:'Ich habe die Update-Vorschau, Kompatibilitätsrisiken sowie Sicherung und Wiederherstellung geprüft und genehmige dieses Laufzeit-Update.',
+ noPreview:'Wählen Sie eine JVM und prüfen Sie eine Änderung. Ein neuer Scan, Suchpfad, eine Auswahl oder eine Vorschau setzt die Bestätigung zurück.',
+ manualHeading:'Anleitung für die manuelle Korrektur',manualIntro:'Diese Anleitung führt keine Befehle aus und ändert das System nicht. Beachten Sie die ELO- und Laufzeit-Herstellerhinweise für Ihre konkrete Installation.',
+ manual:['Ermitteln Sie den betroffenen ELO-Dienst und seine tatsächliche Java-Laufzeit anhand des Scans. Vergleichen Sie die Version mit Herstellerhinweisen; ein Verdacht ist kein Nachweis der Ausnutzbarkeit.',
+ 'Planen Sie ein Wartungsfenster. Dokumentieren Sie vorhandene JVM-Optionen und Umgebungswerte. Sichern Sie Dienstkonfiguration und Laufzeit und prüfen Sie vor Änderungen den Wiederherstellungsablauf.',
+ 'Vorübergehende Risikominderung: Ergänzen Sie -XX:-UseBASE64Intrinsics in der unterstützten JVM-Konfiguration des betroffenen Dienstes, ohne vorhandene Optionen oder globale Umgebungswerte zu ersetzen. Prüfen Sie, ob die Laufzeit diese Option unterstützt. Dies ist keine dauerhafte Korrektur.',
+ 'Getrenntes Laufzeit-Update: Beziehen Sie eine vom Hersteller freigegebene, kompatible und korrigierte Laufzeit aus einer vertrauenswürdigen Herstellerquelle. Prüfen Sie Integrität, Architektur und ELO-Unterstützung. Ersetzen Sie keine laufende Laufzeit und verwenden Sie keinen beliebigen Download.',
+ 'Stoppen Sie nur den betroffenen Dienst im genehmigten Wartungsfenster, führen Sie die gewählte Änderung nach Herstellerverfahren aus und starten Sie ihn erneut. Prüfen Sie Dienstzustand und wirksame JVM-Optionen beziehungsweise Version. Bei Fehlern stoppen und gesicherte Konfiguration oder Laufzeit wiederherstellen.',
+ 'Scannen Sie erneut und dokumentieren Sie das Ergebnis. Bewahren Sie die Sicherung bis zur erfolgreichen Prüfung auf. Bei unklaren Pfaden, Dienstzuordnung oder Kompatibilität wenden Sie sich an den ELO-Support.'],
+ exportHeading:'Berichte',exportJson:'JSON-Ergebnisse exportieren',exportLog:'Aktivitätsprotokoll exportieren',
+ idle:'Bereit',scanning:'Scan läuft',cancelling:'Abbruch angefordert; Scanner wird abgewartet',completed:'Scan abgeschlossen',cancelled:'Scan abgebrochen; Ergebnisse möglicherweise unvollständig',error:'Vorgang fehlgeschlagen',unknown:'Unbekannt',
+ vulnerable:'Möglicherweise verwundbar',safe:'Nach aktuellen Regeln keine Schwachstelle erkannt',mitigated:'Risikominderung erkannt',unsupported:'Nicht unterstützte Laufzeit',
+ progress:'Fortschritt',indeterminate:'Fortschritt nicht verfügbar',path:'Installationspfad',version:'Laufzeitversion',classification:'Bewertung',
+ auth:'Sitzungstoken fehlt oder wurde abgelehnt. Öffnen Sie den lokalen Sitzungslink erneut.',network:'Lokaler Dienst nicht erreichbar. Prüfen Sie, ob die BAT-Datei noch läuft.',
+ invalid:'Der lokale Dienst hat eine ungültige Antwort geliefert.',failed:'Anfrage fehlgeschlagen. Prüfen Sie den lokalen Dienst und versuchen Sie es erneut.',expired:'Die Vorschau ist abgelaufen oder passt nicht mehr zum Ziel. Fordern Sie eine neue Vorschau an.',
+ accessDenied:'Zugriff verweigert. Administratorrechte und Datei-/Registrierungsberechtigungen prüfen, ohne den Zugriffsschutz zu umgehen. Kein Schutz zugesichert.',
+ adminNeeded:'Risikominderung erfordert eine erhöhte Administratorsitzung. Schreibgeschützte Scans benötigen keine Erhöhung. Dies ist kein Sitzungstoken-Fehler.',
+ boundaryRejected:'Der lokale Dienst hat die Anfragegrenzen abgelehnt. Öffnen Sie den ursprünglichen lokalen Sitzungslink erneut; Herkunfts- und Host-Prüfungen nicht umgehen.',
+ rollbackFailed:'Wiederherstellung fehlgeschlagen — manuelle Wiederherstellung erforderlich.',manualRecovery:'Vor weiteren Änderungen ist eine manuelle Wiederherstellung erforderlich.',
+ recoveryGuidance:'KRITISCH: JAVA_TOOL_OPTIONS ist möglicherweise noch geändert. Weitere zustandsändernde Anfragen sind auf dieser Seite gesperrt. Stellen Sie mit Ihrem Administrator den exakten alten Wert UND Registrierungstyp aus der Vorschau mit einem freigegebenen Registrierungseditor-Verfahren wieder her. Vor dem Schließen dieser Sitzung und dem Start einer neuen Sitzung manuell prüfen. Eine neue Sitzung allein stellt die Umgebung nicht wieder her. Kein Schutz bestehender JVMs zugesichert.',
+ rolledBack:'Prüfung fehlgeschlagen. Der exakte alte Umgebungswert und Registrierungstyp wurden wiederhergestellt und zurückgelesen. Kein Schutz zugesichert.',
+ probeFailed:'Prüfung der JVM-Option vor einer Änderung fehlgeschlagen. Kein Schutz zugesichert.',
+ updateUnavailable:'Automatisches Laufzeit-Update nicht verfügbar: Herkunft, ELO-Kompatibilität, Sicherung, Ersetzung und Wiederherstellung sind nicht geprüft. Nichts wurde heruntergeladen oder ersetzt. Nutzen Sie die manuelle Anleitung und den Herstellersupport.',
+ incompleteScan:'Der Scan ist unvollständig oder überschreitet Nachweisgrenzen. Engeres zugängliches lokales Verzeichnis wählen und Berechtigungen prüfen, ohne den Zugriffsschutz zu umgehen.',
+ inaccessiblePath:'Das gewählte lokale Verzeichnis fehlt oder ist unzugänglich. Verzeichnis und Berechtigungen prüfen.',
+ scanBusy:'Ein Scan läuft bereits. Abschluss abwarten oder Abbruch anfordern.',completedScan:'Vor einer Änderung einen erfolgreichen Scan abschließen.',
+ targetIneligible:'Die gewählte JVM ist für diese Risikominderung nicht geeignet. Scan-Nachweise prüfen.',optionsUnsupported:'Vorhandene JVM-/Umgebungseinstellungen sind mehrdeutig oder nicht unterstützt. Vor Änderungen mit Ihrem Administrator prüfen.',
+ scanSent:'Scan angefordert',cancelSent:'Abbruch angefordert',previewReady:'Vorschau empfangen',actionSent:'Bestätigte Änderung abgeschlossen',connected:'Sitzung verbunden',report:'Bericht exportiert',log:'Aktivitätsprotokoll exportiert',
+ units:'Elemente geprüft',previewKind:'Gewählte Änderung',mitigation:'Vorübergehende Risikominderung',runtimeUpdate:'Laufzeit-Update',
+ searchPath:'Optionales lokales Suchverzeichnis',searchHelp:'Leer lassen, um alle verfügbaren Laufwerke zu durchsuchen. Oder ein absolutes lokales Verzeichnis eingeben, z. B. C:\\ELO data. Die Eingabe ist nur ein schreibgeschützter Suchpfad, niemals ein Befehl. Netzwerk- und Gerätepfade sowie Platzhalter sind nicht zulässig.',
+ invalidPath:'Geben Sie ein absolutes lokales Windows-Verzeichnis mit höchstens 1024 Zeichen ohne Steuerzeichen, Platzhalter oder relative Segmente ein.',
+ jvmTable:'Gefundene JVMs und Nachweise',runtimeRoot:'Laufzeit-Stammverzeichnis',vendor:'Hersteller',architecture:'Architektur',eloRationale:'Begründung der ELO-Zuordnung',classificationEvidence:'Nachweis der Einstufung',
+ patched:'Gepatcht','not-affected':'Nicht betroffen',inconclusive:'Nicht eindeutig',
+ securityHeading:'Sicherheitsinformationen',securityHelp:'Offizielle Sicherheitshinweise und Prüfdatum werden vom Backend-Verantwortlichen bereitgestellt und geprüft. Diese Oberfläche prüft Format und offizielle Domain, nicht den aktuellen Inhalt oder die Anwendbarkeit. Links öffnen sich nur auf Anforderung; externe Ressourcen werden nicht geladen. Prüfen Sie Nachweise und Herstellersupport vor Änderungen.',
+ resultNotice:'Während eines Scans, nach einem Abbruch oder Fehler können Ergebnisse unvollständig oder veraltet sein. Sie sind keine aktuelle, vollständige Bewertung.',
+ verifiedDate:'Prüfdatum der Quellen (UTC)',noAdvisories:'Keine geprüften Sicherheitshinweise bereitgestellt. Daraus darf keine Unbedenklichkeit der Laufzeit abgeleitet werden.'
+ }
+};
+const $ = id => document.getElementById(id);
+const token = new URLSearchParams(location.hash.slice(1)).get('token') || '';
+history.replaceState(null, '', location.pathname + location.search);
+let language = 'en', state = 'idle', rows = [], preview = null, pending = false, polling = false, lastError = '';
+let progress = null, checked = null, lastSuccessfulRefresh = null, security = {verifiedOn:null,advisories:[]};
+let lastWarnings = [], errorFromPoll = false, recoveryRequired = false, recoveryWarnings = [];
+const events = [], states = ['idle','scanning','cancelling','completed','cancelled','error'];
+const t = key => messages[language][key] || messages[language].unknown;
+const safeText = value => typeof value === 'string' ? (token ? value.split(token).join('[redacted]') : value).slice(0,16000) : '';
+const validId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+const record = value => value && typeof value === 'object' && !Array.isArray(value);
+const keys = (value, required, optional = []) => record(value) && required.every(key => Object.hasOwn(value,key)) && Object.keys(value).every(key => required.includes(key) || optional.includes(key));
+const text = (value,max) => typeof value === 'string' && value.trim().length >= 1 && value.length <= max && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
+const bilingual = (value,max) => keys(value,['en','de']) && text(value.en,max) && text(value.de,max);
+const classifications = ['vulnerable','patched','not-affected','inconclusive','mitigated','unsupported','safe'];
+const rowFields = ['id','path','runtimeRoot','version','vendor','architecture','status','eloRationale','classificationEvidence'];
+const validRow = row => keys(row,rowFields) && validId(row.id) && text(row.path,1024) && text(row.runtimeRoot,1024) && text(row.version,128) && text(row.vendor,256) && ['x86','x64','arm64','unknown'].includes(row.architecture) && classifications.includes(row.status) && bilingual(row.eloRationale,2048) && bilingual(row.classificationEvidence,4096);
+function validSearchPath(value) {
+ return value.length <= 1024 && /^[A-Za-z]:\\/.test(value) && !/[\u0000-\u001f\u007f"<>|?*\/]/.test(value) && !value.slice(2).includes(':') && !value.split('\\').slice(1).some(part => /[. ]$/.test(part) || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part));
+}
+function officialUrl(value) {
+ if (!text(value,512) || (token && value.includes(token))) return false;
+ try {
+ const url = new URL(value);
+ return url.href === value && url.protocol === 'https:' && !url.username && !url.password && !url.port && !url.search && !url.hash &&
+ ((url.hostname === 'www.oracle.com' && /^\/security-alerts\/(?:[a-z0-9-]+\.html)?$/.test(url.pathname)) ||
+ (url.hostname === 'openjdk.org' && /^\/groups\/vulnerability\/advisories\/(?:[a-z0-9-]+(?:\.html|\/)?)?$/.test(url.pathname)) ||
+ value === 'https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/' ||
+ value === 'https://linux.oracle.com/cve/CVE-2026-114938.html');
+ } catch (_) { return false; }
+}
+function validSecurity(value) {
+ if (!keys(value,['verifiedOn','advisories']) || !Array.isArray(value.advisories) || value.advisories.length > 16) return false;
+ if (!value.advisories.length) return value.verifiedOn === null;
+ const date = value.verifiedOn;
+ return typeof date === 'string' && /^20\d{2}-\d{2}-\d{2}$/.test(date) && Number.isFinite(Date.parse(date)) && new Date(date).toISOString().slice(0,10) === date && date <= new Date().toISOString().slice(0,10) &&
+ value.advisories.every(item => keys(item,['id','title','url']) && validId(item.id) && bilingual(item.title,256) && officialUrl(item.url)) && new Set(value.advisories.map(item => item.id)).size === value.advisories.length;
+}
+const localized = value => safeText(value[language]);
+const running = () => state === 'scanning' || state === 'cancelling';
+function log(key) { events.push({time:new Date().toISOString(),key}); if(events.length > 500) events.shift(); renderLog(); }
+function renderLog() { $('activity').textContent = events.map(e => e.time+' '+t(e.key)).join('\n'); }
+function clearPreview() { preview = null; $('confirm').checked = false; }
+// Exact known server codes only. Never use an arbitrary server string as a message key.
+const errorMessages = Object.fromEntries(Object.entries({
+ auth:['authentication_required'],accessDenied:['access_denied'],adminNeeded:['administrator_required'],
+ boundaryRejected:['loopback_only','host_rejected','origin_rejected','cross_site','origin_required'],
+ expired:['preview_expired_or_mismatched','stale_preview'],
+ rollbackFailed:['rollback_failed_manual_recovery_required'],manualRecovery:['manual_recovery_required_close_session'],
+ rolledBack:['verification_failed_rolled_back'],probeFailed:['probe_failed_no_change'],
+ updateUnavailable:['update_unavailable_provenance_compatibility_backup_replacement_rollback_not_verified'],
+ incompleteScan:['scan_incomplete','narrow_scan_root','evidence_out_of_bounds'],inaccessiblePath:['inaccessible_path'],
+ invalidPath:['invalid_path','nonlocal_path','reparse_path'],scanBusy:['scan_busy'],completedScan:['completed_scan_required'],
+ targetIneligible:['target_not_eligible','invalid_java_target'],
+ optionsUnsupported:['unsupported_environment_type','unsupported_options','ambiguous_option_quoting','malformed_option_quoting','ambiguous_intrinsics_option','ambiguous_jvm_options','ambiguous_environment_expansion'],
+ failed:['operation_failed','scan_failed','unknown_route','method_rejected','unexpected_body','json_required','invalid_id','invalid_action','invalid_json','invalid_parameters','missing_parameter','request_timeout','incomplete_request','invalid_header','headers_too_large','invalid_request_line','duplicate_header','unsupported_framing','invalid_length','length_required','body_too_large','incomplete_body','invalid_utf8']
+}).flatMap(([key,codes]) => codes.map(code => [code,key])));
+const recoveryCodes = ['rollback_failed_manual_recovery_required','manual_recovery_required_close_session'];
+class ApiFailure extends Error {
+ constructor(key,warnings = [],recovery = false) { super(key); this.key = key; this.warnings = warnings; this.recovery = recovery; }
+}
+function fail(error, fromPoll = false) {
+ lastError = error instanceof ApiFailure ? error.key : typeof error === 'string' && Object.hasOwn(messages.en,error) ? error : 'invalid';
+ lastWarnings = error instanceof ApiFailure ? error.warnings : []; errorFromPoll = fromPoll;
+ if (error instanceof ApiFailure && error.recovery) {
+ recoveryRequired = true; recoveryWarnings = error.warnings; lastWarnings = []; state = 'error';
+ }
+ render();
+}
+async function readJson(response,limit) {
+ try {
+ const reader = response.body.getReader(), decoder = new TextDecoder('utf-8',{fatal:true});
+ let size = 0, json = '';
+ try {
+ while (true) {
+ const chunk = await reader.read(); if (chunk.done) break;
+ size += chunk.value.byteLength;
+ if (size > limit) { await reader.cancel(); throw 0; }
+ json += decoder.decode(chunk.value,{stream:true});
+ }
+ json += decoder.decode();
+ } finally { reader.releaseLock(); }
+ const data = JSON.parse(json); if (!record(data)) throw 0; return data;
+ } catch (_) { throw 'invalid'; }
+}
+async function api(path, body) {
+ if (!token) throw 'auth';
+ let response;
+ try { response = await fetch('/api/'+path, {method:body === undefined ? 'GET' : 'POST',headers:{'X-Session-Token':token,...(body === undefined ? {} : {'Content-Type':'application/json'})},...(body === undefined ? {} : {body:JSON.stringify(body)}),credentials:'omit',cache:'no-store',redirect:'error',referrerPolicy:'no-referrer'}); }
+ catch (_) { throw 'network'; }
+ if (response.ok) return readJson(response,4*1024*1024);
+ const fallback = response.status === 401 ? 'auth' : response.status === 403 ? 'accessDenied' : 'failed';
+ let data;
+ try { data = await readJson(response,256*1024); } catch (_) { throw new ApiFailure(fallback); }
+ if (!keys(data,['error','warnings']) || typeof data.error !== 'string' || !/^[a-z0-9_]{1,128}$/.test(data.error) || !Object.hasOwn(errorMessages,data.error)) throw new ApiFailure(fallback);
+ const recovery = recoveryCodes.includes(data.error);
+ if (!Array.isArray(data.warnings) || data.warnings.length > 16 || data.warnings.some(warning => !bilingual(warning,2048))) throw new ApiFailure(recovery ? errorMessages[data.error] : 'invalid',[],recovery);
+ throw new ApiFailure(errorMessages[data.error],data.warnings,recovery);
+}
+async function acknowledge(path, body) { const data = await api(path,body); if (!keys(data,['ok']) || data.ok !== true) throw 'failed'; }
+function selected() { return rows.find(row => row.id === $('results').value); }
+function render() {
+ document.documentElement.lang = language;
+ document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+ $('error').textContent = lastError ? [t(lastError),...lastWarnings.map(localized)].join('\n') : '';
+ $('recoveryNotice').textContent = recoveryRequired ? [t('recoveryGuidance'),...recoveryWarnings.map(localized)].join('\n') : '';
+ $('status').textContent = t(recoveryRequired ? 'error' : state);
+ $('resultNotice').textContent = lastError || recoveryRequired || running() || state === 'cancelled' || state === 'error' ? t('resultNotice') : '';
+ $('progress').setAttribute('aria-label',t('progress'));
+ if (progress === null) $('progress').removeAttribute('value'); else $('progress').value = progress;
+ $('progressText').textContent = (progress === null ? t('indeterminate') : t('progress')+': '+progress+'%') + (checked === null ? '' : ' — '+checked+' '+t('units'));
+ const old = $('results').value;
+ $('results').replaceChildren();
+ if (!rows.length) { const option = document.createElement('option'); option.textContent = t('none'); option.value = ''; $('results').append(option); }
+ rows.forEach(row => { const option = document.createElement('option'); option.value = row.id; option.textContent = safeText(row.runtimeRoot)+' — '+safeText(row.version)+' — '+safeText(row.vendor)+' — '+t(row.status); $('results').append(option); });
+ if (rows.some(row => row.id === old)) $('results').value = old;
+ const row = selected();
+ const cells = item => [safeText(item.path),safeText(item.runtimeRoot),safeText(item.version),safeText(item.vendor),item.architecture === 'unknown' ? t('unknown') : item.architecture,t(item.status),localized(item.eloRationale),localized(item.classificationEvidence)];
+ $('jvmRows').replaceChildren();
+ rows.forEach(item => { const tr = document.createElement('tr'); cells(item).forEach(value => { const td = document.createElement('td'); td.textContent = value; tr.append(td); }); $('jvmRows').append(tr); });
+ const labels = ['path','runtimeRoot','version','vendor','architecture','classification','eloRationale','classificationEvidence'];
+ $('details').textContent = row ? cells(row).map((value,index) => t(labels[index])+': '+value).join('\n') : '';
+ $('verifiedOn').textContent = security.verifiedOn ? t('verifiedDate')+': '+security.verifiedOn : t('noAdvisories');
+ $('advisories').replaceChildren();
+ security.advisories.forEach(item => {
+ const li = document.createElement('li'), link = document.createElement('a');
+ link.textContent = localized(item.title); link.href = item.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.referrerPolicy = 'no-referrer';
+ li.append(link); $('advisories').append(li);
+ });
+ $('searchPath').disabled = pending || running() || recoveryRequired;
+ $('scan').disabled = pending || running() || !token || recoveryRequired;
+ $('cancel').disabled = pending || state !== 'scanning' || !token || recoveryRequired;
+ $('results').disabled = pending || running();
+ $('mitigate').disabled = $('update').disabled = pending || running() || !row || !token || recoveryRequired || (!!lastError && errorFromPoll);
+ $('preview').textContent = preview ? t('previewKind')+': '+t(preview.actionId === 'mitigate' ? 'mitigation' : 'runtimeUpdate')+'\n'+localized(preview.summary)+(preview.warnings.length ? '\n'+preview.warnings.map(localized).join('\n') : '') : t('noPreview');
+ $('confirmation').textContent = t(preview && preview.actionId === 'update-runtime' ? 'confirmUpdate' : 'confirmMitigation');
+ $('confirm').disabled = pending || !preview || running() || recoveryRequired;
+ $('apply').disabled = pending || !preview || !$('confirm').checked || running() || recoveryRequired;
+ $('manual').replaceChildren(); messages[language].manual.forEach(text => { const li = document.createElement('li'); li.textContent = text; $('manual').append(li); });
+ renderLog();
+}
+async function refresh() {
+ if (polling || pending || !token) return;
+ polling = true;
+ try {
+ const status = await api('status');
+ if (!keys(status,['state'],['progress','checked']) || !states.includes(status.state) || (status.progress !== undefined && (!Number.isFinite(status.progress) || status.progress < 0 || status.progress > 100)) || (status.checked !== undefined && (!Number.isSafeInteger(status.checked) || status.checked < 0))) throw 'invalid';
+ const result = await api('results');
+ if (!keys(result,['results','security']) || !Array.isArray(result.results) || result.results.length > 250 || result.results.some(row => !validRow(row)) || new Set(result.results.map(row => row.id)).size !== result.results.length || !validSecurity(result.security)) throw 'invalid';
+ const nextRows = result.results;
+ if (state !== status.state || JSON.stringify(rows) !== JSON.stringify(nextRows) || JSON.stringify(security) !== JSON.stringify(result.security)) clearPreview();
+ state = status.state; rows = nextRows; security = result.security;
+ progress = Number.isFinite(status.progress) ? Math.max(0,Math.min(100,status.progress)) : null;
+ checked = Number.isSafeInteger(status.checked) && status.checked >= 0 ? status.checked : null;
+ lastSuccessfulRefresh = new Date().toISOString();
+ if (errorFromPoll) { lastError = recoveryRequired ? 'manualRecovery' : ''; lastWarnings = []; errorFromPoll = false; }
+ render();
+ } catch (error) { clearPreview(); fail(error,true); }
+ finally { polling = false; }
+}
+async function perform(work, allowRecovery = false) {
+ if (pending || polling || (recoveryRequired && !allowRecovery)) return;
+ pending = true; lastError = ''; lastWarnings = []; errorFromPoll = false; render();
+ try { await work(); } catch (error) { clearPreview(); fail(error); }
+ finally { pending = false; render(); }
+}
+$('language').onchange = () => { language = $('language').value === 'de' ? 'de' : 'en'; render(); };
+$('results').onchange = () => { clearPreview(); render(); };
+$('confirm').onchange = render;
+$('searchPath').oninput = () => { clearPreview(); render(); };
+$('scan').onclick = () => {
+ const searchPath = $('searchPath').value;
+ if (searchPath !== '' && !validSearchPath(searchPath)) { clearPreview(); fail('invalidPath'); return; }
+ return perform(async () => { clearPreview(); await acknowledge('scan',searchPath === '' ? {} : {searchPath}); state = 'scanning'; rows = []; lastSuccessfulRefresh = null; progress = null; checked = null; log('scanSent'); });
+};
+$('cancel').onclick = () => perform(async () => { clearPreview(); await acknowledge('cancel',{}); state = 'cancelling'; log('cancelSent'); });
+async function getPreview(actionId) {
+ const row = selected(); if (!row || running() || recoveryRequired || (lastError && errorFromPoll)) return;
+ await perform(async () => {
+ clearPreview(); const data = await api('preview',{actionId,resultId:row.id});
+ if (!keys(data,['previewId','summary','warnings']) || !validId(data.previewId) || !bilingual(data.summary,4096) || !Array.isArray(data.warnings) || data.warnings.length > 16 || data.warnings.some(w => !bilingual(w,2048))) throw 'invalid';
+ preview = {previewId:data.previewId,actionId,resultId:row.id,summary:data.summary,warnings:data.warnings}; log('previewReady');
+ });
+}
+$('mitigate').onclick = () => getPreview('mitigate');
+$('update').onclick = () => getPreview('update-runtime');
+$('apply').onclick = () => {
+ if (!preview || !$('confirm').checked || running() || lastError || recoveryRequired) return;
+ const request = {actionId:preview.actionId,resultId:preview.resultId,previewId:preview.previewId};
+ return perform(async () => { clearPreview(); await acknowledge('action',request); log('actionSent'); });
+};
+// The authenticated backend creates the sanitized report; no UI rows, paths,
+// raw diagnostics or client action claims are submitted as evidence.
+async function exportTechnicalReport() {
+ const data = await api('report',{language});
+ if (!keys(data,['html']) || typeof data.html !== 'string' || !data.html.startsWith('<!doctype html>')) throw 'invalid';
+ download('elo-technical-'+language+'.html',data.html,'text/html;charset=utf-8');
+ log('report');
+}
+function download(filename, content, type) {
+ const url = URL.createObjectURL(new Blob([content],{type}));
+ const link = document.createElement('a'); link.href = url; link.download = filename; link.click();
+ setTimeout(() => URL.revokeObjectURL(url),1000);
+}
+$('exportTechnical').onclick = () => perform(exportTechnicalReport,true);
+$('exportJson').onclick = () => { download('elo-results.json',JSON.stringify({state,results:rows,security,lastSuccessfulRefresh,recoveryRequired,assessmentComplete:state === 'completed' && !lastError && !pending && !recoveryRequired && lastSuccessfulRefresh !== null}, (key,value) => typeof value === 'string' ? safeText(value) : value,2),'application/json'); log('report'); };
+$('exportLog').onclick = () => { download('elo-activity.txt',events.map(e => e.time+' '+t(e.key)).join('\n'),'text/plain;charset=utf-8'); log('log'); };
+render();
+if (token) { log('connected'); void refresh(); setInterval(() => { void refresh(); },2000); } else fail('auth');
+})();
+</script>
+</body>
+</html>

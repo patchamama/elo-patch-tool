@@ -1,0 +1,173 @@
+# Run with Windows PowerShell 5.1; no external test framework or fixture writes.
+$ErrorActionPreference = 'Stop'
+. "$PSScriptRoot\scan.ps1"
+$script:Passed = 0
+function Assert-Equal($Actual, $Expected, [string]$Label) {
+    if ($Actual -cne $Expected) { throw "$Label : expected [$Expected], got [$Actual]" }
+    $script:Passed++
+}
+foreach ($version in @('17.0.21.1+2', '21.0.13.1+2', '25.0.5.1+2', '27.0.1.1+4')) {
+    $evidence = "openjdk version `"$($version.Split('+')[0])`"`nOpenJDK Runtime Environment Temurin-$version (build $version)"
+    $result = Get-EloJavaClassification -Evidence $evidence
+    Assert-Equal $result.Status 'KnownFixed' "Exact Temurin $version"
+    Assert-Equal $result.Build $version 'Preserve full build'
+}
+foreach ($evidence in @(
+    'OpenJDK Runtime Environment Temurin-17.0.21.1+3 (build 17.0.21.1+3)',
+    'OpenJDK Runtime Environment Temurin-28+1 (build 28+1)',
+    'OpenJDK Runtime Environment OtherVendor (build 17.0.21.1+2)',
+    'Temurin unparseable', '',
+    "Temurin notice`nOtherVendor (build 17.0.21.1+2)",
+    'Temurin-17.0.21.1+20 (build 17.0.21.1+20)',
+    "Temurin (build 17.0.21.1+2)`nOther (build 21.0.13.1+2)"
+)) {
+    Assert-Equal (Get-EloJavaClassification -Evidence $evidence).Status 'Inconclusive' 'Unknown or ambiguous evidence'
+}
+foreach ($version in @('17.0.20+7', '17.0.21+2', '17.0.21.1+1', '21.0.12+7', '25.0.4+5', '27+36', '27.0.1.1+3')) {
+    $classification = Get-EloJavaClassification -Evidence "OpenJDK Runtime Environment Temurin-$version (build $version)"
+    Assert-Equal $classification.Status 'PotentiallyVulnerable' "Earlier stable Temurin $version"
+    Assert-Equal $classification.FullVersion $version 'Full version includes build'
+}
+foreach ($evidence in @(
+    'Temurin (build 17.0.22+1)', 'Temurin (build 21.0.14+1)',
+    'Temurin (build 25.0.6+1)', 'Temurin (build 27.0.2+1)',
+    'Temurin (build 11.0.20+8)', 'Temurin (build 17.0.20-ea+7)',
+    'Temurin (build 17.0.20+7-custom)', 'Temurin (build 017.0.20+7)',
+    'Temurin (build 999999999999999999999.0.1+1)',
+    "Temurin (build 17.0.20+7)`nOpenJDK Runtime Environment Zulu (build 17.0.20+7)",
+    "Temurin (build 17.0.20+7)`nOther VM (build 17.0.21.1+2, mixed mode)",
+    "openjdk version `"21.0.12`"`nTemurin (build 17.0.20+7)",
+    'OpenJDK Runtime Environment Temurin-17.0.21.1+2 (build 17.0.20+7)'
+)) {
+    Assert-Equal (Get-EloJavaClassification -Evidence $evidence).Status 'Inconclusive' 'No unsupported range/vendor/build inference'
+}
+foreach ($case in @(
+    @('Temurin (build 17.0.20+7) OpenJDK 64-Bit Server VM', '64-bit'),
+    @('Temurin (build 17.0.20+7) aarch64 64-Bit Server VM', 'ARM64'),
+    @('Temurin (build 17.0.20+7) amd64', 'x64'),
+    @('Temurin (build 17.0.20+7) i386 32-Bit Client VM', 'x86'),
+    @('Temurin (build 17.0.20+7)', 'Unknown'),
+    @('Temurin (build 17.0.20+7) aarch64 amd64', 'Unknown')
+)) {
+    Assert-Equal (Get-EloJavaClassification -Evidence $case[0]).Architecture $case[1] 'Architecture from evidence only'
+}
+function New-Entry([string]$Path, [bool]$Directory, [bool]$Link = $false) {
+    $attributes = [IO.FileAttributes]::Normal
+    if ($Link) { $attributes = [IO.FileAttributes]::ReparsePoint }
+    [pscustomobject]@{ FullName = $Path; Name = ($Path -split '\\')[-1]; PSIsContainer = $Directory; Attributes = $attributes }
+}
+$tree = @{
+    'Q:\' = @((New-Entry 'Q:\ELO Suite' $true), (New-Entry 'Q:\unrelated' $true))
+    'Q:\ELO Suite' = @((New-Entry 'Q:\ELO Suite\runtime' $true), (New-Entry 'Q:\ELO Suite\link' $true $true))
+    'Q:\ELO Suite\runtime' = @((New-Entry 'Q:\ELO Suite\runtime\java.exe' $false))
+    'M:\Manual Path' = @((New-Entry 'M:\Manual Path\java.exe' $false))
+}
+$children = { param($Path) if ($tree.ContainsKey($Path)) { $tree[$Path] } }
+$scan = Get-EloJavaCandidates -DriveRoots @('Q:\') -ManualPath 'M:\Manual Path' -GetChildren $children -IsReparsePoint { param($Path) $false }
+Assert-Equal $scan.Locations.Count 2 'Automatic and manual paths with spaces'
+Assert-Equal ($scan.Locations -contains 'Q:\ELO Suite\runtime\java.exe') $true 'Preserve path spaces'
+Assert-Equal $scan.Cancelled $false 'Normal scan completes'
+Assert-Equal ($scan.ScannedLocations -contains 'Q:\ELO Suite\runtime') $true 'Coverage includes actual enumerated runtime directory'
+Assert-Equal ($scan.ScannedLocations -contains 'Q:\ELO Suite\link') $false 'Coverage excludes skipped links'
+$manualFirst = Get-EloJavaCandidates -DriveRoots @('Q:\') -ManualPath 'M:\Manual Path' -GetChildren $children -IsReparsePoint { $false } -MaxEntries 1
+Assert-Equal ($manualFirst.Locations -contains 'M:\Manual Path\java.exe') $true 'Automatic enumeration cannot starve manual path'
+Assert-Equal $manualFirst.ScannedLocations[0] 'M:\Manual Path' 'Manual scan first'
+Assert-Equal $manualFirst.VisitedEntries 1 'Manual scan preserves global entry bound'
+Assert-Equal $manualFirst.LimitReached $true 'Budget truncation remains explicit'
+$cancelled = Get-EloJavaCandidates -DriveRoots @('Q:\') -GetChildren { throw 'Must not enumerate' } -ShouldCancel { $true }
+Assert-Equal $cancelled.Cancelled $true 'Immediate cancellation'
+$limited = Get-EloJavaCandidates -DriveRoots @('Q:\') -GetChildren $children -IsReparsePoint { $false } -MaxEntries 1
+Assert-Equal $limited.LimitReached $true 'Entry budget enforced'
+$shallow = Get-EloJavaCandidates -DriveRoots @('Q:\') -GetChildren $children -IsReparsePoint { $false } -MaxDepth 0
+Assert-Equal $shallow.Locations.Count 0 'Depth bounded'
+$denied = Get-EloJavaCandidates -DriveRoots @('Q:\') -GetChildren { throw 'Access denied' }
+Assert-Equal ($denied.Issues.Count -gt 0) $true 'Access errors reported'
+$probe = Invoke-EloJavaVersion -JavaPath 'Z:\missing path\java.exe'
+Assert-Equal $probe.Succeeded $false 'Missing executable handled'
+$probe = Invoke-EloJavaVersion -JavaPath 'Z:\missing path\java.exe' -ShouldCancel { $true }
+Assert-Equal $probe.Cancelled $true 'Probe cancellation before launch'
+$report = Invoke-EloJavaScan -DriveRoots @('Q:\') -GetChildren $children -IsReparsePoint { $false } -ProbeJava {
+    param($Path, $Cancel)
+    [pscustomobject]@{ Succeeded = $true; Cancelled = $false; Evidence = 'Temurin (build 17.0.21.1+2)'; Error = $null; ExitCode = 0 }
+}
+Assert-Equal $report.Results.Count 1 'Probe discovered runtime'
+Assert-Equal $report.Results[0].Location 'Q:\ELO Suite\runtime\java.exe' 'Report location'
+Assert-Equal $report.Results[0].Status 'KnownFixed' 'Report classification'
+Assert-Equal $report.Results[0].Evidence 'Temurin (build 17.0.21.1+2)' 'Report raw evidence'
+Assert-Equal $report.Results[0].RuntimeRoot 'Q:\ELO Suite\runtime' 'Runtime root without bin inferred conservatively'
+Assert-Equal $report.Results[0].FullVersion '17.0.21.1+2' 'Report full build version'
+Assert-Equal $report.Results[0].Architecture 'Unknown' 'No architecture guess from host'
+Assert-Equal $report.Results[0].EloCandidateRoot 'Q:\ELO Suite' 'ELO candidate path retained'
+Assert-Equal ($report.Results[0].EloPathRationale -match 'name heuristic') $true 'ELO association rationale not proof'
+$binTree = @{
+    'M:\Manual Path' = @((New-Entry 'M:\Manual Path\bin' $true))
+    'M:\Manual Path\bin' = @((New-Entry 'M:\Manual Path\bin\java.exe' $false))
+}
+$manualReport = Invoke-EloJavaScan -DriveRoots @() -ManualPath 'M:\Manual Path' -GetChildren { param($Path) $binTree[$Path] } -IsReparsePoint { $false } -ProbeJava {
+    [pscustomobject]@{ Succeeded = $true; Cancelled = $false; Evidence = 'Temurin (build 21.0.12+7) OpenJDK 64-Bit Server VM'; Error = $null; ExitCode = 0 }
+}
+Assert-Equal $manualReport.Results[0].RuntimeRoot 'M:\Manual Path' 'Runtime root from bin/java.exe'
+Assert-Equal $manualReport.Results[0].Architecture '64-bit' 'Reported bitness does not invent ISA'
+Assert-Equal $manualReport.Results[0].Status 'PotentiallyVulnerable' 'Potential vulnerability flows into report'
+Assert-Equal ($manualReport.Results[0].EloPathRationale -match 'explicit manual') $true 'Manual association rationale retained'
+$failed = Invoke-EloJavaScan -DriveRoots @('Q:\') -GetChildren $children -IsReparsePoint { $false } -ProbeJava {
+    param($Path, $Cancel)
+    [pscustomobject]@{ Succeeded = $false; Cancelled = $false; Evidence = 'Temurin (build 17.0.21.1+2)'; Error = 'Failed'; ExitCode = 1 }
+}
+Assert-Equal $failed.Results[0].Status 'Inconclusive' 'Failed probe cannot imply fixed'
+# Alternate roots, duplicate discovery, and link boundaries.
+$programTree = @{
+    'R:\' = @((New-Entry 'R:\Program Files' $true), (New-Entry 'R:\Development' $true))
+    'R:\Program Files' = @((New-Entry 'R:\Program Files\ELO' $true))
+    'R:\Program Files\ELO' = @((New-Entry 'R:\Program Files\ELO\java.exe' $false))
+}
+$programScan = Get-EloJavaCandidates -DriveRoots @('R:\') -ManualPath 'R:\Program Files\ELO' -GetChildren {
+    param($Path)
+    if ($Path -eq 'R:\Development') { throw 'Unrelated directory was traversed' }
+    $programTree[$Path]
+} -IsReparsePoint { $false }
+Assert-Equal $programScan.Locations.Count 1 'Program Files discovery and deduplication'
+Assert-Equal $programScan.Issues.Count 0 'Unrelated directory excluded'
+$linkScan = Get-EloJavaCandidates -DriveRoots @() -ManualPath 'R:\linked ELO' -GetChildren { throw 'Link must not be followed' } -IsReparsePoint { $true }
+Assert-Equal $linkScan.Locations.Count 0 'Manual reparse root excluded'
+Assert-Equal $linkScan.Issues.Count 1 'Reparse exclusion reported'
+$throwing = Invoke-EloJavaScan -DriveRoots @('Q:\') -GetChildren $children -IsReparsePoint { $false } -ProbeJava { throw 'Probe unavailable' }
+Assert-Equal $throwing.Results[0].Status 'Inconclusive' 'Probe exception contained'
+Assert-Equal $throwing.Results[0].Error 'Probe unavailable' 'Probe exception evidence'
+$cancelProbe = Invoke-EloJavaScan -DriveRoots @('Q:\') -GetChildren $children -IsReparsePoint { $false } -ProbeJava {
+    [pscustomobject]@{ Succeeded = $false; Cancelled = $true; Evidence = ''; Error = $null; ExitCode = $null }
+}
+Assert-Equal $cancelProbe.Cancelled $true 'Cancellation propagated from probe'
+# Exercise ProcessStartInfo without launching Java or writing fixtures. The host's
+# -version option lacks its required value and should fail, never classify fixed.
+$hostProbe = Invoke-EloJavaVersion -JavaPath (Join-Path $PSHOME 'powershell.exe') -TimeoutSeconds 5
+Assert-Equal $hostProbe.Succeeded $false 'Real non-Java process rejected'
+Assert-Equal ([string]::IsNullOrEmpty($hostProbe.Error)) $false 'Real process failure explained'
+# Coverage records distinguish successful enumeration, truncation and failure.
+Assert-Equal $manualFirst.CoverageRecords[0].Outcome 'BudgetBounded' 'Partial coverage labelled'
+Assert-Equal $manualFirst.CoverageRecords[0].EntriesSeen 1 'Coverage counts entries'
+Assert-Equal ($manualFirst.ScannedLocations -contains 'Q:\') $false 'Unvisited drive not advertised as scanned'
+Assert-Equal $linkScan.CoverageRecords[0].Outcome 'SkippedReparsePoint' 'Skipped manual root tracked'
+Assert-Equal $linkScan.ScannedLocations.Count 0 'Skipped root not advertised as scanned'
+Assert-Equal $denied.CoverageRecords[0].Outcome 'Error' 'Failed attempt tracked'
+Assert-Equal $shallow.DepthLimitReached $true 'Depth truncation explicit'
+$cancelState = @{ Stop = $false }
+$midCancel = Invoke-EloJavaScan -DriveRoots @() -ManualPath 'M:\Manual Path' -IsReparsePoint { $false } -ShouldCancel { $cancelState.Stop } -GetChildren {
+    New-Entry 'M:\Manual Path\java.exe' $false
+    $cancelState.Stop = $true
+    New-Entry 'M:\Manual Path\second.exe' $false
+} -ProbeJava { throw 'Must not probe after cancellation' }
+Assert-Equal $midCancel.Cancelled $true 'Cancellation during enumeration propagated'
+Assert-Equal $midCancel.Results.Count 0 'No probing after discovery cancellation'
+Assert-Equal $midCancel.Discovery.CoverageRecords[0].Outcome 'Cancelled' 'Partial cancelled enumeration tracked'
+$guarded = Get-EloJavaCandidates -DriveRoots @('Q:\') -IsReparsePoint { $false } -GetChildren {
+    param($Path)
+    if ($Path -eq 'Q:\ELO Suite\link') { throw 'Reparse child followed' }
+    if ($tree.ContainsKey($Path)) { $tree[$Path] }
+}
+Assert-Equal $guarded.Issues.Count 0 'Reparse child never enumerated'
+$parseTokens = $null; $parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'scan.ps1'), [ref]$parseTokens, [ref]$parseErrors)
+Assert-Equal $parseErrors.Count 0 'Module parses with PowerShell 5.1'
+Assert-Equal @($ast.EndBlock.Statements | Where-Object { $_ -isnot [System.Management.Automation.Language.FunctionDefinitionAst] }).Count 0 'Module contains only callable definitions'
+Write-Output "PASS: $script:Passed assertions"

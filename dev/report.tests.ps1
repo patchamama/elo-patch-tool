@@ -1,0 +1,177 @@
+$ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/report.ps1"
+function Assert($Condition, [string]$Message) { if (-not $Condition) { throw "FAIL: $Message" } }
+$resources = {
+    @{ ServerName='TEST-SERVER'; WindowsVersion='10.0'; WindowsBuild='20348'; TotalRamBytes=17179869184;
+       Disks=@(@{Name='C:';TotalBytes=107374182400;FreeBytes=53687091200}) }
+}
+$report = New-EloTechnicalReport -ResourceCollector $resources
+Assert ($report.System.ServerName -eq 'TEST-SERVER') 'injected server'
+Assert ($report.Elo.Status -eq 'Unknown') 'no invented ELO version'
+Assert ($report.Elo.MissingContract -match 'authentication.*version.*response') 'exact missing contract'
+foreach ($language in @('en','de')) {
+    $html = ConvertTo-EloTechnicalReportHtml -Report $report -Language $language
+    foreach ($value in @('TEST-SERVER','10.0','20348','16.00 GiB','100.00 GiB','50.00 GiB','https://linux.oracle.com/cve/CVE-2026-114938.html')) {
+        Assert ($html.Contains($value)) "render $value in $language"
+    }
+    Assert ($html -notmatch 'password|secret-token') 'no credential text'
+}
+Assert ((ConvertTo-EloTechnicalReportHtml $report en) -match 'Not performed') 'English state'
+Assert ((ConvertTo-EloTechnicalReportHtml $report de) -match 'Nicht ausgef') 'German state'
+$actions = @(
+    @{Kind='Update';Status='Proven';Verified=$false;ToVersion='99.0.1'},
+    @{RuntimeIndex=1;Kind='Mitigation';Status='Proven';Verified=$true;EvidenceVerified=$true;EvidenceCode='EffectiveJvmFlagObserved'},
+    @{RuntimeIndex=1;Kind='Backup';Status='Proven';Verified=$true;BackupVersion='17.0.10';BackupVerified=$true;EvidenceVerified=$true;EvidenceCode='BackupManifestMatched'},
+    @{Kind='Restore';Status='Failed';Message='password=secret-token'}
+)
+$known = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='17.0.10';Verified=$true},@{Version='99.0.1';Verified=$false}) -Actions $actions -EloVersionAdapter { @{Verified=$true;Version='23.0.1'} }
+Assert ($known.Elo.Version -eq '23.0.1') 'synthetic trusted ELO version'
+Assert ($known.Actions[0].Status -eq 'Unknown') 'unverified success downgraded'
+Assert ($known.Jvms[1].Version -eq $null) 'unverified JVM omitted'
+Assert ($known.Jvms[0].ExecutionStatus -eq 'Unknown') 'detection does not imply execution'
+$executed = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='21.0.1';Verified=$true;ExecutionVerified=$true})
+Assert ($executed.Jvms[0].ExecutionStatus -eq 'Proven') 'synthetic execution proof'
+Assert ((ConvertTo-EloTechnicalReportHtml $executed en).Contains('Execution evidence: Verified')) 'execution evidence rendered'
+$html = ConvertTo-EloTechnicalReportHtml $known en
+Assert ($html.Contains('-XX:-UseBASE64Intrinsics')) 'verified mitigation'
+Assert ($html.Contains('17.0.10')) 'verified backup version'
+Assert (-not $html.Contains('99.0.1')) 'unproven update absent'
+Assert (-not $html.Contains('secret-token')) 'raw error omitted'
+Assert ($html.Contains('Failed')) 'failed distinct'
+$bad = New-EloTechnicalReport -ResourceCollector { throw 'password=secret-token' } -EloVersionAdapter { throw 'secret-token' }
+Assert ($bad.System.Status -eq 'Failed') 'collector failure'
+Assert ($bad.Elo.Status -eq 'Failed') 'ELO adapter failure'
+Assert (-not (ConvertTo-EloTechnicalReportHtml $bad en).Contains('secret-token')) 'exceptions suppressed'
+$unsafe = New-EloTechnicalReport -ResourceCollector { @{ServerName='<script>secret-token</script>';WindowsVersion='password=secret-token';WindowsBuild='1';TotalRamBytes=-1;Disks=@(@{Name='https://u:secret-token@host/';TotalBytes=1;FreeBytes=2})} } -JvmEvidence @(@{Verified=$true;Version='<img src=x>'}) -EloVersionAdapter { @{Verified=$true;Version='password=secret-token'} }
+$html = ConvertTo-EloTechnicalReportHtml $unsafe en
+Assert ($html -notmatch 'secret-token|<script>|<img') 'unsafe fields rejected'
+Assert ($unsafe.System.Disks.Count -eq 0) 'invalid disk rejected'
+Assert ($unsafe.Elo.Status -eq 'Unknown') 'invalid ELO version rejected'
+Assert ((ConvertTo-EloReportEscapedText ('<>&"' + [char]39)) -eq '&lt;&gt;&amp;&quot;&#39;') 'HTML encoding'
+$proven = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='17.0.9';Verified=$true}) -Actions @(@{RuntimeIndex=1;Kind='Update';Status='Proven';Verified=$true;FromVersion='17.0.9';ToVersion='17.0.10';EvidenceVerified=$true;EvidenceCode='InstalledRuntimeValidated'},@{Kind='Backup';Status='Proven';Verified=$true;BackupVerified=$false;BackupVersion='17.0.9'})
+Assert ($proven.Actions[0].ToVersion -eq '17.0.10') 'verified update shown'
+$backup = @($proven.Actions | Where-Object { $_.Kind -eq 'Backup' })[0]
+Assert ($backup.Status -eq 'Unknown') 'backup requires archive verification'
+Assert ($backup.BackupVersion -eq $null) 'unverified backup version omitted'
+foreach ($status in @('Unknown','Failed','NotPerformed')) {
+    $r = New-EloTechnicalReport -ResourceCollector $resources -Actions @(@{Kind='Update';Status=$status;Verified=$true;ToVersion='99.0.1'})
+    Assert ($r.Actions[0].Status -eq $status) "preserve $status"
+    Assert ($null -eq $r.Actions[0].ToVersion) 'no version for non-success'
+}
+$untrusted = New-EloTechnicalReport -ResourceCollector { $null } -JvmEvidence @(@{Version='21.0.1';Verified='true'}) -Actions @(@{Kind='Mitigation';Status='Proven';Verified='true'}) -EloVersionAdapter { @{Version='23.0.1';Verified='true'} }
+Assert ($untrusted.System.Status -eq 'Unknown') 'absent resources unknown'
+Assert ($untrusted.Jvms[0].Status -eq 'Unknown') 'string is not JVM proof'
+Assert ($untrusted.Elo.Status -eq 'Unknown') 'string is not ELO proof'
+Assert (-not (ConvertTo-EloTechnicalReportHtml $untrusted de).Contains('-XX:-UseBASE64Intrinsics')) 'string is not mitigation proof'
+$known.System.ServerName='<svg onload=alert(1)>'
+$known.Elo.Version='<img src=x>'
+$known.Actions[0].ToVersion='password=secret-token'
+$html=ConvertTo-EloTechnicalReportHtml $known en
+Assert ($html -notmatch '<svg|<img|secret-token') 'renderer normalizes forged DTO'
+Assert (($unsafe | ConvertTo-Json -Depth 10) -notmatch 'secret-token') 'DTO excludes secrets as well as HTML'
+Assert ((ConvertTo-EloTechnicalReportHtml $report de).Contains('Authentifizierungsmethode')) 'German missing contract'
+Assert ((ConvertTo-EloTechnicalReportHtml $proven en).Contains('17.0.9')) 'old version retained for verified update'
+$detailed = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(
+    @{Version='17.0.10';Verified=$true;Classification='PotentiallyVulnerable';ClassificationVerified=$true;EvidenceCode='AdvisoryRangeMatch'},
+    @{Version='21.0.1';Verified=$true;Classification='NotAffected';ClassificationVerified=$false;EvidenceCode='AdvisoryExcludesVersion'}
+) -Actions @(
+    @{RuntimeIndex=1;Kind='Mitigation';Status='Proven';Verified=$true;EvidenceVerified=$true;EvidenceCode='EffectiveJvmFlagObserved'},
+    @{RuntimeIndex=1;Kind='Update';Status='Failed';EvidenceVerified=$true;EvidenceCode='DownloadFailed'},
+    @{RuntimeIndex=1;Kind='Backup';Status='Proven';Verified=$true;BackupVerified=$true;BackupVersion='17.0.10';EvidenceVerified=$true;EvidenceCode='BackupManifestMatched'},
+    @{RuntimeIndex=1;Kind='Restore';Status='Proven';Verified=$true;ToVersion='17.0.10';EvidenceVerified=$true;EvidenceCode='OriginalRuntimeRestored'}
+)
+Assert ($detailed.Jvms[0].Classification -eq 'PotentiallyVulnerable') 'bounded classification retained'
+Assert ($detailed.Jvms[1].Classification -eq 'Unknown') 'classification requires proof'
+Assert ($detailed.Actions[0].RuntimeIndex -eq 1) 'action associated with JVM'
+foreach ($lang in @('en','de')) {
+    $h=ConvertTo-EloTechnicalReportHtml $detailed $lang
+    foreach ($uri in @('https://openjdk.org/groups/vulnerability/advisories/2026-11-17','https://linux.oracle.com/cve/CVE-2026-114938.html','https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/')) { Assert ($h.Contains($uri)) 'exact advisory source' }
+    Assert ($h.Contains('2026-11-23') -and $h.Contains('403')) 'verification date and source limits'
+    Assert ($h.Contains('JVM #1')) 'JVM association rendered'
+    Assert ($h.Contains('-XX:-UseBASE64Intrinsics')) 'verified effective flag'
+    if ($lang -eq 'en') {
+        foreach ($text in @('Potentially vulnerable','Matched advisory affected-version range','Download failed','Backup contents matched original manifest','Original runtime restored and verified','Advisories may change')) { Assert ($h.Contains($text)) "English evidence: $text" }
+    } else {
+        foreach ($text in @('Potenziell verwundbar','Betroffene Versionsspanne','Download fehlgeschlagen','Sicherungsinhalt','Urspruengliche Runtime','Hinweise koennen sich aendern')) { Assert ($h.Contains($text)) "German evidence: $text" }
+    }
+}
+$rejected = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='17.0.10';Verified=$true;Classification='<script>password=secret-token</script>';ClassificationVerified=$true;EvidenceCode='https://u:secret-token@host/'}) -Actions @(
+    @{RuntimeIndex=99;Kind='Mitigation';Status='Proven';Verified=$true;EvidenceVerified=$true;EvidenceCode='EffectiveJvmFlagObserved'},
+    @{RuntimeIndex=1;Kind='Restore';Status='Failed';EvidenceVerified=$true;EvidenceCode='<img src=x>secret-token';Message='password=secret-token'}
+)
+Assert ($rejected.Jvms[0].Classification -eq 'Unknown') 'unknown classification rejected'
+Assert ($rejected.Actions[1].Status -eq 'Unknown') 'unassociated mitigation not proven'
+Assert (($rejected | ConvertTo-Json -Depth 10) -notmatch 'secret-token|<script>|<img') 'evidence DTO privacy'
+Assert ((ConvertTo-EloTechnicalReportHtml $rejected en) -notmatch 'secret-token|<script>|<img') 'evidence HTML privacy'
+$missingProof = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='17.0.10';Verified=$true}) -Actions @(@{RuntimeIndex=1;Kind='Mitigation';Status='Proven';Verified=$true;EvidenceCode='EffectiveJvmFlagObserved';EvidenceVerified='true'})
+Assert ($missingProof.Actions[1].Status -eq 'Unknown') 'explicit mitigation evidence requires boolean proof'
+$alternates = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(
+    @{Version='21.0.1';Verified=$true;Classification='NotAffected';ClassificationVerified=$true;EvidenceCode='AdvisoryExcludesVersion'},
+    @{Version='25.0.1';Verified=$true;Classification='Fixed';ClassificationVerified=$true;EvidenceCode='AdvisoryFixedVersion'},
+    @{Version='25.0.1';Verified=$true;Classification='Fixed';ClassificationVerified=$true;EvidenceCode='AdvisoryRangeMatch'}
+) -Actions @(
+    @{RuntimeIndex=2;Kind='Update';Status='Proven';Verified=$true;EvidenceVerified=$true;EvidenceCode='InstalledRuntimeValidated';FromVersion='25.0.0';ToVersion='25.0.1'},
+    @{RuntimeIndex=1;Kind='Restore';Status='Failed';EvidenceVerified=$true;EvidenceCode='RestoreFailed'},
+    @{RuntimeIndex=3;Kind='Update';Status='Failed';EvidenceVerified=$true;EvidenceCode='ValidationFailed';ToVersion='99.0.1'},
+    @{RuntimeIndex=1;Kind='Backup';Status='Proven';Verified=$true;BackupVerified=$true;EvidenceVerified=$true;EvidenceCode='EffectiveJvmFlagObserved'}
+)
+Assert ($alternates.Jvms[0].Classification -eq 'NotAffected') 'verified exclusion'
+Assert ($alternates.Jvms[1].Classification -eq 'Fixed') 'verified fixed classification'
+Assert ($alternates.Jvms[2].Classification -eq 'Unknown') 'mismatched classification evidence rejected'
+$h=ConvertTo-EloTechnicalReportHtml $alternates en
+foreach ($text in @('Runtime association: JVM #2','Installed runtime manifest and version probe verified','Restoration failed; manual recovery required','Postcondition validation failed')) { Assert ($h.Contains($text)) "alternate evidence: $text" }
+Assert (-not $h.Contains('99.0.1')) 'failed validation not reported as installed version'
+$backup = @($alternates.Actions | Where-Object { $_.Kind -eq 'Backup' })[0]
+Assert ($backup.Status -eq 'Unknown' -and $backup.EvidenceCode -eq 'Unknown') 'kind-mismatched proof rejected'
+Assert ($h -notmatch 'https://www.oracle.com/security-alerts/|https://help.elo.com/') 'generic sources replaced'
+foreach ($scopeCode in @('MachineOptionSet','NewlyLaunchedJvmFlagVerified','RunningEloJvmFlagVerified')) {
+    $scoped = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='17.0.10';Verified=$true;Vendor='Temurin';VendorVerified=$true}) -Actions @(@{RuntimeIndex=1;Kind='Mitigation';Status='Proven';Verified=$true;EvidenceVerified=$true;EvidenceCode=$scopeCode})
+    $a=@($scoped.Actions | Where-Object { $_.Kind -eq 'Mitigation' })[0]
+    Assert ($a.Status -eq 'Proven') "scoped mitigation $scopeCode"
+    foreach ($lang in @('en','de')) {
+        $h=ConvertTo-EloTechnicalReportHtml $scoped $lang
+        Assert ($h.Contains('https://adoptium.net/temurin/releases') -and $h.Contains('https://adoptium.net/installation/')) 'verified provider links'
+        if ($lang -eq 'en') {
+            Assert ($h.Contains('not a permanent fix') -and $h.Contains('after ELO compatibility confirmation')) 'temporary and compatibility advice'
+            Assert ($h.Contains('does not install a Java runtime')) 'flag-only method identified'
+            if ($scopeCode -ne 'RunningEloJvmFlagVerified') { Assert ($h.Contains('Current running ELO process flag: Unknown / unavailable')) 'no running ELO proof inferred' }
+            if ($scopeCode -eq 'MachineOptionSet') {
+                Assert ($h.Contains('Machine option set: Verified')) 'machine setting proof'
+                Assert ($h.Contains('Newly launched JVM flag: Unknown / unavailable')) 'machine setting does not prove launch'
+            }
+            if ($scopeCode -eq 'NewlyLaunchedJvmFlagVerified') { Assert ($h.Contains('Newly launched JVM flag: Verified')) 'launch proof' }
+            if ($scopeCode -eq 'RunningEloJvmFlagVerified') { Assert ($h.Contains('Current running ELO process flag: Verified')) 'explicit ELO proof' }
+        } else {
+            Assert ($h.Contains('keine dauerhafte Behebung') -and $h.Contains('nach ELO-Kompatibilitaetsbestaetigung')) 'German advice'
+            Assert ($h.Contains('installiert keine Java-Runtime')) 'German flag-only method'
+            if ($scopeCode -ne 'RunningEloJvmFlagVerified') { Assert ($h.Contains('Flag des aktuell laufenden ELO-Prozesses: Unbekannt / nicht verfuegbar')) 'German unknown ELO scope' }
+        }
+    }
+    Assert ($scoped.Jvms[0].Classification -eq 'Unknown') 'mitigation does not classify as fixed'
+    Assert ($scoped.Actions[0].Status -eq 'NotPerformed') 'mitigation does not invent update'
+}
+foreach ($vendor in @('Unknown','Oracle','Temurin','<img>password=secret-token')) {
+    $unknownVendor = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='17.0.10';Verified=$true;Vendor=$vendor;VendorVerified=$false}) -Actions @(@{RuntimeIndex=1;Kind='Mitigation';Status='Proven';Verified=$true;EvidenceCode='MachineOptionSet';EvidenceVerified='true'})
+    foreach ($lang in @('en','de')) {
+        $h=ConvertTo-EloTechnicalReportHtml $unknownVendor $lang
+        Assert ($h -notmatch 'https://adoptium.net/temurin/releases|https://adoptium.net/installation/|secret-token|<img>') 'unknown vendor no provider replacement or injection'
+        if ($lang -eq 'en') { Assert ($h.Contains('JVM vendor unknown; consult your JVM vendor and ELO')) 'unknown provider guidance' }
+        else { Assert ($h.Contains('JVM-Anbieter unbekannt; JVM-Anbieter und ELO konsultieren')) 'German unknown provider guidance' }
+        Assert ($h -notmatch 'Machine option set: Verified|Maschinenoption gesetzt: Nachgewiesen') 'nonboolean scoped proof rejected'
+    }
+}
+$otherVendor = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='17.0.10';Verified=$true;Vendor='Oracle';VendorVerified=$true})
+Assert ($otherVendor.Jvms[0].Vendor -eq 'Unknown') 'unsupported vendor stays unknown even if asserted'
+Assert ((ConvertTo-EloTechnicalReportHtml $otherVendor en) -notmatch 'https://adoptium.net/temurin/releases|https://adoptium.net/installation/') 'no provider substitution'
+foreach ($state in @('Failed','Unknown','NotPerformed')) {
+    $notMitigated = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='17.0.10';Verified=$true}) -Actions @(@{RuntimeIndex=1;Kind='Mitigation';Status=$state;Verified=$true;EvidenceVerified=$true;EvidenceCode='RunningEloJvmFlagVerified';ToVersion='99.0.1'})
+    $h=ConvertTo-EloTechnicalReportHtml $notMitigated en
+    Assert ($h.Contains('Current running ELO process flag: Unknown / unavailable')) 'non-success never proves running ELO scope'
+    Assert ($h -notmatch '99.0.1|-XX:-UseBASE64Intrinsics') 'non-success omits version and applied flag'
+}
+$legacy = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='17.0.10';Verified=$true}) -Actions @(@{RuntimeIndex=1;Kind='Mitigation';Status='Proven';Verified=$true;EvidenceVerified=$true;EvidenceCode='EffectiveJvmFlagObserved'})
+$h=ConvertTo-EloTechnicalReportHtml $legacy en
+Assert ($h.Contains('scope unspecified, current ELO process not verified')) 'legacy evidence not upgraded to ELO proof'
+Assert ($h.Contains('Current running ELO process flag: Unknown / unavailable')) 'legacy current process unknown'
+Assert ((ConvertTo-EloTechnicalReportHtml $report en).Contains('JVM vendor unknown; consult your JVM vendor and ELO')) 'empty scan does not assume vendor'
+Write-Output 'PASS: deterministic bilingual report tests (synthetic adapters only)'
