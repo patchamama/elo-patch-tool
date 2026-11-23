@@ -16,6 +16,17 @@ foreach ($m in [regex]::Matches($source, '(?ms)^::ELO_PATCH_BEGIN:([A-Z_]+)\r?\n
     Assert (-not $blocks.ContainsKey($m.Groups[1].Value)) 'unique packaged resource'
     $blocks[$m.Groups[1].Value] = $m.Groups[2].Value.TrimEnd("`r", "`n")
 }
+# Exercise the packaged scanner independently of the development source.
+. ([scriptblock]::Create($blocks.SCAN_PS))
+$rootFixture=Get-EloJavaCandidates -DriveRoots @('C:\','D:\') -ManualPath 'C:\manual' -MaxEntries 1 -IsReparsePoint { $false } -GetChildren {
+    param($Path)
+    if ($Path -in @('C:\java\bin\java.exe','D:\ELO\java\bin\java.exe')) {
+        [pscustomobject]@{Name='java.exe';FullName=$Path;PSIsContainer=$false;Attributes=0}
+    } elseif ($Path -ceq 'C:\manual') {
+        [pscustomobject]@{Name='java.exe';FullName='C:\manual\java.exe';PSIsContainer=$false;Attributes=0}
+    } else { @() }
+}
+Assert ($rootFixture.Locations.Count -eq 3 -and $rootFixture.Locations[0] -ceq 'C:\java\bin\java.exe' -and $rootFixture.Locations[1] -ceq 'D:\ELO\java\bin\java.exe') 'exact root layouts precede bounded manual fallback across drives'
 $resources = @{ SCAN_PS='scan.ps1'; SERVER_PS='server.ps1'; CLI_PS='cli.ps1'; UI_HTML='ui.html'; REPORT_PS='report.ps1' }
 foreach ($name in $resources.Keys) {
     Assert ($blocks.ContainsKey($name)) "embedded $name"
@@ -52,6 +63,23 @@ $scanFixture=Invoke-EloJavaScan -DriveRoots @() -ManualPath 'C:\fixture space' -
     [pscustomobject]@{Succeeded=$true;Cancelled=$false;Evidence='Temurin Runtime Environment (build 17.0.20+1)';Error=$null;ExitCode=0}
 }
 Assert ($scanFixture.Results.Count -eq 1 -and $scanFixture.Results[0].Status -ceq 'PotentiallyVulnerable') 'scanner joins literal discovery and classification using mock probe'
+$zuluScan=Invoke-EloJavaScan -DriveRoots @() -ManualPath 'C:\fixture' -IsReparsePoint { $false } -GetChildren {
+    [pscustomobject]@{Name='java.exe';FullName='C:\fixture\java.exe';PSIsContainer=$false;Attributes=0}
+} -ProbeJava {
+    [pscustomobject]@{Succeeded=$true;Cancelled=$false;Evidence='OpenJDK Runtime Environment Zulu21.30+15-CA (build 21.0.1+12-LTS)';Error=$null;ExitCode=0}
+}
+Assert ($zuluScan.Results[0].Vendor -ceq 'Azul Zulu' -and $zuluScan.Results[0].Status -ceq 'Inconclusive') 'packaged scanner identifies Zulu without advisory classification'
+$cliZulu=Invoke-EloCli -Arguments @('--cli','--scan','--json') -Scanner { param($ManualPath) $zuluScan }
+$cliZuluJson=ConvertFrom-Json $cliZulu.Output
+Assert ($cliZulu.ExitCode -eq 0 -and $cliZuluJson.scan.Results[0].Vendor -ceq 'Azul Zulu' -and $cliZuluJson.scan.Results[0].Status -ceq 'Inconclusive') 'CLI JSON preserves Zulu and inconclusive result'
+$zuluSession=New-EloServerSession -Port 49151 -UiHtml 'fixture' -ScanSource 'fixture'
+$zuluSession.Adapters.Resources={ @{ServerName='TEST';WindowsVersion='10.0';WindowsBuild='20348';TotalRamBytes=8GB;Disks=@(@{Name='C:';TotalBytes=100GB;FreeBytes=40GB})} }
+ConvertTo-EloUiResults $zuluSession $zuluScan
+Assert ($zuluSession.Results[0].vendor -ceq 'Azul Zulu' -and $zuluSession.Results[0].status -ceq 'inconclusive') 'web results preserve Zulu and inconclusive status'
+foreach ($lang in @('en','de')) {
+    $zuluHtml=Get-EloSessionReportHtml $zuluSession $lang
+    Assert ($zuluHtml.Contains('Azul Zulu') -and $zuluHtml.Contains('21.0.1+12-LTS') -and -not $zuluHtml.Contains('https://adoptium.net/installation/')) 'technical report preserves Zulu without Temurin replacement guidance'
+}
 $fixtureRoot = Join-Path $PSScriptRoot 'integration-fixtures'
 $run = Join-Path $fixtureRoot ([guid]::NewGuid().ToString('N'))
 $oldTemp=$env:TEMP; $oldTmp=$env:TMP
@@ -85,6 +113,7 @@ try {
     }
     $help=Invoke-Bat $copy '--help'
     Assert ($help.Code -eq 0 -and $help.Out -match 'built-in README') 'standalone BAT --help'
+    Assert ($help.Out.Contains('ready fixed or removable drives C: through Z:') -and $help.Out.Contains('\java\bin\java.exe') -and $help.Out.Contains('\ELO\java\bin\java.exe') -and $help.Out.Contains('after root checks')) 'packaged help describes exact discovery and manual order'
     Assert ($help.Out -match 'Technical HTML report' -and $help.Out -match 'ELO version remains unknown') 'single-file help explains technical report and API boundary'
     Assert ($help.Out -notmatch '#token=' -and $help.Err -notmatch '#token=') 'no launch token in console'
     Assert-Clean
@@ -332,6 +361,8 @@ try {
         Assert ($failure.Body.error -ceq 'browser_launch_failed' -and -not (($failure.Body | ConvertTo-Json).Contains($session.Token))) 'browser exception URI is redacted to stable error'
     }
     $html=$blocks.UI_HTML
+    Assert ($html.Contains('ready fixed or removable drives C: through Z:') -and $html.Contains('bereiten festen oder Wechsellaufwerken C: bis Z:') -and $html.Contains('X:\\java\\bin\\java.exe') -and $html.Contains('X:\\ELO\\java\\bin\\java.exe')) 'packaged bilingual UI describes exact drive layouts'
+    Assert ($html.Contains('POST scan -> {} checks ready fixed or removable drives C: through Z:') -and $html.Contains('after the root checks')) 'packaged UI contract describes root checks and manual order'
     Assert ($html -match "X-Session-Token" -and $html -match 'history.replaceState' -and $html -match "api\('preview',\{actionId,resultId:row.id\}\)") 'UI uses existing auth and preview request contract'
     # Test extractor failure paths through the real BAT, not a parallel parser.
     foreach ($case in @('duplicate','nested','missing','malformed','unmatched')) {

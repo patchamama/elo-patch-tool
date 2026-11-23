@@ -13,9 +13,18 @@ function Get-EloJavaClassification {
     $build = $null
     $status = 'Inconclusive'
     $reason = 'Vendor/build evidence is unknown or outside the supported comparison rules; exploitability is not determined.'
-    $conflictingVendor = $Evidence -match '(?i)\b(Oracle|Zulu|Corretto|Microsoft|GraalVM|Semeru|OpenJ9|Liberica|SapMachine|Dragonwell)\b'
-    $foreignRuntime = @($Evidence -split '\r?\n' | Where-Object { $_ -match '(?i)Runtime Environment' -and $_ -notmatch '(?i)\bTemurin\b' }).Count -gt 0
+    $zuluToken = '(?i)\bZulu(?=[0-9]|\b)'
+    $otherVendor = '(?i)\b(Oracle|Corretto|Microsoft|GraalVM|Semeru|OpenJ9|Liberica|SapMachine|Dragonwell)\b'
+    $conflictingVendor = $Evidence -match $otherVendor -or $Evidence -match $zuluToken
+    $runtimeLines = @($Evidence -split '\r?\n' | Where-Object { $_ -match '(?i)Runtime Environment' })
+    $foreignRuntime = @($runtimeLines | Where-Object { $_ -notmatch '(?i)\bTemurin\b' }).Count -gt 0
     if ($conflictingVendor -or $foreignRuntime) { $vendor = 'Unknown' }
+    # Zulu's product version can immediately follow its name (e.g. Zulu21).
+    # Identify the runtime, but never apply Temurin's advisory to it.
+    $zuluRuntime = '(?i)\bRuntime Environment\s+(?:Azul\s+)?Zulu(?=[0-9]|\b)'
+    if ($runtimeLines.Count -gt 0 -and @($runtimeLines | Where-Object { $_ -notmatch $zuluRuntime }).Count -eq 0 -and $Evidence -notmatch '(?i)\bTemurin\b' -and $Evidence -notmatch $otherVendor) {
+        $vendor = 'Azul Zulu'
+    }
     # Stable canonical versions only, with bounded numeric components. No EA,
     # custom suffixes, leading zero aliases, or overflow-prone numeric parsing.
     $number = '(?:0|[1-9][0-9]{0,8})'
@@ -143,8 +152,9 @@ function Get-EloJavaCandidates {
     $attempts = New-Object 'System.Collections.Generic.List[object]'
     $queue = New-Object 'System.Collections.Generic.Queue[object]'
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $seenLocations = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     $state = @{ Cancelled = $false; LimitReached = $false; DepthLimitReached = $false; VisitedEntries = 0 }
-    # One global entry budget. Manual scanning runs BEFORE automatic root discovery.
+    # The entry budget applies only to optional manual directory traversal.
     $readChildren = {
         param($Path)
         if (& $ShouldCancel) { $state.Cancelled = $true; return }
@@ -183,7 +193,7 @@ function Get-EloJavaCandidates {
                         $queue.Enqueue([pscustomobject]@{ Path = $entry.FullName; Depth = $item.Depth + 1; EloRoot = $item.EloRoot; Rationale = $item.Rationale })
                     } else { $state.DepthLimitReached = $true }
                 } elseif ($entry.Name -ieq 'java.exe') {
-                    if (-not $locations.Contains($entry.FullName)) {
+                    if ($seenLocations.Add($entry.FullName)) {
                         $locations.Add($entry.FullName)
                         $candidates.Add([pscustomobject]@{ Location = $entry.FullName; EloCandidateRoot = $item.EloRoot; EloPathRationale = $item.Rationale })
                     }
@@ -192,36 +202,66 @@ function Get-EloJavaCandidates {
         }
     }
     if (& $ShouldCancel) { $state.Cancelled = $true }
-    if (-not $state.Cancelled -and $ManualPath) {
-        $queue.Enqueue([pscustomobject]@{ Path = $ManualPath; Depth = 0; EloRoot = $ManualPath; Rationale = 'User-selected explicit manual directory; ELO ownership is not verified.' })
-        & $drainQueue
-    }
-    if (-not $state.Cancelled -and -not $state.LimitReached) {
+    if (-not $state.Cancelled) {
         if (-not $PSBoundParameters.ContainsKey('DriveRoots')) {
-            $DriveRoots = @(Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Root })
+            $DriveRoots = @(67..90 | ForEach-Object { '{0}:\' -f [char]$_ })
         }
         foreach ($root in $DriveRoots) {
-            if ($state.Cancelled -or $state.LimitReached) { break }
-            foreach ($entry in @(& $readChildren $root)) {
-                if (-not $entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
-                if ($entry.Name -match '^(?i:ELO)') {
-                    $queue.Enqueue([pscustomobject]@{ Path = $entry.FullName; Depth = 0; EloRoot = $entry.FullName; Rationale = "ELO-prefix directory name heuristic under drive root $root; ELO ownership is not verified." })
-                } elseif ($entry.Name -in @('Program Files', 'Program Files (x86)', 'ProgramData')) {
-                    foreach ($child in @(& $readChildren $entry.FullName)) {
-                        if ($child.PSIsContainer -and $child.Name -match '^(?i:ELO)' -and -not ($child.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-                            $queue.Enqueue([pscustomobject]@{ Path = $child.FullName; Depth = 0; EloRoot = $child.FullName; Rationale = "ELO-prefix directory name heuristic under $($entry.FullName); ELO ownership is not verified." })
+            if ($root -notmatch '^[C-Z]:\\$') { continue }
+            foreach ($relative in @('java\bin\java.exe', 'ELO\java\bin\java.exe')) {
+                if (& $ShouldCancel) { $state.Cancelled = $true; break }
+                $path = $root + $relative
+                $attempt = [pscustomobject]@{ Location = $path; Outcome = 'Inspecting'; EntriesSeen = 0 }
+                $attempts.Add($attempt)
+                try {
+                    $parts = $relative -split '\\'
+                    $ancestor = $root
+                    $skip = $false
+                    if (& $IsReparsePoint $ancestor) {
+                        $issues.Add("Skipped reparse point: $ancestor")
+                        $attempt.Outcome = 'SkippedReparsePoint'; $skip = $true
+                    }
+                    foreach ($part in $parts) {
+                        if ($skip) { break }
+                        if (& $ShouldCancel) { $state.Cancelled = $true; $skip = $true; $attempt.Outcome = 'Cancelled'; break }
+                        $ancestor += $part
+                        if (& $IsReparsePoint $ancestor) {
+                            $issues.Add("Skipped reparse point: $ancestor")
+                            $attempt.Outcome = 'SkippedReparsePoint'; $skip = $true; break
                         }
+                        $ancestor += '\'
+                    }
+                    if ($skip) { continue }
+                    foreach ($entry in @(& $GetChildren $path)) {
+                        if (& $ShouldCancel) { $state.Cancelled = $true; $attempt.Outcome = 'Cancelled'; break }
+                        if (-not $entry.PSIsContainer -and $entry.FullName -ieq $path -and -not ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $seenLocations.Add($entry.FullName)) {
+                            $locations.Add($entry.FullName)
+                            $candidates.Add([pscustomobject]@{ Location = $entry.FullName; EloCandidateRoot = $root; EloPathRationale = 'Exact drive-root Java layout; ELO ownership is not verified.' })
+                            $attempt.EntriesSeen++
+                        }
+                    }
+                    if (-not $state.Cancelled) { $attempt.Outcome = 'Checked'; $scanned.Add($path) }
+                } catch {
+                    if ($_.Exception -is [System.Management.Automation.ItemNotFoundException] -or $_.Exception -is [System.IO.DriveNotFoundException] -or $_.Exception.InnerException -is [System.Management.Automation.ItemNotFoundException] -or $_.Exception.InnerException -is [System.IO.DriveNotFoundException] -or $_.FullyQualifiedErrorId -match '^(PathNotFound|DriveNotFound),') {
+                        $attempt.Outcome = 'NotFound'
+                    } else {
+                        $attempt.Outcome = 'Error'
+                        $issues.Add("Cannot inspect ${path}: $($_.Exception.Message)")
                     }
                 }
             }
+            if ($state.Cancelled) { break }
         }
+    }
+    if (-not $state.Cancelled -and $ManualPath) {
+        $queue.Enqueue([pscustomobject]@{ Path = $ManualPath; Depth = 0; EloRoot = $ManualPath; Rationale = 'User-selected explicit manual directory; ELO ownership is not verified.' })
         & $drainQueue
     }
     [pscustomobject]@{
         Locations = $locations.ToArray(); Candidates = $candidates.ToArray(); Issues = $issues.ToArray(); Cancelled = $state.Cancelled
         LimitReached = $state.LimitReached; DepthLimitReached = $state.DepthLimitReached; VisitedEntries = $state.VisitedEntries
         ScannedLocations = $scanned.ToArray(); CoverageRecords = $attempts.ToArray()
-        Coverage = "Manual directory first, then bounded ELO-prefix roots on available drives; depth $MaxDepth, global entry budget $MaxEntries. ScannedLocations lists enumerated directories (possibly partial); CoverageRecords lists attempts and outcomes. Not exhaustive; absence of results is not proof of absence."
+        Coverage = "Exact drive-root Java executables first, then optional manual directory traversal; manual depth $MaxDepth and entry budget $MaxEntries. ScannedLocations lists checked paths and enumerated directories (possibly partial); CoverageRecords lists attempts and outcomes. Absence of results is not proof of absence."
     }
 }
 

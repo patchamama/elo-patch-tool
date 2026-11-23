@@ -43,6 +43,7 @@ function New-EloServerSession {
             Fingerprint={ param($Path) Get-EloJavaFingerprint $Path }
             Verify={ param($Path,$Options) Invoke-EloFlagProbe $Path $Options }
             Clock={ [DateTime]::UtcNow }; Resources={ Get-EloReportWindowsResources }
+            ReportOptions={ @{Machine=[Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS','Machine');User=[Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS','User');Process=[Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS','Process')} }
         }
     }
 }
@@ -136,7 +137,7 @@ function ConvertTo-EloUiResults {
     foreach ($item in $Scan.Results) {
         $id = New-EloSecret
         $status = 'inconclusive'
-        if ($item.Status -ceq 'PotentiallyVulnerable') { $status='vulnerable' }
+        if ($item.Status -ceq 'PotentiallyVulnerable' -and $item.Vendor -ceq 'Temurin') { $status='vulnerable' }
         # Narrow exact-build allowlist from parent-verified Temurin evidence.
         # No extrapolation to later versions, other vendors or ELO compatibility.
         $fixed=@('17.0.21.1+2','21.0.13.1+2','25.0.5.1+2','27.0.1.1+4')
@@ -178,7 +179,7 @@ function ConvertTo-EloUiResults {
             if ($row.status -ceq 'patched') { $classification='Fixed'; $code='AdvisoryFixedVersion' }
         }
         $Session.ReportJvms+=@{Version=$evidence.FullVersion;Verified=$observed;ExecutionVerified=$observed
-            Vendor=$evidence.Vendor;VendorVerified=($observed -and $evidence.Vendor -ceq 'Temurin')
+            Vendor=$evidence.Vendor;VendorVerified=($observed -and @('Temurin','Azul Zulu') -ccontains $evidence.Vendor)
             Classification=$classification;ClassificationVerified=($classification -ne 'Unknown');EvidenceCode=$code}
         $Session.ReportIndexes[$row.id]=$Session.ReportJvms.Count
     }
@@ -393,7 +394,7 @@ function Invoke-EloMitigation {
 }
 function Get-EloSessionReportHtml {
     param($Session,[ValidateSet('en','de')][string]$Language)
-    $report=New-EloTechnicalReport -ResourceCollector $Session.Adapters.Resources -JvmEvidence $Session.ReportJvms -Actions $Session.ReportActions
+    $report=New-EloTechnicalReport -ResourceCollector $Session.Adapters.Resources -OptionsCollector $Session.Adapters.ReportOptions -JvmEvidence $Session.ReportJvms -Actions $Session.ReportActions
     $html=ConvertTo-EloTechnicalReportHtml $report -Language $Language
     $states=@{idle='Ready';scanning='Scanning';cancelling='Cancelling';completed='Completed';cancelled='Cancelled';error='Failed'}
     $notice='Session scan state: '; $scope='Session observations (including earlier scans); only a completed scan is a complete snapshot. Automatic runtime update is disabled. ELO API support and running ELO process mitigation are not verified.'

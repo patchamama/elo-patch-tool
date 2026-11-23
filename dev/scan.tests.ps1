@@ -6,6 +6,25 @@ function Assert-Equal($Actual, $Expected, [string]$Label) {
     if ($Actual -cne $Expected) { throw "$Label : expected [$Expected], got [$Actual]" }
     $script:Passed++
 }
+$zulu = Get-EloJavaClassification -Evidence 'OpenJDK Runtime Environment Zulu21.30+15-CA (build 21.0.1+12-LTS)'
+Assert-Equal $zulu.Vendor 'Azul Zulu' 'Recognize Zulu runtime identity'
+Assert-Equal $zulu.Status 'Inconclusive' 'Zulu is not classified by Temurin advisory'
+Assert-Equal $zulu.Build '21.0.1+12-LTS' 'Zulu build preserved'
+foreach ($build in @('21.0.13.1+2', '21.0.12+7')) {
+    $result = Get-EloJavaClassification -Evidence "OpenJDK Runtime Environment Zulu21.30+15-CA (build $build)"
+    Assert-Equal $result.Vendor 'Azul Zulu' 'Zulu identity independent of build'
+    Assert-Equal $result.Status 'Inconclusive' 'Temurin milestones do not apply to Zulu'
+}
+foreach ($evidence in @(
+    "OpenJDK Runtime Environment Zulu21.30+15-CA (build 21.0.1+12-LTS)`nTemurin (build 21.0.1+12-LTS)",
+    "OpenJDK Runtime Environment Temurin-21.0.13.1+2 (build 21.0.13.1+2)`nZulu21.30 notice",
+    "OpenJDK Runtime Environment Zulu21.30+15-CA (build 21.0.1+12-LTS)`nOpenJDK Runtime Environment OtherVendor (build 21.0.1+12-LTS)",
+    'OpenJDK Runtime Environment NotZulu21.30 (build 21.0.1+12-LTS)',
+    'Zulu notice without runtime identification',
+    "OpenJDK Runtime Environment Zulu21.30+15-CA (build 21.0.1+12-LTS)`nOracle VM (build 21.0.1+12-LTS)"
+)) {
+    Assert-Equal (Get-EloJavaClassification -Evidence $evidence).Vendor 'Unknown' 'Ambiguous vendor remains unknown'
+}
 foreach ($version in @('17.0.21.1+2', '21.0.13.1+2', '25.0.5.1+2', '27.0.1.1+4')) {
     $evidence = "openjdk version `"$($version.Split('+')[0])`"`nOpenJDK Runtime Environment Temurin-$version (build $version)"
     $result = Get-EloJavaClassification -Evidence $evidence
@@ -56,32 +75,60 @@ function New-Entry([string]$Path, [bool]$Directory, [bool]$Link = $false) {
     if ($Link) { $attributes = [IO.FileAttributes]::ReparsePoint }
     [pscustomobject]@{ FullName = $Path; Name = ($Path -split '\\')[-1]; PSIsContainer = $Directory; Attributes = $attributes }
 }
+# Automatic discovery must inspect only the two specified root layouts.
+$exactTree = @{
+    'Q:\java\bin\java.exe' = @((New-Entry 'Q:\java\bin\java.exe' $false))
+    'Q:\ELO\java\bin\java.exe' = @((New-Entry 'Q:\ELO\java\bin\java.exe' $false))
+}
+$exactScan = Get-EloJavaCandidates -DriveRoots @('Q:\') -GetChildren { param($Path) $exactTree[$Path] } -IsReparsePoint { $false }
+Assert-Equal $exactScan.Locations.Count 2 'Both exact root layouts discovered without traversal'
+$calls = New-Object 'System.Collections.Generic.List[string]'
+$allDrives = Get-EloJavaCandidates -IsReparsePoint { $false } -GetChildren { param($Path) $calls.Add($Path) }
+Assert-Equal $calls.Count 48 'C through Z both exact executables checked'
+Assert-Equal $calls[0] 'C:\java\bin\java.exe' 'First drive exact path'
+Assert-Equal $calls[-1] 'Z:\ELO\java\bin\java.exe' 'Last drive exact path'
+$invalidCalls = New-Object 'System.Collections.Generic.List[string]'
+$null = Get-EloJavaCandidates -DriveRoots @('B:\', 'Q:\nested\', 'Z:\') -IsReparsePoint { $false } -GetChildren { param($Path) $invalidCalls.Add($Path) }
+Assert-Equal $invalidCalls.Count 2 'Only C-Z drive roots accepted'
+$linkedCalls = New-Object 'System.Collections.Generic.List[string]'
+$linked = Get-EloJavaCandidates -DriveRoots @('Q:\') -IsReparsePoint { param($Path) $Path -eq 'Q:\ELO' } -GetChildren { param($Path) $linkedCalls.Add($Path) }
+Assert-Equal $linkedCalls.Count 1 'Reparse ancestor prevents exact file access'
+Assert-Equal $linked.CoverageRecords[1].Outcome 'SkippedReparsePoint' 'Reparse ancestor tracked'
+$missing = Get-EloJavaCandidates -DriveRoots @('Q:\') -IsReparsePoint { throw [System.Management.Automation.ItemNotFoundException]::new('missing') } -GetChildren { throw 'Unexpected access' }
+Assert-Equal $missing.Issues.Count 0 'Missing roots are normal'
+Assert-Equal $missing.CoverageRecords[0].Outcome 'NotFound' 'Missing path tracked'
+$cancelAutoState = @{ Calls = 0 }
+$cancelAuto = Get-EloJavaCandidates -DriveRoots @('Q:\') -ShouldCancel { $cancelAutoState.Calls++; $cancelAutoState.Calls -ge 4 } -IsReparsePoint { $false } -GetChildren { throw 'Must not access file after cancellation' }
+Assert-Equal $cancelAuto.Cancelled $true 'Cancellation during ancestor checks'
+Assert-Equal $cancelAuto.CoverageRecords[0].Outcome 'Cancelled' 'Cancelled exact check tracked'
+$dedup = Get-EloJavaCandidates -DriveRoots @('Q:\', 'q:\') -ManualPath 'Q:\java\bin' -IsReparsePoint { $false } -GetChildren {
+    param($Path)
+    if ($Path -ieq 'Q:\java\bin\java.exe' -or $Path -ieq 'Q:\java\bin') { New-Entry 'Q:\java\bin\java.exe' $false }
+}
+Assert-Equal $dedup.Locations.Count 1 'Automatic and manual duplicates ignored case-insensitively'
 $tree = @{
-    'Q:\' = @((New-Entry 'Q:\ELO Suite' $true), (New-Entry 'Q:\unrelated' $true))
-    'Q:\ELO Suite' = @((New-Entry 'Q:\ELO Suite\runtime' $true), (New-Entry 'Q:\ELO Suite\link' $true $true))
-    'Q:\ELO Suite\runtime' = @((New-Entry 'Q:\ELO Suite\runtime\java.exe' $false))
+    'Q:\ELO\java\bin\java.exe' = @((New-Entry 'Q:\ELO\java\bin\java.exe' $false))
     'M:\Manual Path' = @((New-Entry 'M:\Manual Path\java.exe' $false))
 }
 $children = { param($Path) if ($tree.ContainsKey($Path)) { $tree[$Path] } }
 $scan = Get-EloJavaCandidates -DriveRoots @('Q:\') -ManualPath 'M:\Manual Path' -GetChildren $children -IsReparsePoint { param($Path) $false }
 Assert-Equal $scan.Locations.Count 2 'Automatic and manual paths with spaces'
-Assert-Equal ($scan.Locations -contains 'Q:\ELO Suite\runtime\java.exe') $true 'Preserve path spaces'
+Assert-Equal ($scan.Locations -contains 'M:\Manual Path\java.exe') $true 'Preserve path spaces'
 Assert-Equal $scan.Cancelled $false 'Normal scan completes'
-Assert-Equal ($scan.ScannedLocations -contains 'Q:\ELO Suite\runtime') $true 'Coverage includes actual enumerated runtime directory'
-Assert-Equal ($scan.ScannedLocations -contains 'Q:\ELO Suite\link') $false 'Coverage excludes skipped links'
+Assert-Equal ($scan.ScannedLocations -contains 'Q:\ELO\java\bin\java.exe') $true 'Coverage includes checked executable'
 $manualFirst = Get-EloJavaCandidates -DriveRoots @('Q:\') -ManualPath 'M:\Manual Path' -GetChildren $children -IsReparsePoint { $false } -MaxEntries 1
 Assert-Equal ($manualFirst.Locations -contains 'M:\Manual Path\java.exe') $true 'Automatic enumeration cannot starve manual path'
-Assert-Equal $manualFirst.ScannedLocations[0] 'M:\Manual Path' 'Manual scan first'
+Assert-Equal ($manualFirst.Locations -contains 'Q:\ELO\java\bin\java.exe') $true 'Automatic discovery precedes manual budget'
 Assert-Equal $manualFirst.VisitedEntries 1 'Manual scan preserves global entry bound'
 Assert-Equal $manualFirst.LimitReached $true 'Budget truncation remains explicit'
 $cancelled = Get-EloJavaCandidates -DriveRoots @('Q:\') -GetChildren { throw 'Must not enumerate' } -ShouldCancel { $true }
 Assert-Equal $cancelled.Cancelled $true 'Immediate cancellation'
 $limited = Get-EloJavaCandidates -DriveRoots @('Q:\') -GetChildren $children -IsReparsePoint { $false } -MaxEntries 1
-Assert-Equal $limited.LimitReached $true 'Entry budget enforced'
+Assert-Equal $limited.LimitReached $false 'Exact checks do not consume manual budget'
 $shallow = Get-EloJavaCandidates -DriveRoots @('Q:\') -GetChildren $children -IsReparsePoint { $false } -MaxDepth 0
-Assert-Equal $shallow.Locations.Count 0 'Depth bounded'
-$denied = Get-EloJavaCandidates -DriveRoots @('Q:\') -GetChildren { throw 'Access denied' }
-Assert-Equal ($denied.Issues.Count -gt 0) $true 'Access errors reported'
+Assert-Equal $shallow.Locations.Count 1 'Automatic discovery independent of depth'
+$denied = Get-EloJavaCandidates -DriveRoots @('Q:\') -IsReparsePoint { $false } -GetChildren { throw 'Access denied' }
+Assert-Equal ($denied.Issues.Count -gt 0) $true "Access errors reported ($($denied.CoverageRecords | ForEach-Object { $_.Outcome }))"
 $probe = Invoke-EloJavaVersion -JavaPath 'Z:\missing path\java.exe'
 Assert-Equal $probe.Succeeded $false 'Missing executable handled'
 $probe = Invoke-EloJavaVersion -JavaPath 'Z:\missing path\java.exe' -ShouldCancel { $true }
@@ -91,14 +138,14 @@ $report = Invoke-EloJavaScan -DriveRoots @('Q:\') -GetChildren $children -IsRepa
     [pscustomobject]@{ Succeeded = $true; Cancelled = $false; Evidence = 'Temurin (build 17.0.21.1+2)'; Error = $null; ExitCode = 0 }
 }
 Assert-Equal $report.Results.Count 1 'Probe discovered runtime'
-Assert-Equal $report.Results[0].Location 'Q:\ELO Suite\runtime\java.exe' 'Report location'
+Assert-Equal $report.Results[0].Location 'Q:\ELO\java\bin\java.exe' 'Report location'
 Assert-Equal $report.Results[0].Status 'KnownFixed' 'Report classification'
 Assert-Equal $report.Results[0].Evidence 'Temurin (build 17.0.21.1+2)' 'Report raw evidence'
-Assert-Equal $report.Results[0].RuntimeRoot 'Q:\ELO Suite\runtime' 'Runtime root without bin inferred conservatively'
+Assert-Equal $report.Results[0].RuntimeRoot 'Q:\ELO\java' 'Runtime root inferred from bin'
 Assert-Equal $report.Results[0].FullVersion '17.0.21.1+2' 'Report full build version'
 Assert-Equal $report.Results[0].Architecture 'Unknown' 'No architecture guess from host'
-Assert-Equal $report.Results[0].EloCandidateRoot 'Q:\ELO Suite' 'ELO candidate path retained'
-Assert-Equal ($report.Results[0].EloPathRationale -match 'name heuristic') $true 'ELO association rationale not proof'
+Assert-Equal $report.Results[0].EloCandidateRoot 'Q:\' 'Drive root retained'
+Assert-Equal ($report.Results[0].EloPathRationale -match 'not verified') $true 'ELO association rationale not proof'
 $binTree = @{
     'M:\Manual Path' = @((New-Entry 'M:\Manual Path\bin' $true))
     'M:\Manual Path\bin' = @((New-Entry 'M:\Manual Path\bin\java.exe' $false))
@@ -144,13 +191,12 @@ $hostProbe = Invoke-EloJavaVersion -JavaPath (Join-Path $PSHOME 'powershell.exe'
 Assert-Equal $hostProbe.Succeeded $false 'Real non-Java process rejected'
 Assert-Equal ([string]::IsNullOrEmpty($hostProbe.Error)) $false 'Real process failure explained'
 # Coverage records distinguish successful enumeration, truncation and failure.
-Assert-Equal $manualFirst.CoverageRecords[0].Outcome 'BudgetBounded' 'Partial coverage labelled'
-Assert-Equal $manualFirst.CoverageRecords[0].EntriesSeen 1 'Coverage counts entries'
-Assert-Equal ($manualFirst.ScannedLocations -contains 'Q:\') $false 'Unvisited drive not advertised as scanned'
+Assert-Equal $manualFirst.CoverageRecords[-1].Outcome 'BudgetBounded' 'Partial coverage labelled'
+Assert-Equal $manualFirst.CoverageRecords[-1].EntriesSeen 1 'Coverage counts entries'
 Assert-Equal $linkScan.CoverageRecords[0].Outcome 'SkippedReparsePoint' 'Skipped manual root tracked'
 Assert-Equal $linkScan.ScannedLocations.Count 0 'Skipped root not advertised as scanned'
 Assert-Equal $denied.CoverageRecords[0].Outcome 'Error' 'Failed attempt tracked'
-Assert-Equal $shallow.DepthLimitReached $true 'Depth truncation explicit'
+Assert-Equal $shallow.DepthLimitReached $false 'Automatic checks do not hit depth limit'
 $cancelState = @{ Stop = $false }
 $midCancel = Invoke-EloJavaScan -DriveRoots @() -ManualPath 'M:\Manual Path' -IsReparsePoint { $false } -ShouldCancel { $cancelState.Stop } -GetChildren {
     New-Entry 'M:\Manual Path\java.exe' $false

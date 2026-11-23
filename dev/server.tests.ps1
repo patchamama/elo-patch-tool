@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\server.ps1"
 . "$PSScriptRoot\scan.ps1"
+. "$PSScriptRoot\cli.ps1"
 $script:Count = 0
 function Assert($Condition, $Message) { if (-not $Condition) { throw "FAIL: $Message" }; $script:Count++ }
 function Reject([scriptblock]$Work, [int]$Status) {
@@ -15,9 +16,14 @@ function Request($Method='GET', $Path='/api/status', $Body='', $Headers=$null, $
 }
 . "$PSScriptRoot\report.ps1"
 $s.Adapters.Resources={ @{ServerName='TEST-SERVER';WindowsVersion='10.0';WindowsBuild='20348';TotalRamBytes=8GB;Disks=@(@{Name='C:';TotalBytes=100GB;FreeBytes=40GB})} }
+$s.Adapters.ReportOptions={ @{Machine='-XX:-UseBASE64Intrinsics password=secret-fixture';User='-XX:+UseBASE64Intrinsics';Process='-XX:-UseBASE64Intrinsics'} }
 foreach ($lang in @('en','de')) {
     $technical=Invoke-EloApi $s (Request POST '/api/report' ('{"language":"'+$lang+'"}'))
     Assert ($technical.html.Contains('<html lang="'+$lang+'">')) 'technical report language'
+    Assert ($technical.html.Contains($(if ($lang -eq 'en') {'Machine: Flag present'} else {'Machine: Flag vorhanden'})) -and $technical.html.Contains($(if ($lang -eq 'en') {'User: Conflicting enabling flag present'} else {'User: Konfligierendes aktivierendes Flag vorhanden'}))) 'authenticated report observes scoped options'
+    Assert ($technical.html.Contains($(if ($lang -eq 'en') {'Process: Flag present'} else {'Process: Flag vorhanden'}))) 'process option presence reported'
+    Assert ($technical.html.Contains($(if ($lang -eq 'en') {'Environment values do not prove protection of existing ELO processes.'} else {'Umgebungswerte beweisen keinen Schutz bestehender ELO-Prozesse.'}))) 'option presence does not claim ELO process protection'
+    Assert (-not $technical.html.Contains('secret-fixture')) 'authenticated report excludes option secrets'
     Assert ($technical.html.Contains('TEST-SERVER') -and $technical.html.Contains('8.00 GiB') -and $technical.html.Contains('40.00 GiB')) 'technical report resources'
     Assert ($technical.html -notmatch 'X-Session-Token|#token=|<script') 'report excludes capabilities and active content'
     Assert ($technical.html.Contains($(if ($lang -eq 'en') {'Session scan state: Ready'} else {'Scanstatus der Sitzung: Bereit'}))) 'session state, not implied completion'
@@ -41,6 +47,24 @@ foreach ($language in @('en','de')) {
     Assert ($html.Contains('17.0.20+1') -and $html.Contains('https://adoptium.net/installation/')) 'verified vendor guidance and actual version'
     Assert (-not $html.Contains('C:\fixture') -and -not $html.Contains('Runtime Environment')) 'no paths or raw probe output in report'
 }
+$zuluScan=Invoke-EloJavaScan -DriveRoots @() -ManualPath 'C:\fixture' -IsReparsePoint { $false } -GetChildren {
+    [pscustomobject]@{Name='java.exe';FullName='C:\fixture\java.exe';PSIsContainer=$false;Attributes=0}
+} -ProbeJava {
+    [pscustomobject]@{Succeeded=$true;Cancelled=$false;Evidence='OpenJDK Runtime Environment Zulu21.30+15-CA (build 21.0.1+12-LTS)';Error=$null;ExitCode=0}
+}
+$zuluCli=Invoke-EloCli -Arguments @('--cli','--scan','--json') -Scanner { param($ManualPath) $zuluScan }
+$zuluCliJson=ConvertFrom-Json $zuluCli.Output
+Assert ($zuluCli.ExitCode -eq 0 -and $zuluCliJson.scan.Results[0].Vendor -ceq 'Azul Zulu' -and $zuluCliJson.scan.Results[0].Status -ceq 'Inconclusive') 'CLI JSON retains Zulu and inconclusive status'
+ConvertTo-EloUiResults $evidenceSession $zuluScan
+Assert ($evidenceSession.Results[0].vendor -ceq 'Azul Zulu' -and $evidenceSession.Results[0].status -ceq 'inconclusive') 'Zulu shown without fixed classification in UI'
+Assert ($evidenceSession.ReportJvms[-1].VendorVerified -and $evidenceSession.ReportJvms[-1].Vendor -ceq 'Azul Zulu' -and $evidenceSession.ReportJvms[-1].Classification -ceq 'Unknown') 'Zulu identity verified separately from classification'
+foreach ($language in @('en','de')) { Assert ((Get-EloSessionReportHtml $evidenceSession $language).Contains('Azul Zulu')) 'Zulu identity included in technical report' }
+$zuluScan.Results[0].ExitCode=1
+ConvertTo-EloUiResults $evidenceSession $zuluScan
+Assert (-not $evidenceSession.ReportJvms[-1].VendorVerified) 'failed Zulu probe does not verify vendor'
+$zuluScan.Results[0].ExitCode=0; $zuluScan.Results[0].Status='KnownFixed'
+ConvertTo-EloUiResults $evidenceSession $zuluScan
+Assert ($evidenceSession.Results[0].status -ceq 'inconclusive' -and $evidenceSession.ReportJvms[-1].Classification -ceq 'Unknown') 'asserted Zulu fixed status is not proof'
 $scan.Results[0].Evidence='Temurin Runtime Environment (build 17.0.21.1+2)'
 $scan.Results[0].FullVersion='17.0.21.1+2'; $scan.Results[0].Build='17.0.21.1+2'; $scan.Results[0].Status='KnownFixed'
 ConvertTo-EloUiResults $evidenceSession $scan

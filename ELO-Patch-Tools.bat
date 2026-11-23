@@ -158,9 +158,18 @@ function Get-EloJavaClassification {
     $build = $null
     $status = 'Inconclusive'
     $reason = 'Vendor/build evidence is unknown or outside the supported comparison rules; exploitability is not determined.'
-    $conflictingVendor = $Evidence -match '(?i)\b(Oracle|Zulu|Corretto|Microsoft|GraalVM|Semeru|OpenJ9|Liberica|SapMachine|Dragonwell)\b'
-    $foreignRuntime = @($Evidence -split '\r?\n' | Where-Object { $_ -match '(?i)Runtime Environment' -and $_ -notmatch '(?i)\bTemurin\b' }).Count -gt 0
+    $zuluToken = '(?i)\bZulu(?=[0-9]|\b)'
+    $otherVendor = '(?i)\b(Oracle|Corretto|Microsoft|GraalVM|Semeru|OpenJ9|Liberica|SapMachine|Dragonwell)\b'
+    $conflictingVendor = $Evidence -match $otherVendor -or $Evidence -match $zuluToken
+    $runtimeLines = @($Evidence -split '\r?\n' | Where-Object { $_ -match '(?i)Runtime Environment' })
+    $foreignRuntime = @($runtimeLines | Where-Object { $_ -notmatch '(?i)\bTemurin\b' }).Count -gt 0
     if ($conflictingVendor -or $foreignRuntime) { $vendor = 'Unknown' }
+    # Zulu's product version can immediately follow its name (e.g. Zulu21).
+    # Identify the runtime, but never apply Temurin's advisory to it.
+    $zuluRuntime = '(?i)\bRuntime Environment\s+(?:Azul\s+)?Zulu(?=[0-9]|\b)'
+    if ($runtimeLines.Count -gt 0 -and @($runtimeLines | Where-Object { $_ -notmatch $zuluRuntime }).Count -eq 0 -and $Evidence -notmatch '(?i)\bTemurin\b' -and $Evidence -notmatch $otherVendor) {
+        $vendor = 'Azul Zulu'
+    }
     # Stable canonical versions only, with bounded numeric components. No EA,
     # custom suffixes, leading zero aliases, or overflow-prone numeric parsing.
     $number = '(?:0|[1-9][0-9]{0,8})'
@@ -288,8 +297,9 @@ function Get-EloJavaCandidates {
     $attempts = New-Object 'System.Collections.Generic.List[object]'
     $queue = New-Object 'System.Collections.Generic.Queue[object]'
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $seenLocations = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     $state = @{ Cancelled = $false; LimitReached = $false; DepthLimitReached = $false; VisitedEntries = 0 }
-    # One global entry budget. Manual scanning runs BEFORE automatic root discovery.
+    # The entry budget applies only to optional manual directory traversal.
     $readChildren = {
         param($Path)
         if (& $ShouldCancel) { $state.Cancelled = $true; return }
@@ -328,7 +338,7 @@ function Get-EloJavaCandidates {
                         $queue.Enqueue([pscustomobject]@{ Path = $entry.FullName; Depth = $item.Depth + 1; EloRoot = $item.EloRoot; Rationale = $item.Rationale })
                     } else { $state.DepthLimitReached = $true }
                 } elseif ($entry.Name -ieq 'java.exe') {
-                    if (-not $locations.Contains($entry.FullName)) {
+                    if ($seenLocations.Add($entry.FullName)) {
                         $locations.Add($entry.FullName)
                         $candidates.Add([pscustomobject]@{ Location = $entry.FullName; EloCandidateRoot = $item.EloRoot; EloPathRationale = $item.Rationale })
                     }
@@ -337,36 +347,66 @@ function Get-EloJavaCandidates {
         }
     }
     if (& $ShouldCancel) { $state.Cancelled = $true }
-    if (-not $state.Cancelled -and $ManualPath) {
-        $queue.Enqueue([pscustomobject]@{ Path = $ManualPath; Depth = 0; EloRoot = $ManualPath; Rationale = 'User-selected explicit manual directory; ELO ownership is not verified.' })
-        & $drainQueue
-    }
-    if (-not $state.Cancelled -and -not $state.LimitReached) {
+    if (-not $state.Cancelled) {
         if (-not $PSBoundParameters.ContainsKey('DriveRoots')) {
-            $DriveRoots = @(Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Root })
+            $DriveRoots = @(67..90 | ForEach-Object { '{0}:\' -f [char]$_ })
         }
         foreach ($root in $DriveRoots) {
-            if ($state.Cancelled -or $state.LimitReached) { break }
-            foreach ($entry in @(& $readChildren $root)) {
-                if (-not $entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
-                if ($entry.Name -match '^(?i:ELO)') {
-                    $queue.Enqueue([pscustomobject]@{ Path = $entry.FullName; Depth = 0; EloRoot = $entry.FullName; Rationale = "ELO-prefix directory name heuristic under drive root $root; ELO ownership is not verified." })
-                } elseif ($entry.Name -in @('Program Files', 'Program Files (x86)', 'ProgramData')) {
-                    foreach ($child in @(& $readChildren $entry.FullName)) {
-                        if ($child.PSIsContainer -and $child.Name -match '^(?i:ELO)' -and -not ($child.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-                            $queue.Enqueue([pscustomobject]@{ Path = $child.FullName; Depth = 0; EloRoot = $child.FullName; Rationale = "ELO-prefix directory name heuristic under $($entry.FullName); ELO ownership is not verified." })
+            if ($root -notmatch '^[C-Z]:\\$') { continue }
+            foreach ($relative in @('java\bin\java.exe', 'ELO\java\bin\java.exe')) {
+                if (& $ShouldCancel) { $state.Cancelled = $true; break }
+                $path = $root + $relative
+                $attempt = [pscustomobject]@{ Location = $path; Outcome = 'Inspecting'; EntriesSeen = 0 }
+                $attempts.Add($attempt)
+                try {
+                    $parts = $relative -split '\\'
+                    $ancestor = $root
+                    $skip = $false
+                    if (& $IsReparsePoint $ancestor) {
+                        $issues.Add("Skipped reparse point: $ancestor")
+                        $attempt.Outcome = 'SkippedReparsePoint'; $skip = $true
+                    }
+                    foreach ($part in $parts) {
+                        if ($skip) { break }
+                        if (& $ShouldCancel) { $state.Cancelled = $true; $skip = $true; $attempt.Outcome = 'Cancelled'; break }
+                        $ancestor += $part
+                        if (& $IsReparsePoint $ancestor) {
+                            $issues.Add("Skipped reparse point: $ancestor")
+                            $attempt.Outcome = 'SkippedReparsePoint'; $skip = $true; break
                         }
+                        $ancestor += '\'
+                    }
+                    if ($skip) { continue }
+                    foreach ($entry in @(& $GetChildren $path)) {
+                        if (& $ShouldCancel) { $state.Cancelled = $true; $attempt.Outcome = 'Cancelled'; break }
+                        if (-not $entry.PSIsContainer -and $entry.FullName -ieq $path -and -not ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $seenLocations.Add($entry.FullName)) {
+                            $locations.Add($entry.FullName)
+                            $candidates.Add([pscustomobject]@{ Location = $entry.FullName; EloCandidateRoot = $root; EloPathRationale = 'Exact drive-root Java layout; ELO ownership is not verified.' })
+                            $attempt.EntriesSeen++
+                        }
+                    }
+                    if (-not $state.Cancelled) { $attempt.Outcome = 'Checked'; $scanned.Add($path) }
+                } catch {
+                    if ($_.Exception -is [System.Management.Automation.ItemNotFoundException] -or $_.Exception -is [System.IO.DriveNotFoundException] -or $_.Exception.InnerException -is [System.Management.Automation.ItemNotFoundException] -or $_.Exception.InnerException -is [System.IO.DriveNotFoundException] -or $_.FullyQualifiedErrorId -match '^(PathNotFound|DriveNotFound),') {
+                        $attempt.Outcome = 'NotFound'
+                    } else {
+                        $attempt.Outcome = 'Error'
+                        $issues.Add("Cannot inspect ${path}: $($_.Exception.Message)")
                     }
                 }
             }
+            if ($state.Cancelled) { break }
         }
+    }
+    if (-not $state.Cancelled -and $ManualPath) {
+        $queue.Enqueue([pscustomobject]@{ Path = $ManualPath; Depth = 0; EloRoot = $ManualPath; Rationale = 'User-selected explicit manual directory; ELO ownership is not verified.' })
         & $drainQueue
     }
     [pscustomobject]@{
         Locations = $locations.ToArray(); Candidates = $candidates.ToArray(); Issues = $issues.ToArray(); Cancelled = $state.Cancelled
         LimitReached = $state.LimitReached; DepthLimitReached = $state.DepthLimitReached; VisitedEntries = $state.VisitedEntries
         ScannedLocations = $scanned.ToArray(); CoverageRecords = $attempts.ToArray()
-        Coverage = "Manual directory first, then bounded ELO-prefix roots on available drives; depth $MaxDepth, global entry budget $MaxEntries. ScannedLocations lists enumerated directories (possibly partial); CoverageRecords lists attempts and outcomes. Not exhaustive; absence of results is not proof of absence."
+        Coverage = "Exact drive-root Java executables first, then optional manual directory traversal; manual depth $MaxDepth and entry budget $MaxEntries. ScannedLocations lists checked paths and enumerated directories (possibly partial); CoverageRecords lists attempts and outcomes. Absence of results is not proof of absence."
     }
 }
 
@@ -423,9 +463,9 @@ Usage (embedded launcher): ELO-Patch-Tools.bat [options]
   --help                  Show this complete README; no scan or changes.
   --cli                   Select command-line mode (default here). Read-only modes
                           are noninteractive; modifications require a live console.
-  --scan                  Read-only, bounded discovery on available drives.
+  --scan                  Read-only discovery of exact drive-root Java layouts.
   --json                  Emit one JSON report (including errors); no progress noise.
-  --manual-path "D:\ELO"   Add a literal local directory; searched before drive roots.
+  --manual-path "D:\ELO"   Add a literal local directory; searched after root checks.
   --manual                Show manual mitigation/recovery instructions; no scan.
   --no-browser            Never open a browser (this module never does).
   --keep-temp             Retain launcher extraction for diagnosis if supported.
@@ -464,7 +504,11 @@ Review raw exports before sharing; never enter secrets into paths or JVM options
 Security/evidence:
 Scanning does not write ELO files or machine configuration. It may execute trusted
 local java.exe -version, which is code execution: scan trusted installations only.
-Discovery is bounded, heuristic and not exhaustive; no match is not proof of safety.
+The packaged launcher checks ready fixed or removable drives C: through Z: for
+\java\bin\java.exe and \ELO\java\bin\java.exe at each drive root. An optional
+manual directory is searched after root checks, with depth 5 and 10,000 entries.
+Discovery is not exhaustive; errors, limits or cancellation can reduce coverage.
+A missing match is not proof of absence or safety; ELO ownership is not verified.
 Reports retain raw version evidence, errors, coverage and scanner source references.
 PotentiallyVulnerable is conservative classification, not confirmed exploitability.
 The scanner's supplied Temurin source refers to November 2026 (2026-11):
@@ -737,6 +781,7 @@ function New-EloServerSession {
             Fingerprint={ param($Path) Get-EloJavaFingerprint $Path }
             Verify={ param($Path,$Options) Invoke-EloFlagProbe $Path $Options }
             Clock={ [DateTime]::UtcNow }; Resources={ Get-EloReportWindowsResources }
+            ReportOptions={ @{Machine=[Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS','Machine');User=[Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS','User');Process=[Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS','Process')} }
         }
     }
 }
@@ -830,7 +875,7 @@ function ConvertTo-EloUiResults {
     foreach ($item in $Scan.Results) {
         $id = New-EloSecret
         $status = 'inconclusive'
-        if ($item.Status -ceq 'PotentiallyVulnerable') { $status='vulnerable' }
+        if ($item.Status -ceq 'PotentiallyVulnerable' -and $item.Vendor -ceq 'Temurin') { $status='vulnerable' }
         # Narrow exact-build allowlist from parent-verified Temurin evidence.
         # No extrapolation to later versions, other vendors or ELO compatibility.
         $fixed=@('17.0.21.1+2','21.0.13.1+2','25.0.5.1+2','27.0.1.1+4')
@@ -872,7 +917,7 @@ function ConvertTo-EloUiResults {
             if ($row.status -ceq 'patched') { $classification='Fixed'; $code='AdvisoryFixedVersion' }
         }
         $Session.ReportJvms+=@{Version=$evidence.FullVersion;Verified=$observed;ExecutionVerified=$observed
-            Vendor=$evidence.Vendor;VendorVerified=($observed -and $evidence.Vendor -ceq 'Temurin')
+            Vendor=$evidence.Vendor;VendorVerified=($observed -and @('Temurin','Azul Zulu') -ccontains $evidence.Vendor)
             Classification=$classification;ClassificationVerified=($classification -ne 'Unknown');EvidenceCode=$code}
         $Session.ReportIndexes[$row.id]=$Session.ReportJvms.Count
     }
@@ -1087,7 +1132,7 @@ function Invoke-EloMitigation {
 }
 function Get-EloSessionReportHtml {
     param($Session,[ValidateSet('en','de')][string]$Language)
-    $report=New-EloTechnicalReport -ResourceCollector $Session.Adapters.Resources -JvmEvidence $Session.ReportJvms -Actions $Session.ReportActions
+    $report=New-EloTechnicalReport -ResourceCollector $Session.Adapters.Resources -OptionsCollector $Session.Adapters.ReportOptions -JvmEvidence $Session.ReportJvms -Actions $Session.ReportActions
     $html=ConvertTo-EloTechnicalReportHtml $report -Language $Language
     $states=@{idle='Ready';scanning='Scanning';cancelling='Cancelling';completed='Completed';cancelled='Cancelled';error='Failed'}
     $notice='Session scan state: '; $scope='Session observations (including earlier scans); only a completed scan is a complete snapshot. Automatic runtime update is disabled. ELO API support and running ELO process mitigation are not verified.'
@@ -1309,9 +1354,10 @@ function Start-EloServer {
  never silently truncate JVMs or evidence: report a failure and narrow the scan root
  if limits are exceeded (this frontend has no pagination).
  preview summary 1..4096 per language, <=16 warnings of 1..2048 per language.
- POST scan -> {} for all available drives, or {searchPath: absolute local Windows
- directory} for an optional manual root (1..1024, no controls/wildcards/device/UNC/
- relative paths). This is the ONLY path input. Preserve spaces; treat as plain JSON
+ POST scan -> {} checks ready fixed or removable drives C: through Z: at exactly
+ X:\java\bin\java.exe and X:\ELO\java\bin\java.exe. An optional {searchPath:
+ absolute local Windows directory} adds a manual root after the root checks
+ (1..1024, no controls/wildcards/device/UNC/relative paths). This is the ONLY path input. Preserve spaces; treat as plain JSON
  data, never shell/PowerShell text or a command. Backend MUST independently validate
  and canonicalize, enforce local read-only traversal, handle reparse points safely,
  and reject invalid/inaccessible roots. Do not echo the root into activity logs.
@@ -1430,7 +1476,7 @@ const messages = {
  targetIneligible:'The selected JVM is not eligible for mitigation. Review the scan evidence.',optionsUnsupported:'Existing JVM/environment settings are ambiguous or unsupported. Review them with your administrator before making changes.',
  scanSent:'Scan requested',cancelSent:'Cancellation requested',previewReady:'Preview received',actionSent:'Confirmed action completed',connected:'Session connected',report:'Report exported',log:'Activity log exported',
  units:'items checked',previewKind:'Selected change',mitigation:'Temporary mitigation',runtimeUpdate:'Runtime update',
- searchPath:'Optional local search directory',searchHelp:'Leave empty to discover all available drives. Or enter an absolute local directory, e.g. C:\\ELO data. It is read-only search data, never a command. Network/device paths and wildcards are not accepted.',
+ searchPath:'Optional local search directory',searchHelp:'On ready fixed or removable drives C: through Z:, the scan checks only X:\\java\\bin\\java.exe and X:\\ELO\\java\\bin\\java.exe at each drive root. Optionally enter an absolute local directory to search after the root checks, e.g. C:\\ELO data. It is read-only search data, never a command. Network/device paths and wildcards are not accepted.',
  invalidPath:'Enter an absolute local Windows directory of at most 1024 characters, without controls, wildcards or relative segments.',
  jvmTable:'Discovered JVMs and evidence',runtimeRoot:'Runtime root',vendor:'Vendor',architecture:'Architecture',eloRationale:'ELO association rationale',classificationEvidence:'Classification evidence',
  patched:'Patched', 'not-affected':'Not affected',inconclusive:'Inconclusive',
@@ -1472,7 +1518,7 @@ const messages = {
  targetIneligible:'Die gewählte JVM ist für diese Risikominderung nicht geeignet. Scan-Nachweise prüfen.',optionsUnsupported:'Vorhandene JVM-/Umgebungseinstellungen sind mehrdeutig oder nicht unterstützt. Vor Änderungen mit Ihrem Administrator prüfen.',
  scanSent:'Scan angefordert',cancelSent:'Abbruch angefordert',previewReady:'Vorschau empfangen',actionSent:'Bestätigte Änderung abgeschlossen',connected:'Sitzung verbunden',report:'Bericht exportiert',log:'Aktivitätsprotokoll exportiert',
  units:'Elemente geprüft',previewKind:'Gewählte Änderung',mitigation:'Vorübergehende Risikominderung',runtimeUpdate:'Laufzeit-Update',
- searchPath:'Optionales lokales Suchverzeichnis',searchHelp:'Leer lassen, um alle verfügbaren Laufwerke zu durchsuchen. Oder ein absolutes lokales Verzeichnis eingeben, z. B. C:\\ELO data. Die Eingabe ist nur ein schreibgeschützter Suchpfad, niemals ein Befehl. Netzwerk- und Gerätepfade sowie Platzhalter sind nicht zulässig.',
+ searchPath:'Optionales lokales Suchverzeichnis',searchHelp:'Auf bereiten festen oder Wechsellaufwerken C: bis Z: prüft der Scan nur X:\\java\\bin\\java.exe und X:\\ELO\\java\\bin\\java.exe im Laufwerksstamm. Optional ein absolutes lokales Verzeichnis eingeben, das nach den Stammprüfungen durchsucht wird, z. B. C:\\ELO data. Die Eingabe ist nur ein schreibgeschützter Suchpfad, niemals ein Befehl. Netzwerk- und Gerätepfade sowie Platzhalter sind nicht zulässig.',
  invalidPath:'Geben Sie ein absolutes lokales Windows-Verzeichnis mit höchstens 1024 Zeichen ohne Steuerzeichen, Platzhalter oder relative Segmente ein.',
  jvmTable:'Gefundene JVMs und Nachweise',runtimeRoot:'Laufzeit-Stammverzeichnis',vendor:'Hersteller',architecture:'Architektur',eloRationale:'Begründung der ELO-Zuordnung',classificationEvidence:'Nachweis der Einstufung',
  patched:'Gepatcht','not-affected':'Nicht betroffen',inconclusive:'Nicht eindeutig',
@@ -1730,8 +1776,9 @@ if (token) { log('connected'); void refresh(); setInterval(() => { void refresh(
 # Only allowlisted fields are retained. Do not pass raw logs, paths, identities,
 # URLs or secrets. Identifiers themselves must be safe backend observations.
 # HTML renderer re-normalizes its input; raw diagnostics are never serialized.
-# S10: JVM Vendor='Temurin' with VendorVerified(bool) enables same-provider
-# official download/install guidance. All other/unverified vendors stay Unknown.
+# S10: verified Temurin enables same-provider download/install guidance.
+# Verified Azul Zulu identifies the provider without asserting a fixed release;
+# other or unverified vendors stay Unknown.
 # Mitigation EvidenceCode additionally accepts MachineOptionSet (machine option
 # read back), NewlyLaunchedJvmFlagVerified (effective flag in a new JVM probe),
 # RunningEloJvmFlagVerified (effective flag in the identified current ELO JVM).
@@ -1746,7 +1793,7 @@ function ConvertTo-EloReportEscapedText {
 }
 function Get-EloReportVersion {
     param($Value)
-    if ($Value -is [string] -and $Value.Length -le 64 -and $Value -cmatch '^\d{1,8}(?:[._+\-]\d{1,8}){0,7}(?:-ea)?$') { return $Value }
+    if ($Value -is [string] -and $Value.Length -le 64 -and $Value -cmatch '^\d{1,8}(?:[._+\-]\d{1,8}){0,7}(?:-ea|-LTS)?$') { return $Value }
     return $null
 }
 function Test-EloReportProof {
@@ -1771,12 +1818,31 @@ function Get-EloReportWindowsResources {
     })
     @{ServerName=$computer.Name;WindowsVersion=$os.Version;WindowsBuild=$os.BuildNumber;TotalRamBytes=$computer.TotalPhysicalMemory;Disks=$disks}
 }
+# Collectors and recovery evidence are trusted backend-only inputs, never HTTP input.
+# Recovery paths require a validated archive matched to the original runtime, and
+# an independently selected isolated destination. No filesystem access occurs here.
+function Get-EloReportOptionState {
+    param($Value)
+    if ($null -eq $Value -or $Value -ceq '') { return 'Absent' }
+    if ($Value -isnot [string]) { return 'Unknown' }
+    $minus=[regex]::IsMatch($Value, '(?<!\S)-XX:-UseBASE64Intrinsics(?!\S)')
+    $plus=[regex]::IsMatch($Value, '(?<!\S)-XX:\+UseBASE64Intrinsics(?!\S)')
+    if ($plus) { return 'Conflict' }
+    if ($minus) { return 'Present' }
+    return 'Absent'
+}
+function Test-EloReportRecoveryPath {
+    param($Path)
+    return ($Path -is [string] -and $Path.Length -le 1024 -and $Path -cmatch '^[A-Za-z]:\\[^\x00-\x1f\x7f"<>|?*/:]+$' -and $Path -notmatch '(^|\\)\.{1,2}(\\|$)' -and $Path -notmatch '[\r\n]')
+}
 function New-EloTechnicalReport {
     param(
         [scriptblock]$ResourceCollector = { Get-EloReportWindowsResources },
         [object[]]$JvmEvidence = @(),
         [object[]]$Actions = @(),
-        [scriptblock]$EloVersionAdapter
+        [scriptblock]$EloVersionAdapter,
+        [scriptblock]$OptionsCollector = { @{Machine=[Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS','Machine');User=[Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS','User');Process=[Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS','Process')} },
+        $RecoveryEvidence
     )
     $system = @{Status='Unknown';ServerName=$null;WindowsVersion=$null;WindowsBuild=$null;TotalRamBytes=$null;Disks=@()}
     try {
@@ -1804,12 +1870,12 @@ function New-EloTechnicalReport {
         if ($state -eq 'Proven' -and (Test-EloReportProof $jvm.ExecutionVerified)) { $execution='Proven' }
         $classification='Unknown'; $evidence='Unknown'
         $classCodes=@{PotentiallyVulnerable='AdvisoryRangeMatch';NotAffected='AdvisoryExcludesVersion';Fixed='AdvisoryFixedVersion'}
-        if ($state -eq 'Proven' -and (Test-EloReportProof $jvm.ClassificationVerified) -and $jvm.Classification -is [string] -and $classCodes.ContainsKey($jvm.Classification) -and $jvm.EvidenceCode -ceq $classCodes[$jvm.Classification]) {
+        if ($jvm.Vendor -cne 'Azul Zulu' -and $state -eq 'Proven' -and (Test-EloReportProof $jvm.ClassificationVerified) -and $jvm.Classification -is [string] -and $classCodes.ContainsKey($jvm.Classification) -and $jvm.EvidenceCode -ceq $classCodes[$jvm.Classification]) {
             $classification=$jvm.Classification; $evidence=$jvm.EvidenceCode
         }
         $vendor='Unknown'
-        if ($jvm.Vendor -ceq 'Temurin' -and (Test-EloReportProof $jvm.VendorVerified)) { $vendor='Temurin' }
-        $jvms+=@{RuntimeIndex=($jvms.Count+1);Status=$state;Version=$version;ExecutionStatus=$execution;Classification=$classification;ClassificationVerified=($classification -ne 'Unknown');EvidenceCode=$evidence;Vendor=$vendor;VendorVerified=($vendor -eq 'Temurin')}
+        if (@('Temurin','Azul Zulu') -ccontains $jvm.Vendor -and (Test-EloReportProof $jvm.VendorVerified)) { $vendor=$jvm.Vendor }
+        $jvms+=@{RuntimeIndex=($jvms.Count+1);Status=$state;Version=$version;ExecutionStatus=$execution;Classification=$classification;ClassificationVerified=($classification -ne 'Unknown');EvidenceCode=$evidence;Vendor=$vendor;VendorVerified=($vendor -cne 'Unknown')}
     }
     $normalized=@()
     foreach ($kind in @('Update','Mitigation','Backup','Restore')) {
@@ -1851,12 +1917,24 @@ function New-EloTechnicalReport {
             }
         } catch { $elo.Status='Failed' }
     }
-    @{System=$system;Jvms=$jvms;Actions=$normalized;Elo=$elo}
+    $options=@{Machine='Unknown';User='Unknown';Process='Unknown'}
+    foreach ($scope in @('Machine','User','Process')) {
+        try { $rawOptions=& $OptionsCollector $scope; if ($null -ne $rawOptions) { $options[$scope]=Get-EloReportOptionState $rawOptions[$scope] } } catch { }
+    }
+    $recovery=@{Available=$false;Archive=$null;Original=$null;Destination=$null}
+    $failedUpdates=@($normalized | Where-Object { $_.Kind -eq 'Update' -and $_.Status -eq 'Failed' -and $null -ne $_.RuntimeIndex })
+    $backups=@($normalized | Where-Object { $_.Kind -eq 'Backup' -and $_.Status -eq 'Proven' -and $_.RuntimeIndex -eq $RecoveryEvidence.RuntimeIndex })
+    if ((Test-EloReportProof $RecoveryEvidence.Validated) -and $backups.Count -gt 0 -and @($failedUpdates | Where-Object { $_.RuntimeIndex -eq $RecoveryEvidence.RuntimeIndex }).Count -gt 0 -and (Test-EloReportRecoveryPath $RecoveryEvidence.Archive) -and (Test-EloReportRecoveryPath $RecoveryEvidence.Original) -and (Test-EloReportRecoveryPath $RecoveryEvidence.Destination) -and $RecoveryEvidence.Archive -match '(?i)\.zip$' -and $RecoveryEvidence.Destination -ine $RecoveryEvidence.Original -and -not $RecoveryEvidence.Destination.StartsWith($RecoveryEvidence.Original.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -and -not $RecoveryEvidence.Original.StartsWith($RecoveryEvidence.Destination.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)) {
+        $recovery=@{Available=$true;Validated=$true;RuntimeIndex=$RecoveryEvidence.RuntimeIndex;Archive=$RecoveryEvidence.Archive;Original=$RecoveryEvidence.Original;Destination=$RecoveryEvidence.Destination}
+    }
+    @{System=$system;Jvms=$jvms;Actions=$normalized;Elo=$elo;Options=$options;Recovery=$recovery}
 }
 function ConvertTo-EloTechnicalReportHtml {
     param([Parameter(Mandatory=$true)]$Report, [ValidateSet('en','de')][string]$Language='en')
     # Normalize again: renderer never reflects arbitrary DTO fields or messages.
-    $r=New-EloTechnicalReport -ResourceCollector { $Report.System }.GetNewClosure() -JvmEvidence @($Report.Jvms | ForEach-Object { @{Version=$_.Version;Verified=($_.Status -ceq 'Proven');ExecutionVerified=($_.ExecutionStatus -ceq 'Proven');Classification=$_.Classification;ClassificationVerified=$_.ClassificationVerified;EvidenceCode=$_.EvidenceCode;Vendor=$_.Vendor;VendorVerified=$_.VendorVerified} }) -Actions $Report.Actions -EloVersionAdapter { @{Version=$Report.Elo.Version;Verified=($Report.Elo.Status -ceq 'Proven')} }.GetNewClosure()
+    $r=New-EloTechnicalReport -OptionsCollector { $null } -ResourceCollector { $Report.System }.GetNewClosure() -JvmEvidence @($Report.Jvms | ForEach-Object { @{Version=$_.Version;Verified=($_.Status -ceq 'Proven');ExecutionVerified=($_.ExecutionStatus -ceq 'Proven');Classification=$_.Classification;ClassificationVerified=$_.ClassificationVerified;EvidenceCode=$_.EvidenceCode;Vendor=$_.Vendor;VendorVerified=$_.VendorVerified} }) -Actions $Report.Actions -EloVersionAdapter { @{Version=$Report.Elo.Version;Verified=($Report.Elo.Status -ceq 'Proven')} }.GetNewClosure()
+    # DTO contains only bounded states; never re-read environment during rendering.
+    foreach ($scope in @('Machine','User','Process')) { if (@('Present','Absent','Conflict','Unknown') -ccontains $Report.Options[$scope]) { $r.Options[$scope]=$Report.Options[$scope] } }
     if ($Report.System.Status -ceq 'Failed') { $r.System.Status='Failed' }
     if ($Report.Elo.Status -ceq 'Failed') { $r.Elo.Status='Failed' }
     $t=@{Title='Technical report';Server='Server';Windows='Windows version / build';Ram='Total RAM';Disk='Disk: total / free';Jvm='Detected JVM versions';Execution='Execution evidence';Elo='ELO version';Unknown='Unknown / unavailable';Failed='Failed';NotPerformed='Not performed';Proven='Verified';Update='Runtime update';Mitigation='Temporary mitigation';Backup='Backup';Restore='Restore';From='Previous version';To='Verified resulting version';BackupVersion='Verified backup JVM version';Sources='Official information sources';Notice='States reflect supplied verified evidence only. Compatibility, vulnerability and successful remediation are not inferred. No credentials or raw diagnostics are included.';Missing='Missing official installation-specific endpoint, authentication method, version operation and response schema. Java Client IXConnectionIF getVersion/getImplVersion is not a universal REST API contract.'}
@@ -1901,6 +1979,8 @@ function ConvertTo-EloTechnicalReportHtml {
         $advice=$t.VendorUnknown
         if ($j.Vendor -eq 'Temurin') {
             $advice=$t.Vendor+': Temurin; <a href="https://adoptium.net/temurin/releases">'+$t.Download+'</a>; <a href="https://adoptium.net/installation/">'+$t.Install+'</a>'
+        } elseif ($j.Vendor -ceq 'Azul Zulu') {
+            $advice=$t.Vendor+': Azul Zulu. '+$t.Upgrade
         }
         $lines.Add('<li>JVM #'+$j.RuntimeIndex+': '+$advice+'</li>')
     }
@@ -1925,7 +2005,23 @@ function ConvertTo-EloTechnicalReportHtml {
         }
         $lines.Add('<li>'+$t[$a.Kind]+': '+$t[$a.Status]+$detail+'</li>')
     }
-    $lines.Add('</ul><h2>'+$t.Sources+'</h2><ul>')
+    $lines.Add('</ul><h2>JAVA_TOOL_OPTIONS</h2><ul>')
+    $optionLabels=@{Present='Flag present';Absent='Flag absent';Conflict='Conflicting enabling flag present';Unknown='Unknown / unavailable'}
+    if ($Language -eq 'de') { $optionLabels=@{Present='Flag vorhanden';Absent='Flag nicht vorhanden';Conflict='Konfligierendes aktivierendes Flag vorhanden';Unknown='Unbekannt / nicht verfuegbar'} }
+    foreach ($scope in @('Machine','User','Process')) { $lines.Add('<li>'+$scope+': '+$optionLabels[$r.Options[$scope]]+'</li>') }
+    if ($Language -eq 'de') { $lines.Add('</ul><p>Umgebungswerte beweisen keinen Schutz bestehender ELO-Prozesse.</p>') } else { $lines.Add('</ul><p>Environment values do not prove protection of existing ELO processes.</p>') }
+    if (@($r.Actions | Where-Object { $_.Kind -eq 'Update' -and $_.Status -eq 'Failed' }).Count -gt 0) {
+        if ($Language -eq 'de') { $lines.Add('<h2>Manuelle Wiederherstellung</h2><p>Keine Wiederherstellungs-CLI verfuegbar. Fehlgeschlagene Runtime behalten oder umbenennen, nicht loeschen; Wiederherstellung kontrolliert manuell durchfuehren.</p>') }
+        else { $lines.Add('<h2>Manual recovery</h2><p>No restore CLI available. Retain or rename the failed runtime, do not delete it; perform a controlled manual restore.</p>') }
+        # Revalidate the trusted evidence against the normalized actions before rendering.
+        $rr=New-EloTechnicalReport -ResourceCollector { $null } -OptionsCollector { $null } -JvmEvidence @($Report.Jvms | ForEach-Object { @{Version=$_.Version;Verified=($_.Status -ceq 'Proven')} }) -Actions $Report.Actions -RecoveryEvidence $Report.Recovery
+        if ($rr.Recovery.Available) {
+            $rec=$rr.Recovery
+            $cmd="Expand-Archive -LiteralPath '"+$rec.Archive.Replace("'","''")+"' -DestinationPath '"+$rec.Destination.Replace("'","''")+"'"
+            $lines.Add('<p>Original: '+(ConvertTo-EloReportEscapedText $rec.Original)+'</p><pre>'+(ConvertTo-EloReportEscapedText $cmd)+'</pre>')
+        } else { $lines.Add('<p>'+$t.Unknown+'</p>') }
+    }
+    $lines.Add('<h2>'+$t.Sources+'</h2><ul>')
     $lines.Add('<li>'+$t.Checked+': 2026-11-23. '+$t.Changes+'</li>')
     foreach ($source in @(@('OpenJDK 2026-11-17','https://openjdk.org/groups/vulnerability/advisories/2026-11-17','Supplied'),@('Oracle CVE-2026-114938','https://linux.oracle.com/cve/CVE-2026-114938.html','Fetched'),@('Adoptium Temurin November 2026 CSPU','https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/','Fetched'))) {
         $lines.Add('<li><a href="'+$source[1]+'">'+$source[0]+'</a> - '+$t[$source[2]]+'</li>')

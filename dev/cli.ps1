@@ -8,9 +8,9 @@ Usage (embedded launcher): ELO-Patch-Tools.bat [options]
   --help                  Show this complete README; no scan or changes.
   --cli                   Select command-line mode (default here). Read-only modes
                           are noninteractive; modifications require a live console.
-  --scan                  Read-only, bounded discovery on available drives.
+  --scan                  Read-only discovery of exact drive-root Java layouts.
   --json                  Emit one JSON report (including errors); no progress noise.
-  --manual-path "D:\ELO"   Add a literal local directory; searched before drive roots.
+  --manual-path "D:\ELO"   Add a literal local directory; searched after root checks.
   --manual                Show manual mitigation/recovery instructions; no scan.
   --no-browser            Never open a browser (this module never does).
   --keep-temp             Retain launcher extraction for diagnosis if supported.
@@ -49,7 +49,11 @@ Review raw exports before sharing; never enter secrets into paths or JVM options
 Security/evidence:
 Scanning does not write ELO files or machine configuration. It may execute trusted
 local java.exe -version, which is code execution: scan trusted installations only.
-Discovery is bounded, heuristic and not exhaustive; no match is not proof of safety.
+The packaged launcher checks ready fixed or removable drives C: through Z: for
+\java\bin\java.exe and \ELO\java\bin\java.exe at each drive root. An optional
+manual directory is searched after root checks, with depth 5 and 10,000 entries.
+Discovery is not exhaustive; errors, limits or cancellation can reduce coverage.
+A missing match is not proof of absence or safety; ELO ownership is not verified.
 Reports retain raw version evidence, errors, coverage and scanner source references.
 PotentiallyVulnerable is conservative classification, not confirmed exploitability.
 The scanner's supplied Temurin source refers to November 2026 (2026-11):

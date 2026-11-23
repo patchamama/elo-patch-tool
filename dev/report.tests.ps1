@@ -160,6 +160,15 @@ foreach ($vendor in @('Unknown','Oracle','Temurin','<img>password=secret-token')
         Assert ($h -notmatch 'Machine option set: Verified|Maschinenoption gesetzt: Nachgewiesen') 'nonboolean scoped proof rejected'
     }
 }
+$zuluReport = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='21.0.1+12-LTS';Verified=$true;ExecutionVerified=$true;Vendor='Azul Zulu';VendorVerified=$true})
+Assert ($zuluReport.Jvms[0].Vendor -ceq 'Azul Zulu' -and $zuluReport.Jvms[0].Classification -ceq 'Unknown') 'Zulu vendor survives without fixed classification'
+Assert ($zuluReport.Jvms[0].Version -ceq '21.0.1+12-LTS') 'Zulu version survives report sanitization'
+$zuluClaim = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='21.0.13.1+2';Verified=$true;Vendor='Azul Zulu';VendorVerified=$true;Classification='Fixed';ClassificationVerified=$true;EvidenceCode='AdvisoryFixedVersion'})
+Assert ($zuluClaim.Jvms[0].Classification -ceq 'Unknown') 'No unsupported Zulu fixed classification accepted'
+foreach ($lang in @('en','de')) {
+    $zuluHtml=ConvertTo-EloTechnicalReportHtml $zuluReport $lang
+    Assert ($zuluHtml.Contains('Azul Zulu') -and $zuluHtml -notmatch 'https://adoptium.net/temurin/releases|https://adoptium.net/installation/') 'Zulu guidance does not suggest Temurin as same provider'
+}
 $otherVendor = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='17.0.10';Verified=$true;Vendor='Oracle';VendorVerified=$true})
 Assert ($otherVendor.Jvms[0].Vendor -eq 'Unknown') 'unsupported vendor stays unknown even if asserted'
 Assert ((ConvertTo-EloTechnicalReportHtml $otherVendor en) -notmatch 'https://adoptium.net/temurin/releases|https://adoptium.net/installation/') 'no provider substitution'
@@ -174,4 +183,23 @@ $h=ConvertTo-EloTechnicalReportHtml $legacy en
 Assert ($h.Contains('scope unspecified, current ELO process not verified')) 'legacy evidence not upgraded to ELO proof'
 Assert ($h.Contains('Current running ELO process flag: Unknown / unavailable')) 'legacy current process unknown'
 Assert ((ConvertTo-EloTechnicalReportHtml $report en).Contains('JVM vendor unknown; consult your JVM vendor and ELO')) 'empty scan does not assume vendor'
+$observed = New-EloTechnicalReport -ResourceCollector $resources -OptionsCollector { @{Machine='-XX:-UseBASE64Intrinsics password=secret-token';User='-XX:+UseBASE64Intrinsics';Process='-XX:-UseBASE64Intrinsics'} }
+Assert ($observed.Options.Machine -eq 'Present' -and $observed.Options.User -eq 'Conflict' -and $observed.Options.Process -eq 'Present') 'scope observations'
+Assert (($observed | ConvertTo-Json -Depth 10) -notmatch 'secret-token') 'options never retained'
+foreach ($lang in @('en','de')) { $h=ConvertTo-EloTechnicalReportHtml $observed $lang; Assert ($h -notmatch 'secret-token') 'options not rendered'; Assert ($h.Contains('JAVA_TOOL_OPTIONS')) 'options section' }
+$failed = New-EloTechnicalReport -ResourceCollector $resources -Actions @(@{Kind='Update';Status='Failed'})
+Assert ((ConvertTo-EloTechnicalReportHtml $failed en).Contains('No restore CLI available')) 'missing restore CLI'
+$recoverActions=@(@{Kind='Update';Status='Failed';RuntimeIndex=1},@{Kind='Backup';Status='Proven';RuntimeIndex=1;Verified=$true;BackupVerified=$true;EvidenceVerified=$true;EvidenceCode='BackupManifestMatched'})
+$evidence=@{Validated=$true;RuntimeIndex=1;Archive="C:\backups\java's.zip";Original='C:\ELO\java';Destination='C:\isolated\recovery'}
+$recoveryReport=New-EloTechnicalReport -ResourceCollector $resources -OptionsCollector { $null } -JvmEvidence @(@{Version='17.0.10';Verified=$true}) -Actions $recoverActions -RecoveryEvidence $evidence
+foreach ($lang in @('en','de')) {
+    $h=ConvertTo-EloTechnicalReportHtml $recoveryReport $lang
+    Assert ($h.Contains('Expand-Archive -LiteralPath') -and $h.Contains('java&#39;&#39;s.zip') -and $h.Contains('C:\ELO\java')) 'verified recovery escaped and rendered'
+    Assert ($h -notmatch 'Remove-Item|--restore') 'no destructive or invented CLI command'
+}
+$evidence.Validated=$false
+$noRecovery=New-EloTechnicalReport -ResourceCollector $resources -OptionsCollector { $null } -JvmEvidence @(@{Version='17.0.10';Verified=$true}) -Actions $recoverActions -RecoveryEvidence $evidence
+Assert (-not (ConvertTo-EloTechnicalReportHtml $noRecovery en).Contains('Expand-Archive')) 'unverified archive never yields command'
+$conflict=New-EloTechnicalReport -ResourceCollector $resources -OptionsCollector { @{Machine='-XX:-UseBASE64Intrinsics -XX:+UseBASE64Intrinsics';User='-XX:-UseBASE64IntrinsicsExtra';Process=$null} }
+Assert ($conflict.Options.Machine -eq 'Conflict' -and $conflict.Options.User -eq 'Absent' -and $conflict.Options.Process -eq 'Absent') 'conflicts and exact token matching'
 Write-Output 'PASS: deterministic bilingual report tests (synthetic adapters only)'

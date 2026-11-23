@@ -31,9 +31,10 @@
  never silently truncate JVMs or evidence: report a failure and narrow the scan root
  if limits are exceeded (this frontend has no pagination).
  preview summary 1..4096 per language, <=16 warnings of 1..2048 per language.
- POST scan -> {} for all available drives, or {searchPath: absolute local Windows
- directory} for an optional manual root (1..1024, no controls/wildcards/device/UNC/
- relative paths). This is the ONLY path input. Preserve spaces; treat as plain JSON
+ POST scan -> {} checks ready fixed or removable drives C: through Z: at exactly
+ X:\java\bin\java.exe and X:\ELO\java\bin\java.exe. An optional {searchPath:
+ absolute local Windows directory} adds a manual root after the root checks
+ (1..1024, no controls/wildcards/device/UNC/relative paths). This is the ONLY path input. Preserve spaces; treat as plain JSON
  data, never shell/PowerShell text or a command. Backend MUST independently validate
  and canonicalize, enforce local read-only traversal, handle reparse points safely,
  and reject invalid/inaccessible roots. Do not echo the root into activity logs.
@@ -152,7 +153,7 @@ const messages = {
  targetIneligible:'The selected JVM is not eligible for mitigation. Review the scan evidence.',optionsUnsupported:'Existing JVM/environment settings are ambiguous or unsupported. Review them with your administrator before making changes.',
  scanSent:'Scan requested',cancelSent:'Cancellation requested',previewReady:'Preview received',actionSent:'Confirmed action completed',connected:'Session connected',report:'Report exported',log:'Activity log exported',
  units:'items checked',previewKind:'Selected change',mitigation:'Temporary mitigation',runtimeUpdate:'Runtime update',
- searchPath:'Optional local search directory',searchHelp:'Leave empty to discover all available drives. Or enter an absolute local directory, e.g. C:\\ELO data. It is read-only search data, never a command. Network/device paths and wildcards are not accepted.',
+ searchPath:'Optional local search directory',searchHelp:'On ready fixed or removable drives C: through Z:, the scan checks only X:\\java\\bin\\java.exe and X:\\ELO\\java\\bin\\java.exe at each drive root. Optionally enter an absolute local directory to search after the root checks, e.g. C:\\ELO data. It is read-only search data, never a command. Network/device paths and wildcards are not accepted.',
  invalidPath:'Enter an absolute local Windows directory of at most 1024 characters, without controls, wildcards or relative segments.',
  jvmTable:'Discovered JVMs and evidence',runtimeRoot:'Runtime root',vendor:'Vendor',architecture:'Architecture',eloRationale:'ELO association rationale',classificationEvidence:'Classification evidence',
  patched:'Patched', 'not-affected':'Not affected',inconclusive:'Inconclusive',
@@ -194,7 +195,7 @@ const messages = {
  targetIneligible:'Die gewählte JVM ist für diese Risikominderung nicht geeignet. Scan-Nachweise prüfen.',optionsUnsupported:'Vorhandene JVM-/Umgebungseinstellungen sind mehrdeutig oder nicht unterstützt. Vor Änderungen mit Ihrem Administrator prüfen.',
  scanSent:'Scan angefordert',cancelSent:'Abbruch angefordert',previewReady:'Vorschau empfangen',actionSent:'Bestätigte Änderung abgeschlossen',connected:'Sitzung verbunden',report:'Bericht exportiert',log:'Aktivitätsprotokoll exportiert',
  units:'Elemente geprüft',previewKind:'Gewählte Änderung',mitigation:'Vorübergehende Risikominderung',runtimeUpdate:'Laufzeit-Update',
- searchPath:'Optionales lokales Suchverzeichnis',searchHelp:'Leer lassen, um alle verfügbaren Laufwerke zu durchsuchen. Oder ein absolutes lokales Verzeichnis eingeben, z. B. C:\\ELO data. Die Eingabe ist nur ein schreibgeschützter Suchpfad, niemals ein Befehl. Netzwerk- und Gerätepfade sowie Platzhalter sind nicht zulässig.',
+ searchPath:'Optionales lokales Suchverzeichnis',searchHelp:'Auf bereiten festen oder Wechsellaufwerken C: bis Z: prüft der Scan nur X:\\java\\bin\\java.exe und X:\\ELO\\java\\bin\\java.exe im Laufwerksstamm. Optional ein absolutes lokales Verzeichnis eingeben, das nach den Stammprüfungen durchsucht wird, z. B. C:\\ELO data. Die Eingabe ist nur ein schreibgeschützter Suchpfad, niemals ein Befehl. Netzwerk- und Gerätepfade sowie Platzhalter sind nicht zulässig.',
  invalidPath:'Geben Sie ein absolutes lokales Windows-Verzeichnis mit höchstens 1024 Zeichen ohne Steuerzeichen, Platzhalter oder relative Segmente ein.',
  jvmTable:'Gefundene JVMs und Nachweise',runtimeRoot:'Laufzeit-Stammverzeichnis',vendor:'Hersteller',architecture:'Architektur',eloRationale:'Begründung der ELO-Zuordnung',classificationEvidence:'Nachweis der Einstufung',
  patched:'Gepatcht','not-affected':'Nicht betroffen',inconclusive:'Nicht eindeutig',

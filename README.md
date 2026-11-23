@@ -20,7 +20,7 @@ ELO-Patch-Tools.bat --cli --scan --manual-path "D:\ELO Server"
 ELO-Patch-Tools.bat --cli --manual
 ```
 
-Without options, the tool starts a local web interface. Read-only CLI scans do not prompt. Scans are bounded and heuristic, not exhaustive; a missing finding does not prove that no affected runtime exists. `--keep-temp` retains extracted session resources for diagnosis; normal exit otherwise attempts to remove them, but forced termination may leave them behind. In CLI mode, `--no-browser` is accepted; in web mode it currently fails explicitly because a private launch handler is not packaged.
+Without options, the tool starts a local web interface. Read-only CLI scans do not prompt. Automatic discovery checks only `C:\java\bin\java.exe` and `C:\ELO\java\bin\java.exe`, and the equivalent root layouts on other ready fixed or removable drives from C: through Z:. It can return multiple installations; it does not establish ELO ownership. If Java is elsewhere, supply a local directory in the web interface or with `--manual-path`; after the root checks, the scanner searches that directory with a depth limit of 5 and an entry budget of 10,000. Errors, skipped reparse points, cancellation and limits can leave coverage incomplete; a missing finding does not prove absence. `--keep-temp` retains extracted session resources for diagnosis; normal exit otherwise attempts to remove them, but forced termination may leave them behind. In CLI mode, `--no-browser` is accepted; in web mode it currently fails explicitly because a private launch handler is not packaged.
 
 ## Safety and limitations
 

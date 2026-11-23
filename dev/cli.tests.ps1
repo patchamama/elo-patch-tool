@@ -37,6 +37,8 @@ function Invoke-InteractiveTestCli {
 }
 $r = Invoke-EloCli -Arguments @('--help') -Scanner $scanner
 Assert ($r.ExitCode -eq 0 -and $r.Output -match 'README' -and $r.Output -match 'JAVA_TOOL_OPTIONS') 'complete help'
+Assert ($r.Output.Contains('ready fixed or removable drives C: through Z:') -and $r.Output.Contains('\java\bin\java.exe') -and $r.Output.Contains('\ELO\java\bin\java.exe')) 'help specifies drive scope and exact root layouts'
+Assert ($r.Output.Contains('after root checks') -and $r.Output.Contains('depth 5') -and $r.Output.Contains('10,000 entries') -and $r.Output -notmatch 'searched before drive roots') 'help specifies optional bounded manual search order'
 Assert ($script:scanCalls -eq 0) 'help performs no scan'
 $r = Invoke-EloCli -Arguments @('--cli','--scan','--json','--no-browser','--keep-temp','--manual-path','D:\ELO Test') -Scanner $scanner
 $j = $r.Output | ConvertFrom-Json

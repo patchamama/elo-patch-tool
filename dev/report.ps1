@@ -31,8 +31,9 @@
 # Only allowlisted fields are retained. Do not pass raw logs, paths, identities,
 # URLs or secrets. Identifiers themselves must be safe backend observations.
 # HTML renderer re-normalizes its input; raw diagnostics are never serialized.
-# S10: JVM Vendor='Temurin' with VendorVerified(bool) enables same-provider
-# official download/install guidance. All other/unverified vendors stay Unknown.
+# S10: verified Temurin enables same-provider download/install guidance.
+# Verified Azul Zulu identifies the provider without asserting a fixed release;
+# other or unverified vendors stay Unknown.
 # Mitigation EvidenceCode additionally accepts MachineOptionSet (machine option
 # read back), NewlyLaunchedJvmFlagVerified (effective flag in a new JVM probe),
 # RunningEloJvmFlagVerified (effective flag in the identified current ELO JVM).
@@ -47,7 +48,7 @@ function ConvertTo-EloReportEscapedText {
 }
 function Get-EloReportVersion {
     param($Value)
-    if ($Value -is [string] -and $Value.Length -le 64 -and $Value -cmatch '^\d{1,8}(?:[._+\-]\d{1,8}){0,7}(?:-ea)?$') { return $Value }
+    if ($Value -is [string] -and $Value.Length -le 64 -and $Value -cmatch '^\d{1,8}(?:[._+\-]\d{1,8}){0,7}(?:-ea|-LTS)?$') { return $Value }
     return $null
 }
 function Test-EloReportProof {
@@ -72,12 +73,31 @@ function Get-EloReportWindowsResources {
     })
     @{ServerName=$computer.Name;WindowsVersion=$os.Version;WindowsBuild=$os.BuildNumber;TotalRamBytes=$computer.TotalPhysicalMemory;Disks=$disks}
 }
+# Collectors and recovery evidence are trusted backend-only inputs, never HTTP input.
+# Recovery paths require a validated archive matched to the original runtime, and
+# an independently selected isolated destination. No filesystem access occurs here.
+function Get-EloReportOptionState {
+    param($Value)
+    if ($null -eq $Value -or $Value -ceq '') { return 'Absent' }
+    if ($Value -isnot [string]) { return 'Unknown' }
+    $minus=[regex]::IsMatch($Value, '(?<!\S)-XX:-UseBASE64Intrinsics(?!\S)')
+    $plus=[regex]::IsMatch($Value, '(?<!\S)-XX:\+UseBASE64Intrinsics(?!\S)')
+    if ($plus) { return 'Conflict' }
+    if ($minus) { return 'Present' }
+    return 'Absent'
+}
+function Test-EloReportRecoveryPath {
+    param($Path)
+    return ($Path -is [string] -and $Path.Length -le 1024 -and $Path -cmatch '^[A-Za-z]:\\[^\x00-\x1f\x7f"<>|?*/:]+$' -and $Path -notmatch '(^|\\)\.{1,2}(\\|$)' -and $Path -notmatch '[\r\n]')
+}
 function New-EloTechnicalReport {
     param(
         [scriptblock]$ResourceCollector = { Get-EloReportWindowsResources },
         [object[]]$JvmEvidence = @(),
         [object[]]$Actions = @(),
-        [scriptblock]$EloVersionAdapter
+        [scriptblock]$EloVersionAdapter,
+        [scriptblock]$OptionsCollector = { @{Machine=[Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS','Machine');User=[Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS','User');Process=[Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS','Process')} },
+        $RecoveryEvidence
     )
     $system = @{Status='Unknown';ServerName=$null;WindowsVersion=$null;WindowsBuild=$null;TotalRamBytes=$null;Disks=@()}
     try {
@@ -105,12 +125,12 @@ function New-EloTechnicalReport {
         if ($state -eq 'Proven' -and (Test-EloReportProof $jvm.ExecutionVerified)) { $execution='Proven' }
         $classification='Unknown'; $evidence='Unknown'
         $classCodes=@{PotentiallyVulnerable='AdvisoryRangeMatch';NotAffected='AdvisoryExcludesVersion';Fixed='AdvisoryFixedVersion'}
-        if ($state -eq 'Proven' -and (Test-EloReportProof $jvm.ClassificationVerified) -and $jvm.Classification -is [string] -and $classCodes.ContainsKey($jvm.Classification) -and $jvm.EvidenceCode -ceq $classCodes[$jvm.Classification]) {
+        if ($jvm.Vendor -cne 'Azul Zulu' -and $state -eq 'Proven' -and (Test-EloReportProof $jvm.ClassificationVerified) -and $jvm.Classification -is [string] -and $classCodes.ContainsKey($jvm.Classification) -and $jvm.EvidenceCode -ceq $classCodes[$jvm.Classification]) {
             $classification=$jvm.Classification; $evidence=$jvm.EvidenceCode
         }
         $vendor='Unknown'
-        if ($jvm.Vendor -ceq 'Temurin' -and (Test-EloReportProof $jvm.VendorVerified)) { $vendor='Temurin' }
-        $jvms+=@{RuntimeIndex=($jvms.Count+1);Status=$state;Version=$version;ExecutionStatus=$execution;Classification=$classification;ClassificationVerified=($classification -ne 'Unknown');EvidenceCode=$evidence;Vendor=$vendor;VendorVerified=($vendor -eq 'Temurin')}
+        if (@('Temurin','Azul Zulu') -ccontains $jvm.Vendor -and (Test-EloReportProof $jvm.VendorVerified)) { $vendor=$jvm.Vendor }
+        $jvms+=@{RuntimeIndex=($jvms.Count+1);Status=$state;Version=$version;ExecutionStatus=$execution;Classification=$classification;ClassificationVerified=($classification -ne 'Unknown');EvidenceCode=$evidence;Vendor=$vendor;VendorVerified=($vendor -cne 'Unknown')}
     }
     $normalized=@()
     foreach ($kind in @('Update','Mitigation','Backup','Restore')) {
@@ -152,12 +172,24 @@ function New-EloTechnicalReport {
             }
         } catch { $elo.Status='Failed' }
     }
-    @{System=$system;Jvms=$jvms;Actions=$normalized;Elo=$elo}
+    $options=@{Machine='Unknown';User='Unknown';Process='Unknown'}
+    foreach ($scope in @('Machine','User','Process')) {
+        try { $rawOptions=& $OptionsCollector $scope; if ($null -ne $rawOptions) { $options[$scope]=Get-EloReportOptionState $rawOptions[$scope] } } catch { }
+    }
+    $recovery=@{Available=$false;Archive=$null;Original=$null;Destination=$null}
+    $failedUpdates=@($normalized | Where-Object { $_.Kind -eq 'Update' -and $_.Status -eq 'Failed' -and $null -ne $_.RuntimeIndex })
+    $backups=@($normalized | Where-Object { $_.Kind -eq 'Backup' -and $_.Status -eq 'Proven' -and $_.RuntimeIndex -eq $RecoveryEvidence.RuntimeIndex })
+    if ((Test-EloReportProof $RecoveryEvidence.Validated) -and $backups.Count -gt 0 -and @($failedUpdates | Where-Object { $_.RuntimeIndex -eq $RecoveryEvidence.RuntimeIndex }).Count -gt 0 -and (Test-EloReportRecoveryPath $RecoveryEvidence.Archive) -and (Test-EloReportRecoveryPath $RecoveryEvidence.Original) -and (Test-EloReportRecoveryPath $RecoveryEvidence.Destination) -and $RecoveryEvidence.Archive -match '(?i)\.zip$' -and $RecoveryEvidence.Destination -ine $RecoveryEvidence.Original -and -not $RecoveryEvidence.Destination.StartsWith($RecoveryEvidence.Original.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -and -not $RecoveryEvidence.Original.StartsWith($RecoveryEvidence.Destination.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)) {
+        $recovery=@{Available=$true;Validated=$true;RuntimeIndex=$RecoveryEvidence.RuntimeIndex;Archive=$RecoveryEvidence.Archive;Original=$RecoveryEvidence.Original;Destination=$RecoveryEvidence.Destination}
+    }
+    @{System=$system;Jvms=$jvms;Actions=$normalized;Elo=$elo;Options=$options;Recovery=$recovery}
 }
 function ConvertTo-EloTechnicalReportHtml {
     param([Parameter(Mandatory=$true)]$Report, [ValidateSet('en','de')][string]$Language='en')
     # Normalize again: renderer never reflects arbitrary DTO fields or messages.
-    $r=New-EloTechnicalReport -ResourceCollector { $Report.System }.GetNewClosure() -JvmEvidence @($Report.Jvms | ForEach-Object { @{Version=$_.Version;Verified=($_.Status -ceq 'Proven');ExecutionVerified=($_.ExecutionStatus -ceq 'Proven');Classification=$_.Classification;ClassificationVerified=$_.ClassificationVerified;EvidenceCode=$_.EvidenceCode;Vendor=$_.Vendor;VendorVerified=$_.VendorVerified} }) -Actions $Report.Actions -EloVersionAdapter { @{Version=$Report.Elo.Version;Verified=($Report.Elo.Status -ceq 'Proven')} }.GetNewClosure()
+    $r=New-EloTechnicalReport -OptionsCollector { $null } -ResourceCollector { $Report.System }.GetNewClosure() -JvmEvidence @($Report.Jvms | ForEach-Object { @{Version=$_.Version;Verified=($_.Status -ceq 'Proven');ExecutionVerified=($_.ExecutionStatus -ceq 'Proven');Classification=$_.Classification;ClassificationVerified=$_.ClassificationVerified;EvidenceCode=$_.EvidenceCode;Vendor=$_.Vendor;VendorVerified=$_.VendorVerified} }) -Actions $Report.Actions -EloVersionAdapter { @{Version=$Report.Elo.Version;Verified=($Report.Elo.Status -ceq 'Proven')} }.GetNewClosure()
+    # DTO contains only bounded states; never re-read environment during rendering.
+    foreach ($scope in @('Machine','User','Process')) { if (@('Present','Absent','Conflict','Unknown') -ccontains $Report.Options[$scope]) { $r.Options[$scope]=$Report.Options[$scope] } }
     if ($Report.System.Status -ceq 'Failed') { $r.System.Status='Failed' }
     if ($Report.Elo.Status -ceq 'Failed') { $r.Elo.Status='Failed' }
     $t=@{Title='Technical report';Server='Server';Windows='Windows version / build';Ram='Total RAM';Disk='Disk: total / free';Jvm='Detected JVM versions';Execution='Execution evidence';Elo='ELO version';Unknown='Unknown / unavailable';Failed='Failed';NotPerformed='Not performed';Proven='Verified';Update='Runtime update';Mitigation='Temporary mitigation';Backup='Backup';Restore='Restore';From='Previous version';To='Verified resulting version';BackupVersion='Verified backup JVM version';Sources='Official information sources';Notice='States reflect supplied verified evidence only. Compatibility, vulnerability and successful remediation are not inferred. No credentials or raw diagnostics are included.';Missing='Missing official installation-specific endpoint, authentication method, version operation and response schema. Java Client IXConnectionIF getVersion/getImplVersion is not a universal REST API contract.'}
@@ -202,6 +234,8 @@ function ConvertTo-EloTechnicalReportHtml {
         $advice=$t.VendorUnknown
         if ($j.Vendor -eq 'Temurin') {
             $advice=$t.Vendor+': Temurin; <a href="https://adoptium.net/temurin/releases">'+$t.Download+'</a>; <a href="https://adoptium.net/installation/">'+$t.Install+'</a>'
+        } elseif ($j.Vendor -ceq 'Azul Zulu') {
+            $advice=$t.Vendor+': Azul Zulu. '+$t.Upgrade
         }
         $lines.Add('<li>JVM #'+$j.RuntimeIndex+': '+$advice+'</li>')
     }
@@ -226,7 +260,23 @@ function ConvertTo-EloTechnicalReportHtml {
         }
         $lines.Add('<li>'+$t[$a.Kind]+': '+$t[$a.Status]+$detail+'</li>')
     }
-    $lines.Add('</ul><h2>'+$t.Sources+'</h2><ul>')
+    $lines.Add('</ul><h2>JAVA_TOOL_OPTIONS</h2><ul>')
+    $optionLabels=@{Present='Flag present';Absent='Flag absent';Conflict='Conflicting enabling flag present';Unknown='Unknown / unavailable'}
+    if ($Language -eq 'de') { $optionLabels=@{Present='Flag vorhanden';Absent='Flag nicht vorhanden';Conflict='Konfligierendes aktivierendes Flag vorhanden';Unknown='Unbekannt / nicht verfuegbar'} }
+    foreach ($scope in @('Machine','User','Process')) { $lines.Add('<li>'+$scope+': '+$optionLabels[$r.Options[$scope]]+'</li>') }
+    if ($Language -eq 'de') { $lines.Add('</ul><p>Umgebungswerte beweisen keinen Schutz bestehender ELO-Prozesse.</p>') } else { $lines.Add('</ul><p>Environment values do not prove protection of existing ELO processes.</p>') }
+    if (@($r.Actions | Where-Object { $_.Kind -eq 'Update' -and $_.Status -eq 'Failed' }).Count -gt 0) {
+        if ($Language -eq 'de') { $lines.Add('<h2>Manuelle Wiederherstellung</h2><p>Keine Wiederherstellungs-CLI verfuegbar. Fehlgeschlagene Runtime behalten oder umbenennen, nicht loeschen; Wiederherstellung kontrolliert manuell durchfuehren.</p>') }
+        else { $lines.Add('<h2>Manual recovery</h2><p>No restore CLI available. Retain or rename the failed runtime, do not delete it; perform a controlled manual restore.</p>') }
+        # Revalidate the trusted evidence against the normalized actions before rendering.
+        $rr=New-EloTechnicalReport -ResourceCollector { $null } -OptionsCollector { $null } -JvmEvidence @($Report.Jvms | ForEach-Object { @{Version=$_.Version;Verified=($_.Status -ceq 'Proven')} }) -Actions $Report.Actions -RecoveryEvidence $Report.Recovery
+        if ($rr.Recovery.Available) {
+            $rec=$rr.Recovery
+            $cmd="Expand-Archive -LiteralPath '"+$rec.Archive.Replace("'","''")+"' -DestinationPath '"+$rec.Destination.Replace("'","''")+"'"
+            $lines.Add('<p>Original: '+(ConvertTo-EloReportEscapedText $rec.Original)+'</p><pre>'+(ConvertTo-EloReportEscapedText $cmd)+'</pre>')
+        } else { $lines.Add('<p>'+$t.Unknown+'</p>') }
+    }
+    $lines.Add('<h2>'+$t.Sources+'</h2><ul>')
     $lines.Add('<li>'+$t.Checked+': 2026-11-23. '+$t.Changes+'</li>')
     foreach ($source in @(@('OpenJDK 2026-11-17','https://openjdk.org/groups/vulnerability/advisories/2026-11-17','Supplied'),@('Oracle CVE-2026-114938','https://linux.oracle.com/cve/CVE-2026-114938.html','Fetched'),@('Adoptium Temurin November 2026 CSPU','https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/','Fetched'))) {
         $lines.Add('<li><a href="'+$source[1]+'">'+$source[0]+'</a> - '+$t[$source[2]]+'</li>')

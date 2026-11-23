@@ -3,6 +3,13 @@ $ErrorActionPreference = 'Stop'
 $htmlPath = Join-Path $PSScriptRoot 'ui.html'
 if (-not (Test-Path -LiteralPath $htmlPath)) { throw 'Missing dev/ui.html' }
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw 'Node.js is required for isolated browser-contract tests.' }
+# Verify embedded resources against their authoritative development sources.
+$batText = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) 'ELO-Patch-Tools.bat'))
+foreach ($resource in @(@('SCAN_PS','scan.ps1'),@('SERVER_PS','server.ps1'),@('CLI_PS','cli.ps1'),@('UI_HTML','ui.html'),@('REPORT_PS','report.ps1'))) {
+    $match = [regex]::Match($batText, '(?ms)^::ELO_PATCH_BEGIN:' + $resource[0] + '\r?\n(.*?)^::ELO_PATCH_END:' + $resource[0] + '\s*$')
+    $expected = [IO.File]::ReadAllText((Join-Path $PSScriptRoot $resource[1])).TrimEnd("`r", "`n")
+    if (-not $match.Success -or ($match.Groups[1].Value.TrimEnd("`r", "`n") -replace "`r`n", "`n") -cne ($expected -replace "`r`n", "`n")) { throw "Embedded $($resource[0]) differs from source" }
+}
 $tests = @'
 'use strict';
 const fs = require('node:fs');
@@ -78,6 +85,14 @@ function boot(hash = '#token=test-session-token') {
  await technical.el('exportTechnical').click();
  assert.equal(technical.downloads.length,downloadCount,'authentication failure never downloads');
  const ui=boot(); await tick();
+ const searchHelp=ui.translated.find(el => el.dataset.i18n === 'searchHelp');
+ for (const language of ['en','de']) {
+ ui.el('language').value=language; ui.el('language').onchange();
+ const text=searchHelp.textContent;
+ assert(text.includes('C:') && text.includes('Z:') && text.includes('X:\\java\\bin\\java.exe') && text.includes('X:\\ELO\\java\\bin\\java.exe'), 'both locales describe exact drive-root layouts');
+ assert(language === 'en' ? /ready fixed or removable/i.test(text) && /after.*root/i.test(text) : /bereit.*fest.*wechsel/i.test(text) && /nach.*Stamm/i.test(text), 'both locales describe drive eligibility and manual order');
+ }
+ ui.el('language').value='en'; ui.el('language').onchange();
  assert.equal(ui.history.args[2],'/ui'); assert.equal(ui.calls.length,2);
  for(const {path,options} of ui.calls) {
  assert(path.startsWith('/api/')); assert(!path.includes('test-session-token'));
@@ -89,6 +104,12 @@ function boot(hash = '#token=test-session-token') {
  assert(ui.el('details').textContent.includes('Example vendor <img>'));
  assert(ui.el('details').textContent.includes('ELO service points to this JVM'));
  assert(ui.el('details').textContent.includes('Version and vendor matched advisory rules'));
+ const zuluUi=boot(); await tick();
+ zuluUi.results([row({vendor:'Azul Zulu',version:'21.0.1+12-LTS',status:'inconclusive',classificationEvidence:both('OpenJDK Runtime Environment Zulu21.30+15-CA (build 21.0.1+12-LTS)')})]);
+ await zuluUi.poll();
+ assert(zuluUi.el('details').textContent.includes('Azul Zulu'));
+ assert(zuluUi.el('details').textContent.includes('Inconclusive'));
+ assert(!zuluUi.el('details').textContent.includes('Patched'));
  assert.equal(ui.el('jvmRows').children.length,1);
  assert.equal(ui.el('jvmRows').children[0].children.length,8,'complete evidence table');
  assert.equal(ui.el('verifiedOn').textContent,'Source verification date (UTC): 2025-01-21');
