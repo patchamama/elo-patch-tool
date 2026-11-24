@@ -1,6 +1,7 @@
 # Windows PowerShell 5.1; deterministic mocks only. No live ELO or network access.
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/update.ps1"
+. "$PSScriptRoot/catalog.ps1"
 function Assert-UpdateTest($Condition, $Message) { if (-not $Condition) { throw "ASSERT: $Message" } }
 function New-UpdateFixture {
     $state = @{ Events=New-Object 'System.Collections.Generic.List[string]'; Fail=''; Admin=$true; Now=[datetime]'2026-01-01T00:00:00Z'; Installed='old'; Old=$false; Backup=$false; Stage=$false; Identity='original'; Branch='17'; Verified=$true }
@@ -48,6 +49,29 @@ Assert-UpdateTest ($f.State.Backup -and $f.State.Old -and $f.State.Installed -eq
 Assert-UpdateTest (($f.State.Events -join ',') -eq 'preflight,preflight,backup,verify-backup,download,verify-package,copy,probe,preserve,replace,validate') 'ordered safety checks'
 Assert-UpdateTest ((Invoke-FixtureUpdate $f $p).Status -eq 'Rejected') 'confirmation cannot be replayed'
 Write-Output 'PASS: ordered simulated transaction, paths with spaces, retained recovery artifacts, replay rejection'
+# Opt-in service control: stop right before the replacement, restart exactly once, on success AND on failure.
+function Add-ServiceControl($Fixture,[string]$QuiesceFails='') {
+    $state=$Fixture.State
+    $Fixture.Context.Adapters.Quiesce={ param($Paths) $state.Events.Add('quiesce'); if ($QuiesceFails) { throw 'runtime_still_in_use_after_service_stop' }; @('svc') }.GetNewClosure()
+    $Fixture.Context.Adapters.Resume={ param($Paths,$Stopped) $state.Events.Add('resume'); if ($state.Fail -eq 'resume') { throw 'service_restart_failed:svc' } }.GetNewClosure()
+}
+$f=New-UpdateFixture; Add-ServiceControl $f
+$r=Invoke-FixtureUpdate $f (New-FixturePreview $f)
+Assert-UpdateTest ($r.Status -eq 'SimulatedSuccess' -and $r.ServicesRestarted -and -not $r.ServiceError) 'services restarted after a successful update'
+Assert-UpdateTest (($f.State.Events -join ',') -ceq 'preflight,preflight,backup,verify-backup,download,verify-package,copy,probe,quiesce,preserve,replace,validate,resume') 'services are stopped after the probe, right before the replacement, and resumed last'
+$f=New-UpdateFixture; Add-ServiceControl $f; $f.State.Fail='installed'
+$r=Invoke-FixtureUpdate $f (New-FixturePreview $f)
+Assert-UpdateTest ($r.Status -eq 'RolledBack' -and $r.ServicesRestarted -and (@($f.State.Events | Where-Object { $_ -eq 'resume' }).Count -eq 1) -and $f.State.Events.IndexOf('resume') -gt $f.State.Events.IndexOf('verify-restored')) 'services restart once, after the rollback'
+$f=New-UpdateFixture; Add-ServiceControl $f -QuiesceFails 'x'
+$r=Invoke-FixtureUpdate $f (New-FixturePreview $f)
+Assert-UpdateTest ($r.Status -eq 'Rejected' -and $r.Error -like '*runtime_still_in_use*' -and $f.State.Installed -eq 'old' -and $f.State.Events -notcontains 'preserve' -and $f.State.Events -contains 'resume' -and $r.ServicesRestarted) 'failed service stop aborts before any change and still resumes'
+$f=New-UpdateFixture; Add-ServiceControl $f; $f.State.Fail='resume'
+$r=Invoke-FixtureUpdate $f (New-FixturePreview $f)
+Assert-UpdateTest ($r.Status -eq 'SimulatedSuccess' -and -not $r.ServicesRestarted -and $r.ServiceError -like '*service_restart_failed*') 'a failed service restart is reported, not hidden'
+$f=New-UpdateFixture
+$r=Invoke-FixtureUpdate $f (New-FixturePreview $f)
+Assert-UpdateTest ($r.Status -eq 'SimulatedSuccess' -and -not $r.ServicesRestarted -and $f.State.Events -notcontains 'quiesce') 'no service control unless the adapters provide it'
+Write-Output 'PASS: opt-in service stop/restart around the replacement'
 foreach ($failure in @('backup','verify-backup','download','checksum','copy','probe')) {
     $f=New-UpdateFixture; $p=New-FixturePreview $f; $f.State.Fail=$failure
     $r=Invoke-FixtureUpdate $f $p
@@ -131,11 +155,7 @@ $r=Invoke-EloRuntimeUpdate -Context $f.Context -Confirmation $p.Confirmation
 Assert-UpdateTest ($r.Error -eq 'compatibility_confirmation_required' -and -not $f.State.Backup) 'compatibility acknowledgement required'
 $p=New-FixturePreview $f
 Assert-UpdateTest ((Invoke-FixtureUpdate $f $p).Status -eq 'SimulatedSuccess') 'explicit compatibility warning approval'
-$verified=@(Get-EloVerifiedTemurinReleases)
-$meta=Get-EloTemurinMetadataEvidence
-Assert-UpdateTest ($verified.Count -eq 1 -and $verified[0].Sha256 -ceq $meta.Sha256 -and $verified[0].Uri -ceq $meta.Uri -and $verified[0].ArchiveRoot -ceq 'jdk-17.0.21.1+2' -and $verified[0].Vendor -ceq 'Eclipse Adoptium') 'exactly one pinned, verified release'
-Assert-UpdateTest ((@($verified[0].AllowedHosts) -join ',') -ceq 'github.com,release-assets.githubusercontent.com') 'only the two observed hosts are allowed'
-Write-Output 'PASS: compatibility warning approval and single pinned verified release'
+Write-Output 'PASS: compatibility warning approval'
 function Assert-UpdateThrows([scriptblock]$Action,[string]$Code) {
     $message=''; try { $null=& $Action } catch { $message=$_.Exception.Message }
     Assert-UpdateTest ($message -like "*$Code*") "expected $Code, got $message"
@@ -152,6 +172,7 @@ foreach ($address in @('http://fixture.invalid/a','https://fixture.invalid.attac
 }
 # Real download rejects unknown release before opening a connection OR output.
 Assert-UpdateThrows { Invoke-EloPinnedDownload @{Vendor='Eclipse Adoptium'} 'Z:\NEVER-CREATE.zip' } 'no_independently_verified'
+Assert-UpdateTest (-not (Test-Path 'Z:\NEVER-CREATE.zip')) 'nothing created for an unverified release'
 Write-Output 'PASS: published-checksum grammar, HTTPS allowlist, network fail-closed before IO'
 function New-ZipPolicyEntry([string]$Name,[long]$Length=1,[long]$Attributes=0) {
     @{FullName=$Name;Length=$Length;ExternalAttributes=$Attributes}
@@ -213,31 +234,42 @@ Assert-UpdateTest $threw 'production and simulation are mutually exclusive'
 $prod=New-EloUpdateContext -Adapters $windows -Production
 Assert-UpdateTest ($prod.Production -and -not $prod.Simulation) 'production context only for module Windows adapters'
 Write-Output 'PASS: actual memory ZIP verification (valid/corrupt/missing/extra/duplicate), inert Windows factory, production gate'
-# Official metadata supplied and independently fetched by parent: no network here.
-$evidence=Get-EloTemurinMetadataEvidence
-Assert-UpdateTest ($evidence.Source -ceq 'https://api.adoptium.net/v3/assets/version/17.0.21.1%2B2?architecture=x64&image_type=jdk&os=windows&vendor=eclipse') 'exact official metadata source'
-Assert-UpdateTest ($evidence.ApiVendor -ceq 'eclipse' -and $evidence.ReleaseName -ceq 'jdk-17.0.21.1+2' -and
-    $evidence.OS -ceq 'windows' -and $evidence.Architecture -ceq 'x64' -and $evidence.JvmImplementation -ceq 'hotspot' -and $evidence.ImageType -ceq 'jdk') 'verified API identity only'
-Assert-UpdateTest ($evidence.Uri -ceq 'https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.21.1%2B2/OpenJDK17U-jdk_x64_windows_hotspot_17.0.21.1_2.zip') 'exact package URL, not a constructed latest URL'
-Assert-UpdateTest ($evidence.Sha256 -ceq 'eafba0944f777abdc74d5aad16049c9b5a1275b6ce99e2939ba9f7f3e6f08c87' -and
-    $evidence.Size -eq 191150540 -and $evidence.ChecksumUri -ceq ($evidence.Uri+'.sha256.txt')) 'verified API checksum, size and checksum link'
-Assert-UpdateTest ($evidence.Scope -ceq 'OfficialApiMetadataOnly' -and -not $evidence.ContainsKey('Vendor') -and
-    -not $evidence.ContainsKey('Format') -and -not $evidence.ContainsKey('ArchiveRoot') -and
-    -not $evidence.ContainsKey('AllowedHosts') -and -not $evidence.ContainsKey('FinalUri')) 'metadata never invents runtime implementor, format, archive layout or redirect policy'
-Assert-UpdateTest (@(Get-EloVerifiedTemurinReleases).Count -eq 1 -and -not (@(Get-EloVerifiedTemurinReleases)[0].ContainsKey('Size'))) 'raw metadata object is not itself a pinned release'
-Assert-UpdateThrows { Get-EloPinnedTemurinRelease $evidence } 'no_independently_verified'
-Assert-UpdateThrows { Invoke-EloPinnedDownload $evidence 'Z:\NEVER-CREATE.zip' } 'no_independently_verified'
-# Only the exact pinned identity matches; any deviation is rejected before network or file creation.
-$candidate=@{Vendor='Eclipse Adoptium';Version='17.0.21.1+2';Branch='17';Architecture=$evidence.Architecture;Uri=$evidence.Uri;Sha256=$evidence.Sha256}
-Assert-UpdateTest ((Get-EloPinnedTemurinRelease $candidate).ArchiveRoot -ceq 'jdk-17.0.21.1+2') 'exact pinned package resolves'
-foreach ($key in @('Vendor','Version','Branch','Architecture','Uri','Sha256')) { $bad=@{}+$candidate; $bad[$key]=$bad[$key]+'x'; Assert-UpdateThrows { Get-EloPinnedTemurinRelease $bad } 'no_independently_verified' }
-$evidence.AllowedHosts=@('github.com'); $evidence.Format='zip'; $evidence.ArchiveRoot='UNPROVEN'; $evidence.Sha256='0'*64
-$fresh=Get-EloTemurinMetadataEvidence
-Assert-UpdateTest ($fresh.Sha256 -ceq $candidate.Sha256 -and -not $fresh.ContainsKey('AllowedHosts')) 'returned evidence is a fresh copy, not mutable approval state'
-Assert-UpdateThrows { Get-EloPinnedTemurinRelease $evidence } 'no_independently_verified'
-Assert-UpdateTest (((Get-EloUpdateGaps) -join ' ') -notlike '*allowlist empty*' -and ((Get-EloUpdateGaps) -join ' ') -like '*Zulu*') 'gap report reflects the pinned release and the remaining vendor gap'
-Write-Output 'PASS: exact parent-verified API metadata is informational only; no download or production approval'
-# Embedded console class is returned in memory only; no runtime is launched here.
+# Version grammar and ordering across Java 8 / 11 / 17 / 21 / 25 formats.
+$cases=@{'1.8.0_472-b08'='8.0.472+8';'21.0.1+12-LTS'='21.0.1+12';'17.0.21.1+2'='17.0.21.1+2';'8u472'='8.0.472+0';'25'='25+0';'11.0.33.1+1'='11.0.33.1+1'}
+foreach ($key in $cases.Keys) { Assert-UpdateTest ((ConvertTo-EloJavaVersion $key).Text -ceq $cases[$key]) "version grammar $key" }
+foreach ($bad in @('','abc','1.2.3.4.5.6','21.0.1; calc','-1')) { Assert-UpdateThrows { ConvertTo-EloJavaVersion $bad } 'unrecognized_java_version' }
+function V($x){ ConvertTo-EloJavaVersion $x }
+Assert-UpdateTest ((Compare-EloJavaVersion (V '21.0.1+12-LTS') (V '21.0.13.1+2')) -eq -1 -and (Compare-EloJavaVersion (V '21.0.13.1+2') (V '21.0.13.1+2')) -eq 0 -and
+    (Compare-EloJavaVersion (V '17.0.21.1+3') (V '17.0.21.1+2')) -eq 1 -and (Compare-EloJavaVersion (V '1.8.0_472-b08') (V '8.0.514+1')) -eq -1 -and (Compare-EloJavaVersion (V '17.0.9') (V '17.0.10')) -eq -1) 'version ordering is numeric, not lexical'
+Assert-UpdateTest ((Test-EloSameJavaRelease '21.0.13.1+2-LTS' '21.0.13.1+2') -and (Test-EloSameJavaRelease '1.8.0_514' '8.0.514+1') -and -not (Test-EloSameJavaRelease '21.0.13.1+2' '21.0.12.1+2')) 'same release comparison tolerates missing build numbers'
+# Release resolution with canned vendor API answers: plain GA builds only, newest wins, hash from the detail record.
+$zuluList='[{"download_url":"https://cdn.azul.com/zulu/bin/zulu21.54.201-ca-crac-jdk21.0.13.1-win_x64.zip","java_version":[21,0,13,1],"name":"zulu21.54.201-ca-crac-jdk21.0.13.1-win_x64.zip","openjdk_build_number":2,"package_uuid":"aaaaaaaa-0000-4000-8000-000000000001"},{"download_url":"https://cdn.azul.com/zulu/bin/zulu21.50.19-ca-jdk21.0.11-win_x64.zip","java_version":[21,0,11],"name":"zulu21.50.19-ca-jdk21.0.11-win_x64.zip","openjdk_build_number":1,"package_uuid":"aaaaaaaa-0000-4000-8000-000000000002"},{"download_url":"https://cdn.azul.com/zulu/bin/zulu21.54.201-ca-jdk21.0.13.1-win_x64.zip","java_version":[21,0,13,1],"name":"zulu21.54.201-ca-jdk21.0.13.1-win_x64.zip","openjdk_build_number":2,"package_uuid":"aaaaaaaa-0000-4000-8000-000000000003"},{"download_url":"https://cdn.azul.com/zulu/bin/zulu21.54.109-ca-fx-jdk21.0.13.0.3-win_x64.zip","java_version":[21,0,13,0,3],"name":"zulu21.54.109-ca-fx-jdk21.0.13.0.3-win_x64.zip","openjdk_build_number":1,"package_uuid":"aaaaaaaa-0000-4000-8000-000000000004"}]'
+$zuluDetail='{"name":"zulu21.54.201-ca-jdk21.0.13.1-win_x64.zip","os":"windows","package_uuid":"aaaaaaaa-0000-4000-8000-000000000003","download_url":"https://cdn.azul.com/zulu/bin/zulu21.54.201-ca-jdk21.0.13.1-win_x64.zip","sha256_hash":"14e7a0395df4f09b508d50aa65a858650d59eb8d2221df57b4742d0830f3a3a0","size":211168000}'
+$zuluGetter={ param($Uri,$Hosts) if ($Uri -like '*/packages/aaaaaaaa-0000-4000-8000-000000000003') { $zuluDetail } else { $zuluList } }
+$zulu=Resolve-EloLatestRelease -Vendor 'Azul Zulu' -Branch '21' -Architecture 'x64' -ImageType 'jdk' -Getter $zuluGetter
+Assert-UpdateTest ($zulu.Version -ceq '21.0.13.1+2' -and $zulu.Sha256 -ceq '14e7a0395df4f09b508d50aa65a858650d59eb8d2221df57b4742d0830f3a3a0' -and $zulu.Uri -ceq 'https://cdn.azul.com/zulu/bin/zulu21.54.201-ca-jdk21.0.13.1-win_x64.zip' -and
+    $zulu.Vendor -ceq 'Azul Zulu' -and (@($zulu.AllowedHosts) -join ',') -ceq 'cdn.azul.com') 'newest plain Zulu build chosen (no CRaC/FX, not an older one)'
+$temurinAnswer='[{"release_name":"jdk-17.0.21.1+2","binary":{"os":"windows","image_type":"jdk","jvm_impl":"hotspot","package":{"link":"https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.21.1%2B2/OpenJDK17U-jdk_x64_windows_hotspot_17.0.21.1_2.zip","checksum":"eafba0944f777abdc74d5aad16049c9b5a1275b6ce99e2939ba9f7f3e6f08c87","size":191150540}},"version":{"openjdk_version":"17.0.21.1+2"}}]'
+$temurin=Resolve-EloLatestRelease -Vendor 'Eclipse Adoptium' -Branch '17' -Architecture 'x64' -ImageType 'jdk' -Getter { param($Uri,$Hosts) $temurinAnswer }
+Assert-UpdateTest ($temurin.Version -ceq '17.0.21.1+2' -and $temurin.Size -eq 191150540 -and $temurin.Name -ceq 'OpenJDK17U-jdk_x64_windows_hotspot_17.0.21.1_2.zip') 'Temurin latest record validated'
+Assert-UpdateThrows { Resolve-EloLatestRelease -Vendor 'Azul Zulu' -Branch '17' -Architecture 'x64' -ImageType 'jdk' -Getter { param($Uri,$Hosts) '[]' } } 'no_release_found'
+Assert-UpdateThrows { Resolve-EloLatestRelease -Vendor 'Oracle' -Branch '17' -Architecture 'x64' -Getter { '[]' } } 'unsupported_vendor'
+Assert-UpdateThrows { Resolve-EloLatestRelease -Vendor 'Azul Zulu' -Branch '21; calc' -Architecture 'x64' -Getter { '[]' } } 'invalid_release_request'
+# Strict, code-defined policy: tampering with any part of a record is refused.
+$good=@{Vendor='Azul Zulu';Branch='21';Architecture='x64';ImageType='jdk';Version='21.0.13.1+2';Uri='https://cdn.azul.com/zulu/bin/zulu21.54.201-ca-jdk21.0.13.1-win_x64.zip';Sha256=('a'*64);Size=211168000}
+Assert-UpdateTest ((Get-EloPinnedRelease $good).MaxArchiveBytes -gt 211168000) 'valid release record accepted'
+$tamper=@{
+    Vendor='Oracle';Branch='99x';Architecture='arm32';ImageType='jmod';Version='not-a-version';Sha256=('a'*63);Size=10
+    Uri='http://cdn.azul.com/zulu/bin/zulu21.54.201-ca-jdk21.0.13.1-win_x64.zip'
+}
+foreach ($key in $tamper.Keys) { $bad=@{}+$good; $bad[$key]=$tamper[$key]; Assert-UpdateThrows { Get-EloPinnedRelease $bad } 'no_independently_verified' }
+foreach ($uri in @('https://evil.invalid/zulu/bin/zulu21.54.201-ca-jdk21.0.13.1-win_x64.zip','https://cdn.azul.com.evil.invalid/zulu/bin/zulu21.54.201-ca-jdk21.0.13.1-win_x64.zip','https://cdn.azul.com/zulu/bin/zulu21.54.201-ca-jdk21.0.13.1-win_x64.zip?x=1','https://cdn.azul.com/zulu/bin/../evil.zip','https://cdn.azul.com/zulu/bin/zulu21.54.201-ca-jdk21.0.13.1-win_x64.exe','https://cdn.azul.com/zulu/bin/zulu21.54.201-ca-jre21.0.13.1-win_x64.zip')) {
+    $bad=@{}+$good; $bad.Uri=$uri; Assert-UpdateThrows { Get-EloPinnedRelease $bad } 'no_independently_verified'
+}
+$bad=@{}+$good; $bad.Branch='17'; Assert-UpdateThrows { Get-EloPinnedRelease $bad } 'no_independently_verified'
+Assert-UpdateThrows { Invoke-EloPinnedDownload $tamper 'Z:\NEVER-CREATE.zip' } 'no_independently_verified'
+Assert-UpdateTest (((Get-EloUpdateGaps) -join ' ') -like '*Zulu*' -and ((Get-EloUpdateGaps) -join ' ') -like '*SACL*') 'gap report names supported vendors and the SACL limit'
+Write-Output 'PASS: version grammar, latest-release resolution (Zulu, Temurin), strict vendor policy and tamper rejection'# Embedded console class is returned in memory only; no runtime is launched here.
 $class=Get-EloJavaSelfTestClass
 Assert-UpdateTest ($class -is [byte[]] -and $class.Length -gt 100) 'embedded Java class bytes'
 Assert-UpdateTest ([BitConverter]::ToString($class,0,4) -ceq 'CA-FE-BA-BE') 'Java class magic'
@@ -356,4 +388,43 @@ foreach ($case in @('restore','changed-old')) {
     }
 }
 Write-Output 'PASS: synthetic real rename restore and changed-old refusal; no executable launched'
+# Automatic restore from the backup ZIP (real filesystem, synthetic runtime tree, nothing executed).
+$restoreBase=Join-Path $fixtureRoot 'backup-restore'
+$null=[IO.Directory]::CreateDirectory($restoreBase)
+function New-SyntheticRuntime([string]$Path) {
+    $null=[IO.Directory]::CreateDirectory((Join-Path $Path 'bin')); $null=[IO.Directory]::CreateDirectory((Join-Path $Path 'lib\sub')); $null=[IO.Directory]::CreateDirectory((Join-Path $Path 'empty dir'))
+    [IO.File]::WriteAllText((Join-Path $Path 'bin\java.exe'),'synthetic executable bytes'); [IO.File]::WriteAllText((Join-Path $Path 'lib\a b.txt'),'alpha')
+    [IO.File]::WriteAllBytes((Join-Path $Path 'lib\sub\b.bin'),[byte[]](0..255)); [IO.File]::WriteAllText((Join-Path $Path 'release'),'IMPLEMENTOR="Eclipse Adoptium"')
+}
+function Get-ContentMap($Root,$Path) { $m=Get-EloRuntimeManifest $Root $Path; $h=@{}; foreach ($e in $m.Entries) { $h[[string]$e.Name]=('{0}|{1}|{2}' -f $e.Directory,$e.Length,$e.Hash) }; $h }
+$rt=Join-Path $restoreBase 'java'; New-SyntheticRuntime $rt
+$bpaths=@{Runtime=$rt;Backup=(Join-Path $restoreBase 'java.backup.zip')}
+$bman=Get-EloRuntimeManifest $restoreBase $rt; Write-EloVerifiedBackup $restoreBase $bpaths $bman
+$originalMap=Get-ContentMap $restoreBase $rt
+# The "updated" runtime differs completely.
+[IO.File]::WriteAllText((Join-Path $rt 'lib\a b.txt'),'tampered'); Remove-Item -LiteralPath (Join-Path $rt 'lib\sub') -Recurse -Force; [IO.File]::WriteAllText((Join-Path $rt 'new.txt'),'new release file')
+$order=New-Object 'System.Collections.Generic.List[string]'
+$result=Invoke-EloBackupRestore -Root $restoreBase -Runtime $rt -Backup $bpaths.Backup -Stamp '20260101000000' -Quiesce { $order.Add('stop') }.GetNewClosure() -Resume { $order.Add('start') }.GetNewClosure()
+$restoredMap=Get-ContentMap $restoreBase $rt
+Assert-UpdateTest ($result.Restored -and $restoredMap.Count -eq $originalMap.Count -and -not @($originalMap.Keys | Where-Object { $restoredMap[$_] -cne $originalMap[$_] }).Count) 'restored tree equals the backed-up content (files, empty directory, binary bytes)'
+Assert-UpdateTest ((Test-Path -LiteralPath ($rt+'.replaced-20260101000000\new.txt')) -and -not (Test-Path -LiteralPath ($rt+'.restore-20260101000000'))) 'the replaced runtime is kept, the staging directory is consumed'
+Assert-UpdateTest (($order -join ',') -ceq 'stop,start') 'services are stopped before the swap and started afterwards'
+if ($result.AclExact) { Assert-UpdateTest ((Get-EloRuntimeManifest $restoreBase $rt).Fingerprint -ceq $bman.Fingerprint) 'restored runtime has the exact original fingerprint including ACLs' }
+# A tampered backup entry is refused and the current runtime is not touched.
+$tampered=Join-Path $restoreBase 'tampered.zip'; Copy-Item -LiteralPath $bpaths.Backup -Destination $tampered
+$zipStream=[IO.File]::Open($tampered,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite); $zip=New-Object IO.Compression.ZipArchive($zipStream,[IO.Compression.ZipArchiveMode]::Update)
+try { $entry=$zip.GetEntry('tree/lib/a b.txt'); $w=New-Object IO.StreamWriter($entry.Open()); $w.Write('ALPHA'); $w.Dispose() } finally { $zip.Dispose(); $zipStream.Dispose() }
+$before=(Get-EloRuntimeManifest $restoreBase $rt).Fingerprint
+Assert-UpdateThrows { Invoke-EloBackupRestore -Root $restoreBase -Runtime $rt -Backup $tampered -Stamp '20260101000001' } 'backup_entry_mismatch'
+Assert-UpdateTest ((Get-EloRuntimeManifest $restoreBase $rt).Fingerprint -ceq $before -and -not (Test-Path -LiteralPath ($rt+'.replaced-20260101000001'))) 'a refused restore leaves the runtime unchanged'
+Assert-UpdateThrows { Invoke-EloBackupRestore -Root $restoreBase -Runtime $rt -Backup (Join-Path $fixtureRoot 'outside.zip') -Stamp '20260101000002' } 'outside_approved_boundary'
+Assert-UpdateThrows { Invoke-EloBackupRestore -Root $restoreBase -Runtime $rt -Backup $bpaths.Backup -Stamp '20260101000000' } 'recovery_or_staging_path_exists'
+Write-Output 'PASS: automatic restore from the backup ZIP (content, retention, service hooks, tamper and boundary refusal)'
+# Runtimes directly below a drive root are allowed: the approved root may be the drive root itself.
+$driveRoot=[IO.Path]::GetPathRoot($fixtureRoot)
+Assert-UpdateTest ((Assert-EloWindowsBoundary $driveRoot ($driveRoot+'elo-drive-root-probe')) -ieq ($driveRoot+'elo-drive-root-probe')) 'boundary accepts a runtime directly below the drive root'
+Assert-UpdateThrows { Assert-EloWindowsBoundary $driveRoot 'D:\other' } 'outside_approved_boundary'
+Assert-UpdateThrows { Assert-EloWindowsBoundary ($driveRoot+'x') ($driveRoot+'y') } 'outside_approved_boundary'
+Assert-EloUpdatePaths @{Runtime=($driveRoot+'java');Old=($driveRoot+'java.old-1');Stage=($driveRoot+'java.stage-1');Backup=($driveRoot+'java.backup-1.zip');Download=($driveRoot+'java.download-1.zip')}
+Write-Output 'PASS: drive-root runtimes'
 Write-Output 'ALL UPDATE TESTS PASSED (synthetic filesystem and mocks; no production safety claim)'

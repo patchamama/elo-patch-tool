@@ -118,9 +118,9 @@ function Invoke-EloJavaSelfTest {
 }
 
 function Get-EloUpdateGaps {
-    @('Only one Eclipse Temurin release (17.0.21.1+2, windows/x64) is pinned; other vendors such as Azul Zulu, other branches and ARM64 are not supported and are refused.',
-      'The Windows adapters were exercised against a disposable Temurin runtime only; ZIP manifest covers owner/group/DACL but not SACLs, and ZIP fallback restoration is manual.',
-      'Quiescence is best effort (no process image under the runtime and exclusive open of java binaries); no service control is performed, and ELO compatibility is never assumed.')
+    @('Supported: Eclipse Temurin and Azul Zulu, Windows x86/x64/ARM64, JDK or JRE of the same branch; the newest GA release is resolved from the vendor API at preview time. Other vendors are refused.',
+      'Backups and restores cover content, owner, group and DACL; SACL (auditing) entries are not captured.',
+      'Quiescence is checked fail-closed (no process or service with the runtime loaded, exclusive open of java binaries); services are stopped only with explicit confirmation and restarted afterwards. ELO compatibility is never assumed.')
 }
 function New-EloUpdateContext {
     param([hashtable]$Adapters=@{}, [switch]$Simulation, [switch]$Production)
@@ -178,6 +178,7 @@ function Assert-EloUpdateEvidence {
     foreach ($key in @('Vendor','Branch','Architecture')) {
         if ([string]$Detected[$key] -cne [string]$Package[$key]) { throw "package_identity_mismatch:$key" }
     }
+    if ($Detected.ImageType -and $Package.ImageType -and [string]$Detected.ImageType -cne [string]$Package.ImageType) { throw 'package_identity_mismatch:ImageType' }
     if ($Package.Architecture -cnotin @('x86','x64','ARM64') -or [string]$Package.Branch -notmatch '^\d+$' -or
         [string]::IsNullOrWhiteSpace($Package.Version) -or $Package.Sha256 -cnotmatch '^[a-fA-F0-9]{64}$') { throw 'incomplete_package_identity' }
     $uri=$null
@@ -195,7 +196,7 @@ function New-EloUpdatePreview {
     Assert-EloUpdateMode $Context
     Assert-EloUpdatePaths $Paths
     $pathsCopy=@{}; foreach ($key in @('Runtime','Old','Stage','Backup','Download')) { $pathsCopy[$key]=[string]$Paths[$key] }
-    $packageCopy=@{}; foreach ($key in @('Vendor','Branch','Architecture','Version','Uri','Sha256')) { $packageCopy[$key]=[string]$Package[$key] }
+    $packageCopy=@{}; foreach ($key in @('Vendor','Branch','Architecture','ImageType','Version','Uri','Sha256','Size')) { $packageCopy[$key]=[string]$Package[$key] }
     $detected=Invoke-EloUpdateAdapter $Context Inspect @($pathsCopy.Runtime)
     $compatible=Assert-EloUpdateEvidence $Context $detected $packageCopy
     Assert-EloUpdatePreflight $Context $pathsCopy
@@ -204,7 +205,7 @@ function New-EloUpdatePreview {
     $branchChange=([string]$detected.Branch -cne $packageCopy.Branch)
     $confirmation=[guid]::NewGuid().ToString('N')
     $branchConfirmation=''; if ($branchChange) { $branchConfirmation=[guid]::NewGuid().ToString('N') }
-    $identity=@{}; foreach ($key in @('Vendor','Branch','Architecture','Fingerprint')) { $identity[$key]=[string]$detected[$key] }
+    $identity=@{}; foreach ($key in @('Vendor','Branch','Architecture','Fingerprint')) { $identity[$key]=[string]$detected[$key] }; $identity.ImageType=[string]$detected.ImageType
     $compatibilityConfirmation=''; if (-not $compatible) { $compatibilityConfirmation=[guid]::NewGuid().ToString('N') }
     $Context.Preview=@{ Paths=$pathsCopy; Package=$packageCopy; Detected=$identity; Created=$now; Confirmation=$confirmation; BranchConfirmation=$branchConfirmation; CompatibilityConfirmation=$compatibilityConfirmation }
     return @{ Simulation=$Context.Simulation; Confirmation=$confirmation; BranchConfirmation=$branchConfirmation; CompatibilityConfirmation=$compatibilityConfirmation; Expires=$now.AddMinutes(5);
@@ -216,6 +217,14 @@ function Invoke-EloRuntimeUpdate {
     $Context.Preview=$null # single-use even for rejected/stale requests
     $mutationAttempted=$false
     $locked=$false
+    $resumeNeeded=$false; $quiesceState=$null
+    $resume={
+        # Restart whatever Quiesce stopped; exactly once, success or failure.
+        if (-not $resumeNeeded) { return @{Restarted=$false;Error=$null} }
+        try { $null=Invoke-EloUpdateAdapter $Context Resume @($preview.Paths,$quiesceState); return @{Restarted=$true;Error=$null} }
+        catch { return @{Restarted=$false;Error=$_.Exception.Message} }
+    }
+    $hasQuiesce=($Context.Adapters.ContainsKey('Quiesce') -and $Context.Adapters.ContainsKey('Resume'))
     try {
         Assert-EloUpdateMode $Context
         if (-not $preview -or [string]::IsNullOrWhiteSpace($Confirmation) -or $Confirmation -cne $preview.Confirmation) { throw 'fresh_explicit_confirmation_required' }
@@ -236,7 +245,8 @@ function Invoke-EloRuntimeUpdate {
         Assert-EloUpdateTrue (Invoke-EloUpdateAdapter $Context VerifyPackage @($package,$paths)) 'package_verification_failed'
         $null=Invoke-EloUpdateAdapter $Context Stage @($package,$paths)
         Assert-EloUpdateTrue (Invoke-EloUpdateAdapter $Context Probe @($paths.Stage,$package)) 'staged_java_version_failed'
-        # Recheck the original after potentially slow backup/download/probe.
+        if ($hasQuiesce) { $resumeNeeded=$true; $quiesceState=Invoke-EloUpdateAdapter $Context Quiesce @($paths) }
+        # Recheck the original after potentially slow backup/download/probe (and service stop).
         $latest=Invoke-EloUpdateAdapter $Context Inspect @($paths.Runtime)
         foreach ($key in @('Vendor','Branch','Architecture','Fingerprint')) { if ([string]$latest[$key] -cne $preview.Detected[$key]) { throw 'target_changed' } }
         # A failed rename may have partially succeeded. Always attempt restoration.
@@ -244,7 +254,8 @@ function Invoke-EloRuntimeUpdate {
         $null=Invoke-EloUpdateAdapter $Context Preserve @($paths)
         $null=Invoke-EloUpdateAdapter $Context Replace @($paths)
         Assert-EloUpdateTrue (Invoke-EloUpdateAdapter $Context ValidateInstalled @($paths,$package)) 'installed_validation_failed'
-        return @{ Status=$(if ($Context.Simulation) { 'SimulatedSuccess' } else { 'Success' }); Backup=$paths.Backup; Old=$paths.Old; RecoveryRequired=$false; ServicesRestarted=$false }
+        $restart=& $resume; $resumeNeeded=$false
+        return @{ Status=$(if ($Context.Simulation) { 'SimulatedSuccess' } else { 'Success' }); Backup=$paths.Backup; Old=$paths.Old; RecoveryRequired=$false; ServicesRestarted=$restart.Restarted; ServiceError=$restart.Error }
     } catch {
         $failure=$_.Exception.Message
         $restoreFailure=$null
@@ -256,67 +267,21 @@ function Invoke-EloRuntimeUpdate {
                 $status='RolledBack'
             } catch { $restoreFailure=$_.Exception.Message; $Context.RecoveryRequired=$true; $status='ManualRecoveryRequired' }
         }
+        $restart=& $resume; $resumeNeeded=$false
         return @{ Status=$status; Error=$failure; RestoreError=$restoreFailure; RecoveryRequired=$Context.RecoveryRequired;
-            Backup=$(if ($preview) { $preview.Paths.Backup }); Old=$(if ($preview) { $preview.Paths.Old }); ServicesRestarted=$false }
+            Backup=$(if ($preview) { $preview.Paths.Backup }); Old=$(if ($preview) { $preview.Paths.Old }); ServicesRestarted=$restart.Restarted; ServiceError=$restart.Error }
     } finally { if ($locked) { $Context.Busy=$false } }
 }
 
-# Parent-verified documentation: https://adoptium.net/installation/ci-scripts
-# describes the binary redirect and final URL + .sha256.txt mechanism. It does
-# NOT establish any exact release, redirect host, ZIP layout or supported package.
-# Additional official metadata was independently fetched by the parent and supplied
-# verbatim as task evidence. Record ONLY the reported fields below, without
-# inferring IMPLEMENTOR, archive structure, final URL/hosts or ELO support.
-# This getter performs no request and returns new informational data each call.
-function Get-EloTemurinMetadataEvidence {
-    return @{
-        Scope='OfficialApiMetadataOnly'
-        Verification='Parent independently fetched official API; package and checksum-link contents not fetched by this worker.'
-        Source='https://api.adoptium.net/v3/assets/version/17.0.21.1%2B2?architecture=x64&image_type=jdk&os=windows&vendor=eclipse'
-        ApiVendor='eclipse'
-        ReleaseName='jdk-17.0.21.1+2'
-        OS='windows'
-        Architecture='x64'
-        JvmImplementation='hotspot'
-        ImageType='jdk'
-        Uri='https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.21.1%2B2/OpenJDK17U-jdk_x64_windows_hotspot_17.0.21.1_2.zip'
-        Sha256='eafba0944f777abdc74d5aad16049c9b5a1275b6ce99e2939ba9f7f3e6f08c87'
-        Size=[long]191150540
-        ChecksumUri='https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.21.1%2B2/OpenJDK17U-jdk_x64_windows_hotspot_17.0.21.1_2.zip.sha256.txt'
-    }
-}
-# Separate executable policy: metadata getter above is deliberately NOT consumed
-# here. Before any promotion, independently verify the entire redirect chain and
-# final HTTPS hosts/URL, actual archive format, root and expansion bounds. Existing
-# runtime IMPLEMENTOR/release/PE mapping and all filesystem/process guarantees also
-# need proof. A .zip URL suffix is NOT archive-format evidence. Do not populate this
-# list from HTTP/API/client parameters or treat this metadata as ELO approval.
-# Verified live on 2026-11-24 from this tool's test host: github.com answers 302 to
-# release-assets.githubusercontent.com (final URL carries a time-limited signature, so
-# only the HOST is pinned); the downloaded ZIP is 191150540 bytes, its SHA256 equals the
-# published .sha256.txt and the API metadata, its single root is jdk-17.0.21.1+2, it
-# holds bin/java.exe and expands to 318072479 bytes in 580 entries without links.
-function Get-EloVerifiedTemurinReleases {
-    $metadata=Get-EloTemurinMetadataEvidence
-    return @(@{
-        Vendor='Eclipse Adoptium'; Format='zip'; Branch='17'; Architecture='x64'; Version='17.0.21.1+2'
-        Uri=$metadata.Uri; Sha256=$metadata.Sha256
-        AllowedHosts=@('github.com','release-assets.githubusercontent.com')
-        ArchiveRoot='jdk-17.0.21.1+2'
-        MaxArchiveBytes=[long]209715200; MaxExpandedBytes=[long]419430400
-    })
-}
-function Get-EloPinnedTemurinRelease {
+# Release records are resolved from the vendor's official API by catalog.ps1 (latest GA of
+# the same vendor/branch/architecture/image type) and re-validated here against a strict
+# per-vendor policy (HTTPS host allowlist, URL shape, size bounds, SHA256 from the vendor
+# API). The policy is code, never HTTP input; nothing is downloaded before validation.
+function Get-EloPinnedRelease {
     param($Package)
-    foreach ($record in @(Get-EloVerifiedTemurinReleases)) {
-        if ($record.Vendor -cne 'Eclipse Adoptium' -or $record.Format -cne 'zip') { continue }
-        $matches=$true
-        foreach ($key in @('Vendor','Version','Branch','Architecture','Uri','Sha256')) {
-            if ([string]$record[$key] -cne [string]$Package[$key]) { $matches=$false }
-        }
-        if ($matches) { return $record }
-    }
-    throw 'no_independently_verified_exact_temurin_release'
+    $copy=@{}
+    foreach ($key in @('Vendor','Branch','Architecture','ImageType','Version','Uri','Sha256','Size')) { $copy[$key]=$Package[$key] }
+    try { return Assert-EloReleaseRecord $copy } catch { throw ('no_independently_verified_release:'+$_.Exception.Message) }
 }
 function Get-EloStreamHash {
     param([IO.Stream]$Stream)
@@ -338,9 +303,11 @@ function Assert-EloHttpsHost {
         $AllowedHosts -cnotcontains $uri.DnsSafeHost.ToLowerInvariant()) { throw 'unverified_https_host' }
     return $uri
 }
+# Vendor APIs may report a rounded size (Azul rounds to the nearest 1000 bytes): the size is only a
+# sanity bound (64 KiB tolerance, hard cap at MaxArchiveBytes); the pinned SHA256 is the integrity proof.
 function Invoke-EloPinnedDownload {
     param($Package,[string]$Destination)
-    $record=Get-EloPinnedTemurinRelease $Package # ALWAYS before network or file creation
+    $record=Get-EloPinnedRelease $Package # ALWAYS before network or file creation
     $uri=Assert-EloHttpsHost $record.Uri $record.AllowedHosts
     $AllowedFinal=@($record.AllowedHosts)
     $final=$null
@@ -364,7 +331,7 @@ function Invoke-EloPinnedDownload {
                 $uri=Assert-EloHttpsHost $next.AbsoluteUri $record.AllowedHosts
                 continue
             }
-            if ($code -ne 200 -or $response.ContentLength -le 0 -or $response.ContentLength -gt $record.MaxArchiveBytes -or
+            if ($code -ne 200 -or [Math]::Abs([long]$response.ContentLength-[long]$record.Size) -gt 65536 -or $response.ContentLength -gt $record.MaxArchiveBytes -or
                 $response.ResponseUri.Scheme -cne 'https' -or $AllowedFinal -cnotcontains $response.ResponseUri.DnsSafeHost.ToLowerInvariant()) { throw 'unverified_response_or_length' }
             $input=$response.GetResponseStream(); $output=$null
             try {
@@ -387,6 +354,20 @@ function Invoke-EloPinnedDownload {
     if (-not $final -or (Get-FileHash -LiteralPath $Destination -Algorithm SHA256 -ErrorAction Stop).Hash -ine $record.Sha256) { throw 'download_checksum_mismatch' }
     # The hash must have been independently pinned from the published checksum.
     # No inference from a .zip suffix or content-type is used as format evidence.
+}
+function Get-EloArchiveRoot {
+    # The single top-level directory every entry must live under (vendor layouts differ).
+    param($Entries)
+    $root=$null
+    foreach ($entry in $Entries) {
+        $name=[string]$entry.FullName
+        $slash=$name.IndexOf('/')
+        if ($slash -lt 1) { throw 'unsafe_archive_entry' }
+        $top=$name.Substring(0,$slash)
+        if ($null -eq $root) { $root=$top } elseif ($top -cne $root) { throw 'unsafe_archive_entry' }
+    }
+    if ($null -eq $root) { throw 'unverified_archive_root' }
+    return $root
 }
 function Assert-EloArchiveEntries {
     param($Entries,[string]$ArchiveRoot,[long]$MaximumBytes=1073741824,[int]$MaximumEntries=50000)
@@ -431,7 +412,7 @@ function Assert-EloWindowsBoundary {
     param([string]$Root,[string]$Path,[switch]$MustExist)
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'windows_only' }
     $full=[IO.Path]::GetFullPath($Path); $base=[IO.Path]::GetFullPath($Root).TrimEnd('\')
-    if ($base.Length -le 3 -or -not $full.StartsWith($base+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'outside_approved_boundary' }
+    if ($base.Length -lt 2 -or -not $full.StartsWith($base+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'outside_approved_boundary' }
     $drive=New-Object IO.DriveInfo($full.Substring(0,3))
     if (-not $drive.IsReady -or $drive.DriveType -ne [IO.DriveType]::Fixed -or $drive.DriveFormat -cne 'NTFS') { throw 'local_ntfs_required' }
     $probe=$full
@@ -533,7 +514,7 @@ function Test-EloBackupArchive {
 }
 function Expand-EloPinnedArchive {
     param([string]$Root,$Package,$Paths)
-    $record=Get-EloPinnedTemurinRelease $Package
+    $record=Get-EloPinnedRelease $Package
     Initialize-EloZip
     $null=Assert-EloWindowsBoundary $Root $Paths.Stage
     if (Test-Path -LiteralPath $Paths.Stage) { throw 'staging_already_exists' }
@@ -541,10 +522,11 @@ function Expand-EloPinnedArchive {
     $input=[IO.File]::OpenRead($Paths.Download); $zip=$null
     try {
         $zip=New-Object IO.Compression.ZipArchive($input,[IO.Compression.ZipArchiveMode]::Read,$true)
-        $null=Assert-EloArchiveEntries $zip.Entries $record.ArchiveRoot $record.MaxExpandedBytes
+        $archiveRoot=Get-EloArchiveRoot $zip.Entries
+        $null=Assert-EloArchiveEntries $zip.Entries $archiveRoot $record.MaxExpandedBytes
         $null=[IO.Directory]::CreateDirectory($Paths.Stage)
         foreach ($entry in $zip.Entries) {
-            $relative=$entry.FullName.Substring($record.ArchiveRoot.Length+1)
+            $relative=$entry.FullName.Substring($archiveRoot.Length+1)
             if (-not $relative) { continue }
             $destination=Join-Path $Paths.Stage $relative.Replace('/','\').TrimEnd('\')
             $null=Assert-EloWindowsBoundary $Root $destination
@@ -566,23 +548,26 @@ function Expand-EloPinnedArchive {
         }
     } finally { if ($zip) { $zip.Dispose() }; $input.Dispose() }
 }
-function Get-EloTemurinIdentity {
+function Get-EloRuntimeIdentity {
+    # Vendor, branch, architecture, image type and version of an installed runtime,
+    # read from its release file and the java.exe PE header. Read-only.
     param([string]$Path)
     $release=Join-Path $Path 'release'; $java=Join-Path $Path 'bin\java.exe'
     if ((Get-Item -LiteralPath $release -ErrorAction Stop).Length -gt 65536) { throw 'release_size_limit' }
     $values=@{}
     foreach ($line in [IO.File]::ReadAllLines($release)) {
-        if ($line -cmatch '^(IMPLEMENTOR|JAVA_VERSION|JAVA_RUNTIME_VERSION|OS_ARCH|OS_NAME)="([^"\x00-\x1f]*)"$') {
+        if ($line -cmatch '^(IMPLEMENTOR|IMPLEMENTOR_VERSION|JAVA_VERSION|JAVA_RUNTIME_VERSION|OS_ARCH|OS_NAME)="([^"\x00-\x1f]*)"$') {
             if ($values.ContainsKey($Matches[1])) { throw 'duplicate_release_key' }; $values[$Matches[1]]=$Matches[2]
         }
     }
-    # Older Temurin builds (for example 17.0.2+8) omit JAVA_RUNTIME_VERSION.
-    if (-not $values.JAVA_RUNTIME_VERSION -and $values.JAVA_VERSION) { $values.JAVA_RUNTIME_VERSION=$values.JAVA_VERSION }
-    if ($values.IMPLEMENTOR -cne 'Eclipse Adoptium' -or $values.OS_NAME -cne 'Windows' -or
-        -not $values.JAVA_RUNTIME_VERSION) { throw 'unrecognized_temurin_identity' }
-    $versionMatch=[regex]::Match([string]$values.JAVA_VERSION,'^(\d+)\.')
-    if (-not $versionMatch.Success) { throw 'unrecognized_temurin_identity' }
-    $branch=$versionMatch.Groups[1].Value
+    $vendor=''
+    if ($values.IMPLEMENTOR -ceq 'Eclipse Adoptium') { $vendor='Eclipse Adoptium' }
+    elseif ($values.IMPLEMENTOR -ceq 'Azul Systems, Inc.' -and [string]$values.IMPLEMENTOR_VERSION -cmatch '^Zulu') { $vendor='Azul Zulu' }
+    if (-not $vendor -or $values.OS_NAME -cne 'Windows') { throw 'unrecognized_runtime_identity' }
+    # Older builds omit JAVA_RUNTIME_VERSION.
+    $source=$values.JAVA_RUNTIME_VERSION; if (-not $source) { $source=$values.JAVA_VERSION }
+    if (-not $source) { throw 'unrecognized_runtime_identity' }
+    try { $version=ConvertTo-EloJavaVersion $source } catch { throw 'unrecognized_runtime_identity' }
     $stream=[IO.File]::OpenRead($java); $reader=New-Object IO.BinaryReader($stream)
     try {
         if ($reader.ReadUInt16() -ne 23117) { throw 'java_not_pe' }
@@ -591,15 +576,22 @@ function Get-EloTemurinIdentity {
         $stream.Position=$offset; if ($reader.ReadUInt32() -ne 17744) { throw 'invalid_pe_signature' }
         $machine=$reader.ReadUInt16()
     } finally { $reader.Dispose(); $stream.Dispose() }
-    $arch=''; if ($machine -eq 34404 -and $values.OS_ARCH -cin @('amd64','x86_64')) { $arch='x64' }
-    if ($machine -eq 43620 -and $values.OS_ARCH -ceq 'aarch64') { $arch='ARM64' }
+    $arch=@{34404='x64';332='x86';43620='ARM64'}[[int]$machine]
     if (-not $arch) { throw 'unsupported_or_inconsistent_architecture' }
-    return @{Vendor=$values.IMPLEMENTOR;Branch=$branch;Architecture=$arch;Version=$values.JAVA_RUNTIME_VERSION}
+    $image='jre'; if (Test-Path -LiteralPath (Join-Path $Path 'bin\javac.exe')) { $image='jdk' }
+    return @{Vendor=$vendor;Branch=$version.Branch;Architecture=$arch;ImageType=$image;Version=$version.Text}
 }
-function Invoke-EloBoundedJavaVersion {
+function Test-EloSameJavaRelease {
+    # Same numeric release; build numbers only count when both sides report one.
+    param([string]$Left,[string]$Right)
+    $a=ConvertTo-EloJavaVersion $Left; $b=ConvertTo-EloJavaVersion $Right
+    if ($a.Build -eq 0 -or $b.Build -eq 0) { $a.Build=0; $b.Build=0 }
+    return ((Compare-EloJavaVersion $a $b) -eq 0)
+}function Invoke-EloBoundedJavaVersion {
     param([string]$Path,$Package)
-    $identity=Get-EloTemurinIdentity $Path
-    foreach ($key in @('Vendor','Branch','Architecture','Version')) { if ($identity[$key] -cne $Package[$key]) { throw 'java_identity_mismatch' } }
+    $identity=Get-EloRuntimeIdentity $Path
+    foreach ($key in @('Vendor','Branch','Architecture')) { if ($identity[$key] -cne $Package[$key]) { throw 'java_identity_mismatch' } }
+    if (-not (Test-EloSameJavaRelease $identity.Version ([string]$Package.Version))) { throw 'java_identity_mismatch' }
     $process=New-Object Diagnostics.Process; $started=$false
     try {
         $info=New-Object Diagnostics.ProcessStartInfo
@@ -623,30 +615,67 @@ function Invoke-EloBoundedJavaVersion {
             }
             [Threading.Thread]::Sleep(5)
         }
-        if (-not $process.WaitForExit(1000) -or $process.ExitCode -ne 0 -or -not $text.ToString().Contains($Package.Version)) { throw 'java_version_probe_failed' }
+        if (-not $process.WaitForExit(1000) -or $process.ExitCode -ne 0 -or -not ($text.ToString() -cmatch 'version "([^"]+)"') -or -not (Test-EloSameJavaRelease $Matches[1] ([string]$Package.Version))) { throw 'java_version_probe_failed' }
         return $true
     } finally {
         try { if ($started -and -not $process.HasExited) { $process.Kill(); $null=$process.WaitForExit(2000) } }
         finally { $process.Dispose() }
     }
 }
-function Test-EloRuntimeQuiescent {
+function Get-EloRuntimeUsers {
+    # Running services and other processes that have the runtime loaded: their image
+    # or any loaded module lives below the runtime directory. Read-only; protected
+    # processes whose modules cannot be listed are skipped (and cannot be proven idle).
     param([string]$Path)
-    # Best effort, fail closed: no process image under the runtime and java binaries
-    # can be opened exclusively. A running ELO service from this runtime blocks it.
     $prefix=[IO.Path]::GetFullPath($Path).TrimEnd('\')+'\'
-    foreach ($process in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
-        $image=[string]$process.ExecutablePath
-        if ($image -and $image.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) { return $false }
+    $services=@{}
+    foreach ($service in @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop)) {
+        if ([int]$service.ProcessId -gt 0 -and [string]$service.State -ceq 'Running') { $services[[int]$service.ProcessId]=$service }
     }
+    $found=@{Services=@();Processes=@()}
+    $all=@(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
+    $parents=@{}; foreach ($process in $all) { $parents[[int]$process.ProcessId]=[int]$process.ParentProcessId }
+    $seenServices=@{}
+    foreach ($process in $all) {
+        $id=[int]$process.ProcessId
+        if ($id -le 4 -or $id -eq $PID) { continue }
+        $uses=$false
+        $image=[string]$process.ExecutablePath
+        if ($image -and $image.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) { $uses=$true }
+        if (-not $uses) {
+            $handle=$null
+            try {
+                $handle=[Diagnostics.Process]::GetProcessById($id)
+                foreach ($module in $handle.Modules) {
+                    if ($module.FileName.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) { $uses=$true; break }
+                }
+            } catch { } finally { if ($handle) { $handle.Dispose() } }
+        }
+        if (-not $uses) { continue }
+        # A process belongs to the nearest ancestor that is a running service (children die with it).
+        $owner=$null; $cursor=$id
+        for ($depth=0; $depth -lt 8 -and $null -eq $owner -and $parents.ContainsKey($cursor); $depth++) {
+            if ($services.ContainsKey($cursor)) { $owner=$services[$cursor] } else { $cursor=$parents[$cursor] }
+        }
+        if ($null -eq $owner -and $services.ContainsKey($cursor)) { $owner=$services[$cursor] }
+        if ($owner) {
+            if (-not $seenServices.ContainsKey([string]$owner.Name)) { $seenServices[[string]$owner.Name]=$true; $found.Services+=@(@{Name=[string]$owner.Name;DisplayName=[string]$owner.DisplayName;ProcessId=[int]$owner.ProcessId}) }
+        } else { $found.Processes+=@(@{Id=$id;Name=[string]$process.Name}) }
+    }
+    return $found
+}
+function Test-EloRuntimeQuiescent {
+    # Strict: nothing uses the runtime and its java binaries can be opened exclusively.
+    param([string]$Path)
+    $users=Get-EloRuntimeUsers $Path
+    if ($users.Services.Count -gt 0 -or $users.Processes.Count -gt 0) { return $false }
     foreach ($name in @('bin\java.exe','bin\javaw.exe')) {
         $file=Join-Path $Path $name
         if (-not (Test-Path -LiteralPath $file)) { continue }
         try { $stream=[IO.File]::Open($file,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None); $stream.Dispose() } catch { return $false }
     }
     return $true
-}
-function Test-EloDirectoryWritable {
+}function Test-EloDirectoryWritable {
     param([string]$Path)
     $probe=Join-Path $Path ('.elo-write-probe-'+[guid]::NewGuid().ToString('N'))
     try {
@@ -705,12 +734,112 @@ function Invoke-EloJavaProbe {
     if (-not $result.Success) { throw ('java_self_test_failed:'+$result.Reason) }
     return $true
 }
+function ConvertFrom-EloManifestJson {
+    param([string]$Json)
+    $parsed=ConvertFrom-Json $Json
+    return @($parsed | ForEach-Object { $_ })
+}
+function Invoke-EloBackupRestore {
+    # Restores a runtime from a backup ZIP written by this module: every file is hashed
+    # while it is extracted into a sibling directory, compared with the manifest, and only
+    # then swapped in. The current runtime is renamed (kept), never deleted. ACLs are
+    # re-applied from the manifest (owner when permitted, otherwise DACL only).
+    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$Runtime,
+        [Parameter(Mandatory=$true)][string]$Backup,[scriptblock]$Quiesce,[scriptblock]$Resume,[string]$Stamp)
+    Initialize-EloZip
+    $null=Assert-EloWindowsBoundary $Root $Runtime
+    $null=Assert-EloWindowsBoundary $Root $Backup -MustExist
+    if ($Backup -notmatch '(?i)\.zip$') { throw 'backup_zip_required' }
+    if (-not $Stamp) { $Stamp=[DateTime]::UtcNow.ToString('yyyyMMddHHmmss') }
+    $stage=$Runtime+'.restore-'+$Stamp; $replaced=$Runtime+'.replaced-'+$Stamp
+    foreach ($path in @($stage,$replaced)) {
+        $null=Assert-EloWindowsBoundary $Root $path
+        if (Test-Path -LiteralPath $path) { throw 'recovery_or_staging_path_exists' }
+    }
+    $input=[IO.File]::OpenRead($Backup); $zip=$null; $quiesced=$false; $aclExact=$true
+    try {
+        $zip=New-Object IO.Compression.ZipArchive($input,[IO.Compression.ZipArchiveMode]::Read,$true)
+        $manifestEntry=$zip.GetEntry('manifest.json')
+        if (-not $manifestEntry -or $manifestEntry.Length -gt 64MB) { throw 'backup_manifest_invalid' }
+        $reader=New-Object IO.StreamReader($manifestEntry.Open(),[Text.Encoding]::UTF8,$false)
+        try { $manifest=ConvertFrom-EloManifestJson $reader.ReadToEnd() } finally { $reader.Dispose() }
+        $expected=@{}
+        foreach ($item in $manifest) {
+            $name=[string]$item.Name
+            if ($name) {
+                if ($name.Length -gt 200 -or $name.StartsWith('/') -or $name.Contains('\')) { throw 'backup_manifest_invalid' }
+                foreach ($part in $name.Split('/')) {
+                    if ([string]::IsNullOrWhiteSpace($part) -or $part -eq '.' -or $part -eq '..' -or $part -match '[\x00-\x1f\x7f:<>|?*]' -or $part -match '[. ]$' -or $part -match '^(?i:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)') { throw 'backup_manifest_invalid' }
+                }
+            }
+            if (-not [bool]$item.Directory -and [string]$item.Hash -cnotmatch '^[a-f0-9]{64}$') { throw 'backup_manifest_invalid' }
+            $expected[$name]=$item
+        }
+        if (-not $expected.ContainsKey('') -or -not [bool]$expected[''].Directory) { throw 'backup_manifest_invalid' }
+        $null=[IO.Directory]::CreateDirectory($stage)
+        $sorted=@($manifest | Where-Object { [string]$_.Name } | Sort-Object { ([string]$_.Name).Length })
+        foreach ($item in $sorted) {
+            $target=Join-Path $stage ([string]$item.Name).Replace('/','\')
+            $null=Assert-EloWindowsBoundary $Root $target
+            if ([bool]$item.Directory) { $null=[IO.Directory]::CreateDirectory($target); continue }
+            $entry=$zip.GetEntry('tree/'+[string]$item.Name)
+            if (-not $entry -or $entry.Length -ne [long]$item.Length) { throw 'backup_entry_mismatch' }
+            $null=[IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))
+            $source=$entry.Open(); $output=$null; $sha=[Security.Cryptography.SHA256]::Create()
+            try {
+                $output=New-Object IO.FileStream($target,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                $buffer=New-Object byte[] 65536; [long]$total=0
+                while (($count=$source.Read($buffer,0,$buffer.Length)) -gt 0) {
+                    $total+=$count; if ($total -gt [long]$item.Length) { throw 'backup_entry_mismatch' }
+                    $null=$sha.TransformBlock($buffer,0,$count,$null,0); $output.Write($buffer,0,$count)
+                }
+                $null=$sha.TransformFinalBlock($buffer,0,0); $output.Flush($true)
+                $hash=([BitConverter]::ToString($sha.Hash)).Replace('-','').ToLowerInvariant()
+                if ($total -ne [long]$item.Length -or $hash -cne [string]$item.Hash) { throw 'backup_entry_mismatch' }
+            } finally { $sha.Dispose(); if ($output) { $output.Dispose() }; $source.Dispose() }
+            if ([long]$item.Ticks -gt 0) { [IO.File]::SetLastWriteTimeUtc($target,(New-Object DateTime([long]$item.Ticks,[DateTimeKind]::Utc))) }
+        }
+        # Content proof first, then ACLs (deepest first so a restrictive parent ACL cannot block children).
+        $actual=Get-EloRuntimeManifest $Root $stage
+        $actualMap=@{}; foreach ($item in $actual.Entries) { $actualMap[[string]$item.Name]=$item }
+        if ($actualMap.Count -ne $expected.Count) { throw 'restored_content_mismatch' }
+        foreach ($key in $expected.Keys) {
+            $a=$actualMap[$key]; $e=$expected[$key]
+            if (-not $a -or [bool]$a.Directory -ne [bool]$e.Directory -or [long]$a.Length -ne [long]$e.Length -or [string]$a.Hash -cne [string]$e.Hash) { throw 'restored_content_mismatch' }
+        }
+        foreach ($item in @($manifest | Sort-Object { ([string]$_.Name).Length } -Descending)) {
+            $target=$stage; if ([string]$item.Name) { $target=Join-Path $stage ([string]$item.Name).Replace('/','\') }
+            $acl=$null; if ([bool]$item.Directory) { $acl=New-Object Security.AccessControl.DirectorySecurity } else { $acl=New-Object Security.AccessControl.FileSecurity }
+            try { $acl.SetSecurityDescriptorSddlForm([string]$item.Sddl); Set-Acl -LiteralPath $target -AclObject $acl -ErrorAction Stop }
+            catch {
+                $aclExact=$false
+                try {
+                    $acl=$null; if ([bool]$item.Directory) { $acl=New-Object Security.AccessControl.DirectorySecurity } else { $acl=New-Object Security.AccessControl.FileSecurity }
+                    $acl.SetSecurityDescriptorSddlForm([string]$item.Sddl,[Security.AccessControl.AccessControlSections]::Access); Set-Acl -LiteralPath $target -AclObject $acl -ErrorAction Stop
+                } catch { }
+            }
+        }
+        if ($Quiesce) { $quiesced=$true; $null=& $Quiesce }
+        $moved=$false
+        try {
+            if (Test-Path -LiteralPath $Runtime) { [IO.Directory]::Move($Runtime,$replaced); $moved=$true }
+            [IO.Directory]::Move($stage,$Runtime)
+        } catch {
+            if ($moved -and -not (Test-Path -LiteralPath $Runtime)) { [IO.Directory]::Move($replaced,$Runtime) }
+            throw
+        }
+        return @{Restored=$true;Replaced=$(if ($moved) { $replaced } else { $null });AclExact=$aclExact}
+    } finally {
+        if ($zip) { $zip.Dispose() }; $input.Dispose()
+        if ($quiesced -and $Resume) { try { $null=& $Resume } catch { } }
+    }
+}
 function New-EloWindowsUpdateAdapters {
-    param([Parameter(Mandatory=$true)][string]$ApprovedRoot,[Parameter(Mandatory=$true)][string]$Runtime)
+    param([Parameter(Mandatory=$true)][string]$ApprovedRoot,[Parameter(Mandatory=$true)][string]$Runtime,[switch]$AllowServiceStop)
     # Factory itself performs no IO. Only direct, explicitly invoked adapter calls
     # can do work. Engine production gate remains closed regardless of injection.
-    $state=@{Root=$ApprovedRoot;Runtime=$Runtime;Original=$null;Staged=$null;FailedPath=$null}
-    return @{
+    $state=@{Root=$ApprovedRoot;Runtime=$Runtime;Original=$null;Staged=$null;FailedPath=$null;Stopped=(New-Object 'System.Collections.Generic.List[string]');AllowServiceStop=[bool]$AllowServiceStop}
+    $adapters=@{
         EloWindowsAdapters=$true
         Clock={ [DateTime]::UtcNow }
         Admin={
@@ -721,11 +850,11 @@ function New-EloWindowsUpdateAdapters {
         Inspect={ param($Path)
             if ($Path -cne $state.Runtime) { throw 'runtime_not_explicitly_selected' }
             $manifest=Get-EloRuntimeManifest $state.Root $Path
-            $identity=Get-EloTemurinIdentity $Path; $identity.Fingerprint=$manifest.Fingerprint
+            $identity=Get-EloRuntimeIdentity $Path; $identity.Fingerprint=$manifest.Fingerprint
             $state.Original=$manifest; $identity
         }.GetNewClosure()
         Evidence={ param($Detected,$Package)
-            $record=Get-EloPinnedTemurinRelease $Package
+            $record=Get-EloPinnedRelease $Package
             @{Official=$true;PublishedHash=$true;Compatibility=$false}
         }
         Preflight={ param($Paths)
@@ -739,7 +868,10 @@ function New-EloWindowsUpdateAdapters {
             $manifest=Get-EloRuntimeManifest $state.Root $Paths.Runtime
             $drive=New-Object IO.DriveInfo($Paths.Runtime.Substring(0,3))
             # Real, fail-closed checks; services are never stopped or restarted here.
-            @{SafePaths=$true;Quiescent=(Test-EloRuntimeQuiescent $Paths.Runtime)
+            $quiescent=$false
+            if ($state.AllowServiceStop) { $users=Get-EloRuntimeUsers $Paths.Runtime; $quiescent=(($users.Processes.Count -eq 0) -and ($users.Services.Count -gt 0 -or (Test-EloRuntimeQuiescent $Paths.Runtime))) }
+            else { $quiescent=Test-EloRuntimeQuiescent $Paths.Runtime }
+            @{SafePaths=$true;Quiescent=$quiescent
               Permissions=((Test-EloDirectoryWritable $Paths.Runtime) -and (Test-EloDirectoryWritable ([IO.Path]::GetDirectoryName($Paths.Runtime))))
               Space=($drive.AvailableFreeSpace -gt (6*$manifest.Bytes+1GB))}
         }.GetNewClosure()
@@ -755,7 +887,7 @@ function New-EloWindowsUpdateAdapters {
         }.GetNewClosure()
         Download={ param($Package,$Paths) Invoke-EloPinnedDownload $Package $Paths.Download }
         VerifyPackage={ param($Package,$Paths)
-            $record=Get-EloPinnedTemurinRelease $Package
+            $record=Get-EloPinnedRelease $Package
             (Get-FileHash -LiteralPath $Paths.Download -Algorithm SHA256 -ErrorAction Stop).Hash -ieq $record.Sha256
         }
         Stage={ param($Package,$Paths)
@@ -798,4 +930,32 @@ function New-EloWindowsUpdateAdapters {
             (Get-EloRuntimeManifest $state.Root $Paths.Runtime).Fingerprint -ceq $Detected.Fingerprint
         }.GetNewClosure()
     }
+    if ($AllowServiceStop) {
+        # Opt-in (the user confirmed the services listed in the preview). Only services that
+        # actually use this runtime are stopped, dependents are restarted, and Resume runs
+        # on success and on failure alike.
+        $adapters.Quiesce={ param($Paths)
+            $users=Get-EloRuntimeUsers $Paths.Runtime
+            if ($users.Processes.Count -gt 0) { throw 'runtime_in_use_by_process' }
+            foreach ($user in $users.Services) {
+                $service=Get-Service -Name $user.Name -ErrorAction Stop
+                $state.Stopped.Add([string]$user.Name)
+                foreach ($dependent in @($service.DependentServices | Where-Object { $_.Status -eq 'Running' })) { $state.Stopped.Add([string]$dependent.Name) }
+                Stop-Service -Name $user.Name -Force -ErrorAction Stop
+                $service.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(90))
+            }
+            if (-not (Test-EloRuntimeQuiescent $Paths.Runtime)) { throw 'runtime_still_in_use_after_service_stop' }
+            @($state.Stopped)
+        }.GetNewClosure()
+        $adapters.Resume={ param($Paths,$Stopped)
+            $failed=New-Object 'System.Collections.Generic.List[string]'
+            foreach ($name in @($state.Stopped)) {
+                try { $service=Get-Service -Name $name -ErrorAction Stop; if ($service.Status -ne 'Running') { Start-Service -Name $name -ErrorAction Stop; $service.WaitForStatus('Running',[TimeSpan]::FromSeconds(90)) } }
+                catch { $failed.Add($name) }
+            }
+            $state.Stopped.Clear()
+            if ($failed.Count -gt 0) { throw ('service_restart_failed:'+($failed -join '+')) }
+        }.GetNewClosure()
+    }
+    return $adapters
 }
