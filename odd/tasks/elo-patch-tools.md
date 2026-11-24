@@ -1,0 +1,36 @@
+# ELO Patch Tools
+Single-file Windows tool; source, security controls, and verification remain in scope.
+Branch: feature/elo-patch-tools.
+
+## Specs
+S1. "Entrega un solo archivo, por ejemplo `ELO-Patch-Tools.bat`. No entregues archivos auxiliares necesarios para ejecutarlo."
+S2. "El escaneo debe ser de solo lectura. Busca instalaciones de ELO en las unidades disponibles, sin asumir una letra de unidad o ruta fija."
+S3. "Si una JVM resulta potencialmente vulnerable, ofrece la mitigación temporal con: `-XX:-UseBASE64Intrinsics`"
+S4. "Ofrece una opción separada para actualizar el runtime. La sustitución puede afectar compatibilidad y soporte, así que no la ejecutes automáticamente."
+S5. "El frontend debe estar en inglés y alemán, con selector de idioma. Traduce botones, estados, errores, advertencias y confirmaciones."
+S6. "también brinda una opción en script de hacer el patch manual en el sistema dando las instrucciones"
+S7. "Añade pruebas para comparación de versiones, rutas con espacios, variable de entorno preexistente, extracción del BAT, cancelación del escaneo, fallo de descarga, respaldo, sustitución y restauración."
+S8. "al final, genera un reporte en inglés y alemán con el nombre del servidor, que version de elo corre si se dan los datos de acceso a elo api con la url del api y el usuario y contraseña de acceso a elo, la version de java que se ejecutó y la actualización hecha, version de backup del antiguo jvm por si se desa restaurar, link con enlaces de información sobre el riesgo y solucion si se tiene, bueno todo un reporte que se pueda poner para informar a los técnicos de lo detectado y solucionado y como se solucionó."
+S9. "agrega también en el reporte que se informe la version de windows que se está usando, y recursos del sistema como cantidad de RAM y espacio en disco."
+S10. "si se hace el parche sin instalación, informarlo en el reporte de que se patcheo pero es preferible y posible hace rla instalación de la nueva version de java dando el link para descarga e instalación"
+S11. "importante, no debe de buscarse la instalación de java en cualquier lugar, sino en todas las torres c: hasta z: para ver si existe en alguna la ruta \java\bin o \ELO\java\bin y habilita la opción de actualizar java y testear que la actualización se hizo bien corriendo un pequeño applet de java que puedes crear y descargar, y siempre hacer un backup en un zip de la instación inicial. Sí no se encuentra java instalado, que brinde la opción de poner el path donde se encuentra pero también que busque si hay varias instalaciones pues puede pasar."
+
+S12. "poner en el reporte que si falla en algun momento la actualización de java, que se puede descomprimir la versión del backup y pon la ruta original donde estaba para informar donde descomprimirla con el comando desde el terminal de como eliminar la nueva versión y descomprimir la version del backup, también poner comando del cli para hacerlo desde el terminal. También el sistema debe de detectar si existe el patch desde la variable de entrono, es decir, si existe: JAVA_TOOL_OPTIONS con los parámetros requeridos y como parte del reporte se puede poner eso en caso de tener una version antigua de java no patcheada."
+
+## Tasks
+T1 [S1,S2,S7] Core scanning and classification; route: writer; commit: pending.
+T2 [S1,S5,S6] Web interface; route: writer; commit: pending.
+T3 [S1,S3,S4,S6,S7] Integration, mitigation and update safety; route: inline; commit: pending.
+T4 [S1-S12] Independent verification and delivery; route: verifier; commit: pending.
+T5 [S8-S10,S12] Bilingual technical report, recovery guidance, environment observation and optional ELO version lookup; route: writer; commit: pending.
+T6 [S2,S4,S7,S11] Restricted drive-root discovery and safe verified runtime updates; route: parallel writers; commit: pending.
+
+## Log
+L1: "bien, ahora estamos ejecutandonos en un hyperV con windows y elo dms de prueba y todo está a salvo y aquí probaremos la herramienta, empieza con toda la implementación"
+L2: "sí" — authorized initialization of Git.
+L3: al final, genera un reporte en inglés y alemán con el nombre del servidor, que version de elo corre si se dan los datos de acceso a elo api con la url del api y el usuario y contraseña de acceso a elo, la version de java que se ejecutó y la actualización hecha, version de backup del antiguo jvm por si se desa restaurar, link con enlaces de información sobre el riesgo y solucion si se tiene, bueno todo un reporte que se pueda poner para informar a los técnicos de lo detectado y solucionado y como se solucionó.
+L4: agrega también en el reporte que se informe la version de windows que se está usando, y recursos del sistema como cantidad de RAM y espacio en disco.
+L5: si se hace el parche sin instalación, informarlo en el reporte de que se patcheo pero es preferible y posible hace rla instalación de la nueva version de java dando el link para descarga e instalación
+L6: sí.... importante, no debe de buscarse la instalación de java en cualquier lugar, sino en todas las torres c: hasta z: para ver si existe en alguna la ruta \java\bin o \ELO\java\bin y habilita la opción de actualizar java y testear que la actualización se hizo bien corriendo un pequeño applet de java que puedes crear y descargar, y siempre hacer un backup en un zip de la instación inicial. Sí no se encuentra java instalado, que brinde la opción de poner el path donde se encuentra pero también que busque si hay varias instalaciones pues puede pasar.
+L7: Read-only BAT scan returned C:\ELO\java\bin\java.exe, Azul Zulu 21.0.1+12-LTS, inconclusive; reached 10,000-entry budget in ELO temp. The result is incomplete.
+L8: poner en el reporte que si falla en algun momento la actualización de java, que se puede descomprimir la versión del backup y pon la ruta original donde estaba para informar donde descomprimirla con el comando desde el terminal de como eliminar la nueva versión y descomprimir la version del backup, también poner comando del cli para hacerlo desde el terminal. También el sistema debe de detectar si existe el patch desde la variable de entrono, es decir, si existe: JAVA_TOOL_OPTIONS con los parámetros requeridos y como parte del reporte se puede poner eso en caso de tener una version antigua de java no patcheada.

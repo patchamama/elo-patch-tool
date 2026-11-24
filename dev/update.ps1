@@ -44,10 +44,83 @@
 # VerifyRestored(paths,detected) exact original manifest and java -version.
 # Tests exercise mocks and memory-only helpers, NOT live integration proof.
 
+# A Java 5-compatible console class, assembled in memory, with no libraries beyond
+# the Java standard runtime. It exercises integer division and prints a marker.
+# This is an inert payload: it is not written or executed by this module. In
+# particular, it is NOT proof of ELO compatibility or of a safe replacement.
+function Get-EloJavaSelfTestClass {
+    $bytes=New-Object 'System.Collections.Generic.List[byte]'
+    $add={ param([byte[]]$Data) $bytes.AddRange($Data) }
+    $utf={ param([string]$Text)
+        $encoded=[Text.Encoding]::ASCII.GetBytes($Text)
+        $bytes.Add(1); $bytes.Add([byte]($encoded.Length -shr 8)); $bytes.Add([byte]($encoded.Length -band 255)); $bytes.AddRange($encoded)
+    }
+    & $add ([byte[]](0xca,0xfe,0xba,0xbe,0,0,0,49,0,22))
+    & $utf 'EloJavaSelfTest'; & $add ([byte[]](7,0,1))
+    & $utf 'java/lang/Object'; & $add ([byte[]](7,0,3))
+    & $utf 'main'; & $utf '([Ljava/lang/String;)V'; & $utf 'Code'
+    & $utf 'java/lang/System'; & $add ([byte[]](7,0,8))
+    & $utf 'out'; & $utf 'Ljava/io/PrintStream;'
+    & $add ([byte[]](12,0,10,0,11,9,0,9,0,12))
+    & $utf 'java/io/PrintStream'; & $add ([byte[]](7,0,14))
+    & $utf 'println'; & $utf '(Ljava/lang/String;)V'
+    & $add ([byte[]](12,0,16,0,17,10,0,15,0,18))
+    & $utf 'ELO_JAVA_SELF_TEST_OK'; & $add ([byte[]](8,0,20))
+    # public class; public static main; 1/1, pop, println(marker), return.
+    & $add ([byte[]](0,33,0,2,0,4,0,0,0,0,0,1,0,9,0,5,0,6,0,1,0,7,
+        0,0,0,25,0,2,0,1,0,0,0,13,4,4,108,87,178,0,13,18,21,182,0,19,177,
+        0,0,0,0,0,0))
+    return ,$bytes.ToArray()
+}
+function Test-EloJavaSelfTestResult {
+    param([int]$ExitCode,[string]$StandardOutput,[string]$StandardError)
+    return ($ExitCode -eq 0 -and $StandardError -ceq '' -and
+        ($StandardOutput -ceq "ELO_JAVA_SELF_TEST_OK`n" -or $StandardOutput -ceq "ELO_JAVA_SELF_TEST_OK`r`n"))
+}
+
+# Mockable orchestration only: adapters are trusted, nonblocking code. Start must
+# create the unique directory exclusively, write the supplied class there and run
+# only JavaPath with an isolated classpath and sanitized environment. Poll returns
+# bounded incremental output; Stop terminates/reaps and retains session artifacts.
+# No real adapter is provided: this function is not production safety proof.
+function Invoke-EloJavaSelfTest {
+    param([Parameter(Mandatory=$true)][string]$JavaPath,
+        [Parameter(Mandatory=$true)][string]$SessionRoot,
+        [Parameter(Mandatory=$true)][hashtable]$Adapter,
+        [int]$TimeoutMilliseconds=10000,[int]$MaximumOutputCharacters=16384)
+    if ($JavaPath -notmatch '^[A-Za-z]:\\[^\r\n"*?]+\\java\.exe$' -or $JavaPath -match '(^|\\)\.\.?($|\\)') { throw 'absolute_java_path_required' }
+    if ($SessionRoot -notmatch '^[A-Za-z]:\\[^\r\n"*?]+$' -or $SessionRoot -match '(^|\\)\.\.?($|\\)') { throw 'absolute_session_root_required' }
+    if ($TimeoutMilliseconds -lt 1 -or $TimeoutMilliseconds -gt 60000 -or $MaximumOutputCharacters -lt 1 -or $MaximumOutputCharacters -gt 65536) { throw 'invalid_self_test_limits' }
+    foreach ($name in @('Clock','Start','Poll','Stop')) { if ($Adapter[$name] -isnot [scriptblock]) { throw "missing_self_test_adapter:$name" } }
+    $request=@{JavaPath=$JavaPath;SessionPath=($SessionRoot.TrimEnd('\')+'\'+[guid]::NewGuid().ToString('N'));ClassBytes=(Get-EloJavaSelfTestClass)}
+    $handle=$null; $started=$false; $output=New-Object Text.StringBuilder; $errorOutput=New-Object Text.StringBuilder
+    try {
+        $begin=& $Adapter.Clock
+        $handle=& $Adapter.Start $request; $started=$true
+        # Iteration cap also fails closed if a defective clock does not advance.
+        for ($i=0; $i -lt 10000; $i++) {
+            $now=& $Adapter.Clock
+            if ($now -lt $begin -or ($now-$begin) -ge $TimeoutMilliseconds) { return @{Success=$false;Reason='timeout';SessionPath=$request.SessionPath} }
+            $part=& $Adapter.Poll $handle
+            $now=& $Adapter.Clock
+            if ($now -lt $begin -or ($now-$begin) -ge $TimeoutMilliseconds) { return @{Success=$false;Reason='timeout';SessionPath=$request.SessionPath} }
+            $chunkOut=[string]$part.Stdout; $chunkError=[string]$part.Stderr
+            if (($output.Length+$errorOutput.Length+$chunkOut.Length+$chunkError.Length) -gt $MaximumOutputCharacters) { return @{Success=$false;Reason='output_limit';SessionPath=$request.SessionPath} }
+            $null=$output.Append($chunkOut); $null=$errorOutput.Append($chunkError)
+            if ($part.Done -isnot [bool]) { throw 'invalid_self_test_poll' }
+            if ($part.Done) {
+                $valid=($part.ExitCode -is [int] -and (Test-EloJavaSelfTestResult $part.ExitCode $output.ToString() $errorOutput.ToString()))
+                return @{Success=[bool]$valid;Reason=$(if ($valid) { 'success' } else { 'invalid_result' });SessionPath=$request.SessionPath}
+            }
+        }
+        return @{Success=$false;Reason='poll_limit';SessionPath=$request.SessionPath}
+    } finally { if ($started) { $null=& $Adapter.Stop $handle } }
+}
+
 function Get-EloUpdateGaps {
     @('Official API metadata for Temurin jdk-17.0.21.1+2 windows/x64/hotspot/jdk is recorded; final redirect hosts/URL, actual archive format/layout and expansion bounds remain unverified; executable allowlist empty.',
       'Windows adapters lack disposable filesystem/process integration proof; ZIP manifest covers owner/group/DACL but not SACLs, and ZIP fallback restoration is manual.',
-      'Exclusive runtime quiescence and race-free filesystem boundaries are not established; no service control is performed.')
+      'Exclusive runtime quiescence and race-free filesystem boundaries are not established; no service control is performed. Embedded Java self-test has not been executed or integrated into the update probe.')
 }
 function New-EloUpdateContext {
     param([hashtable]$Adapters=@{}, [switch]$Simulation)
@@ -99,7 +172,7 @@ function Assert-EloUpdateEvidence {
     foreach ($key in @('Vendor','Branch','Architecture','Fingerprint')) {
         if ([string]::IsNullOrWhiteSpace([string]$Detected[$key]) -or $Detected[$key] -eq 'unknown') { throw "unknown_detected_identity:$key" }
     }
-    foreach ($key in @('Vendor','Architecture')) {
+    foreach ($key in @('Vendor','Branch','Architecture')) {
         if ([string]$Detected[$key] -cne [string]$Package[$key]) { throw "package_identity_mismatch:$key" }
     }
     if ($Package.Architecture -cnotin @('x86','x64','ARM64') -or [string]$Package.Branch -notmatch '^\d+$' -or

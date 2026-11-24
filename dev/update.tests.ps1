@@ -36,6 +36,11 @@ function Assert-PreviewRejected($Fixture,$Code) {
     Assert-UpdateTest ($Fixture.State.Installed -eq $before -and $Fixture.State.Backup -eq $backupBefore) 'no writes on preview rejection'
 }
 $f=New-UpdateFixture
+$f.Package.Branch='21'; $f.Package.Version='21.0.9'
+$branchRejected=$false
+try { $null=New-FixturePreview $f } catch { $branchRejected=$_.Exception.Message -like '*package_identity_mismatch:Branch*' }
+Assert-UpdateTest ($branchRejected -and -not $f.State.Backup) 'different Java major must be rejected before backup'
+$f=New-UpdateFixture
 $p=New-FixturePreview $f
 $r=Invoke-FixtureUpdate $f $p
 Assert-UpdateTest ($r.Status -eq 'SimulatedSuccess') 'successful transaction'
@@ -62,9 +67,8 @@ foreach ($failure in @('preserve','replacement','installed','restore','verify-re
     Assert-UpdateTest ($f.State.Backup -and $f.State.Events.Contains('restore')) "$failure retains ZIP and attempts restore"
     Write-Output "PASS: $failure rollback/recovery behavior"
 }
-foreach ($case in @('missing','wrong','expired','clock-backwards','changed','admin','new-preview','branch')) {
+foreach ($case in @('missing','wrong','expired','clock-backwards','changed','admin','new-preview')) {
     $f=New-UpdateFixture
-    if ($case -eq 'branch') { $f.Package.Branch='21'; $f.Package.Version='21.0.9' }
     $p=New-FixturePreview $f
     switch ($case) {
         missing { $p.Confirmation='' }
@@ -74,16 +78,11 @@ foreach ($case in @('missing','wrong','expired','clock-backwards','changed','adm
         changed { $f.State.Identity='changed' }
         admin { $f.State.Admin=$false }
         new-preview { $null=New-FixturePreview $f }
-        branch { $p.BranchConfirmation='' }
     }
     $r=Invoke-FixtureUpdate $f $p
     Assert-UpdateTest ($r.Status -eq 'Rejected' -and -not $f.State.Backup) "$case confirmation gate"
     Write-Output "PASS: $case gate"
 }
-$f=New-UpdateFixture; $f.Package.Branch='21'; $f.Package.Version='21.0.9'
-$p=New-FixturePreview $f
-Assert-UpdateTest (-not [string]::IsNullOrWhiteSpace($p.BranchConfirmation) -and $p.BranchConfirmation -ne $p.Confirmation) 'independent second branch confirmation'
-Assert-UpdateTest ((Invoke-FixtureUpdate $f $p).Status -eq 'SimulatedSuccess') 'explicit cross-branch simulation'
 foreach ($case in @('vendor','architecture','http','checksum','provenance','unknown','overlap','traversal','volume','zip','admin','production')) {
     $f=New-UpdateFixture; $code=''
     switch ($case) {
@@ -228,4 +227,123 @@ Assert-UpdateTest ($fresh.Sha256 -ceq $candidate.Sha256 -and -not $fresh.Contain
 Assert-UpdateThrows { Get-EloPinnedTemurinRelease $evidence } 'no_independently_verified'
 Assert-UpdateTest (((Get-EloUpdateGaps) -join ' ') -like '*redirect*' -and ((Get-EloUpdateGaps) -join ' ') -notlike '*No exact Temurin release/checksum*') 'gap report recognizes metadata proof without implying binary proof'
 Write-Output 'PASS: exact parent-verified API metadata is informational only; no download or production approval'
-Write-Output 'ALL UPDATE TESTS PASSED (mocks/memory only; no live safety claim)'
+# Embedded console class is returned in memory only; no runtime is launched here.
+$class=Get-EloJavaSelfTestClass
+Assert-UpdateTest ($class -is [byte[]] -and $class.Length -gt 100) 'embedded Java class bytes'
+Assert-UpdateTest ([BitConverter]::ToString($class,0,4) -ceq 'CA-FE-BA-BE') 'Java class magic'
+$first=$class[0]; $class[0]=0
+Assert-UpdateTest ((Get-EloJavaSelfTestClass)[0] -eq $first) 'fresh class bytes on each call'
+Assert-UpdateTest (Test-EloJavaSelfTestResult 0 "ELO_JAVA_SELF_TEST_OK`n" '') 'exact success marker'
+foreach ($sample in @(@(1,"ELO_JAVA_SELF_TEST_OK`n",''),@(0,'',''),@(0,"ELO_JAVA_SELF_TEST_OK`nextra",''),@(0,"ELO_JAVA_SELF_TEST_OK`n",'error'))) {
+    Assert-UpdateTest (-not (Test-EloJavaSelfTestResult $sample[0] $sample[1] $sample[2])) 'reject failed or ambiguous self-test output'
+}
+Write-Output 'PASS: embedded Java class and synthetic result validation; no Java process launched'
+# Trusted adapter simulation only: no executable, filesystem or JVM is invoked.
+function New-SelfTestAdapter($Mode) {
+    $state=@{Time=0;Calls=0;Stopped=$false;Request=$null}
+    $adapter=@{
+        Clock={ $state.Time }.GetNewClosure()
+        Start={ param($request) $state.Request=$request; return 'fixture-handle' }.GetNewClosure()
+        Poll={ param($handle) $state.Calls++; $state.Time+=100
+            switch ($Mode) {
+                success { @{Done=$true;ExitCode=0;Stdout="ELO_JAVA_SELF_TEST_OK`n";Stderr=''} }
+                bad { @{Done=$true;ExitCode=1;Stdout='';Stderr='failed'} }
+                flood { @{Done=$false;Stdout=('x'*1025);Stderr=''} }
+                timeout { @{Done=$false;Stdout='';Stderr=''} }
+            }
+        }.GetNewClosure()
+        Stop={ param($handle) $state.Stopped=$true }.GetNewClosure()
+    }
+    return @{Adapter=$adapter;State=$state}
+}
+foreach ($mode in @('success','bad','flood','timeout')) {
+    $fixture=New-SelfTestAdapter $mode
+    $result=Invoke-EloJavaSelfTest -JavaPath 'C:\trusted JVM\bin\java.exe' -SessionRoot 'C:\fixture root' -Adapter $fixture.Adapter -TimeoutMilliseconds 300 -MaximumOutputCharacters 1024
+    Assert-UpdateTest ($result.Success -eq ($mode -eq 'success')) "self-test $mode result"
+    Assert-UpdateTest ($fixture.State.Stopped) "self-test $mode closes handle"
+    Assert-UpdateTest ($fixture.State.Request.JavaPath -ceq 'C:\trusted JVM\bin\java.exe' -and $fixture.State.Request.ClassBytes -is [byte[]]) 'explicit executable and embedded bytes forwarded'
+    Assert-UpdateTest ($fixture.State.Request.SessionPath -match '^C:\\fixture root\\[0-9a-f]{32}$') 'unique isolated session path'
+}
+$a=New-SelfTestAdapter success; $b=New-SelfTestAdapter success
+$first=Invoke-EloJavaSelfTest -JavaPath 'C:\trusted JVM\bin\java.exe' -SessionRoot 'C:\fixture root' -Adapter $a.Adapter
+$second=Invoke-EloJavaSelfTest -JavaPath 'C:\trusted JVM\bin\java.exe' -SessionRoot 'C:\fixture root' -Adapter $b.Adapter
+Assert-UpdateTest ($first.SessionPath -cne $second.SessionPath) 'distinct session identifiers'
+Assert-UpdateThrows { Invoke-EloJavaSelfTest -JavaPath 'java.exe' -SessionRoot 'C:\fixture root' -Adapter (New-SelfTestAdapter success).Adapter } 'absolute_java_path_required'
+Assert-UpdateThrows { Invoke-EloJavaSelfTest -JavaPath 'C:\trusted\java.exe' -SessionRoot 'C:\fixture root' -Adapter (New-SelfTestAdapter success).Adapter -TimeoutMilliseconds 0 } 'invalid_self_test_limits'
+$slow=New-SelfTestAdapter success
+$slowResult=Invoke-EloJavaSelfTest -JavaPath 'C:\trusted\java.exe' -SessionRoot 'C:\fixture root' -Adapter $slow.Adapter -TimeoutMilliseconds 100
+Assert-UpdateTest (-not $slowResult.Success -and $slowResult.Reason -eq 'timeout' -and $slow.State.Stopped) 'late successful result rejected'
+Write-Output 'PASS: mocked bounded self-test success, failed exit, output limit, timeout and cleanup'
+# Disposable filesystem integration only. Never use a discovered or installed JVM.
+# Retain every artifact for parent-owned cleanup, including on failure.
+$fixtureBase=Join-Path $PSScriptRoot 'update-live-fixtures'
+$probe=$fixtureBase
+while ($probe) {
+    if (Test-Path -LiteralPath $probe) {
+        $item=Get-Item -LiteralPath $probe -Force
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'fixture_reparse_boundary' }
+    }
+    $next=[IO.Path]::GetDirectoryName($probe)
+    if ($next -eq $probe) { break }; $probe=$next
+}
+$fixtureRoot=Join-Path $fixtureBase ([guid]::NewGuid().ToString('N'))
+if (Test-Path -LiteralPath $fixtureRoot) { throw 'fixture_collision' }
+Write-Output "FIXTURE FOR PARENT CLEANUP: $fixtureRoot"
+$null=[IO.Directory]::CreateDirectory($fixtureRoot)
+$paths=@{Runtime=(Join-Path $fixtureRoot 'runtime with spaces');Old=(Join-Path $fixtureRoot 'old');Stage=(Join-Path $fixtureRoot 'stage');Backup=(Join-Path $fixtureRoot 'backup.zip');Download=(Join-Path $fixtureRoot 'download.zip')}
+$null=[IO.Directory]::CreateDirectory((Join-Path $paths.Runtime 'bin'))
+[IO.File]::WriteAllText((Join-Path $paths.Runtime 'bin\java.exe'),'synthetic original; not executable')
+$manifest=Get-EloRuntimeManifest $fixtureRoot $paths.Runtime
+Write-EloVerifiedBackup $fixtureRoot $paths $manifest
+$input=[IO.File]::OpenRead($paths.Backup); $zip=$null
+try {
+    $zip=New-Object IO.Compression.ZipArchive($input,[IO.Compression.ZipArchiveMode]::Read,$true)
+    Assert-UpdateTest (Test-EloBackupArchive $zip $manifest) 'filesystem ZIP contains original manifest and bytes'
+} finally { if ($zip) { $zip.Dispose() }; $input.Dispose() }
+$backupHash=(Get-FileHash -LiteralPath $paths.Backup -Algorithm SHA256).Hash
+$collision=$false
+try { Write-EloVerifiedBackup $fixtureRoot $paths $manifest } catch { $collision=$true }
+Assert-UpdateTest ($collision -and (Get-FileHash -LiteralPath $paths.Backup -Algorithm SHA256).Hash -ceq $backupHash) 'backup collision preserves existing ZIP'
+Assert-UpdateTest ((Get-EloRuntimeManifest $fixtureRoot $paths.Runtime).Fingerprint -ceq $manifest.Fingerprint) 'backup collision leaves original unchanged'
+# Inspect/restore require a recognized runtime identity; no real JVM is used.
+[IO.File]::WriteAllText((Join-Path $paths.Runtime 'bin\java.exe'),'changed synthetic bytes')
+$changed=Get-EloRuntimeManifest $fixtureRoot $paths.Runtime
+Assert-UpdateTest ($changed.Fingerprint -cne $manifest.Fingerprint) 'manifest detects changed runtime'
+$input=[IO.File]::OpenRead($paths.Backup); $zip=$null
+try {
+    $zip=New-Object IO.Compression.ZipArchive($input,[IO.Compression.ZipArchiveMode]::Read,$true)
+    Assert-UpdateTest (Test-EloBackupArchive $zip $manifest) 'ZIP remains original after runtime changes'
+    Assert-UpdateTest (-not (Test-EloBackupArchive $zip $changed)) 'ZIP rejects changed runtime manifest'
+} finally { if ($zip) { $zip.Dispose() }; $input.Dispose() }
+Write-Output 'PASS: synthetic filesystem ZIP creation, collision, verification and changed-runtime rejection; artifacts retained'
+# Minimal inert PE header and release metadata satisfy identity parsing only; the
+# synthetic executable is never launched. Exercise actual preserve/restore closures.
+$restoreRoot=Join-Path $fixtureRoot 'restore-cases'
+$null=[IO.Directory]::CreateDirectory($restoreRoot)
+foreach ($case in @('restore','changed-old')) {
+    $caseRoot=Join-Path $restoreRoot $case
+    $runtime=Join-Path $caseRoot 'runtime'; $old=Join-Path $caseRoot 'old'; $stage=Join-Path $caseRoot 'stage'
+    $null=[IO.Directory]::CreateDirectory((Join-Path $runtime 'bin'))
+    $pe=New-Object byte[] 128; $pe[0]=0x4d; $pe[1]=0x5a; $pe[60]=64; $pe[64]=0x50; $pe[65]=0x45; $pe[68]=0x64; $pe[69]=0x86
+    [IO.File]::WriteAllBytes((Join-Path $runtime 'bin\java.exe'),$pe)
+    [IO.File]::WriteAllText((Join-Path $runtime 'release'),"IMPLEMENTOR=`"Eclipse Adoptium`"`r`nJAVA_VERSION=`"17.0.1`"`r`nJAVA_RUNTIME_VERSION=`"17.0.1+1`"`r`nOS_ARCH=`"amd64`"`r`nOS_NAME=`"Windows`"`r`n")
+    $adapter=New-EloWindowsUpdateAdapters -ApprovedRoot $fixtureRoot -Runtime $runtime
+    $identity=& $adapter.Inspect $runtime
+    $p=@{Runtime=$runtime;Old=$old;Stage=$stage}
+    & $adapter.Preserve $p
+    Assert-UpdateTest ((Test-Path -LiteralPath $old) -and -not (Test-Path -LiteralPath $runtime)) 'preserve renames original'
+    $null=[IO.Directory]::CreateDirectory($runtime)
+    [IO.File]::WriteAllText((Join-Path $runtime 'failed.txt'),'synthetic failed replacement')
+    if ($case -eq 'changed-old') {
+        [IO.File]::WriteAllText((Join-Path $old 'extra.txt'),'unexpected modification')
+        Assert-UpdateThrows { & $adapter.Restore $p } 'old_runtime_changed_manual_zip_restore_required'
+        Assert-UpdateTest ((Test-Path -LiteralPath (Join-Path $runtime 'failed.txt')) -and (Test-Path -LiteralPath (Join-Path $old 'extra.txt'))) 'failed restore retains both trees'
+    } else {
+        & $adapter.Restore $p
+        Assert-UpdateTest (& $adapter.VerifyRestored $p $identity) 'restored manifest matches original'
+        $failed=@(Get-ChildItem -LiteralPath $caseRoot -Directory -Filter 'stage.failed-*')
+        Assert-UpdateTest ($failed.Count -eq 1 -and (Test-Path -LiteralPath (Join-Path $failed[0].FullName 'failed.txt')) -and -not (Test-Path -LiteralPath $old)) 'failed replacement retained separately'
+    }
+}
+Write-Output 'PASS: synthetic real rename restore and changed-old refusal; no executable launched'
+Write-Output 'ALL UPDATE TESTS PASSED (synthetic filesystem and mocks; no production safety claim)'
