@@ -5,7 +5,7 @@ if (-not (Test-Path -LiteralPath $htmlPath)) { throw 'Missing dev/ui.html' }
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw 'Node.js is required for isolated browser-contract tests.' }
 # Verify embedded resources against their authoritative development sources.
 $batText = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) 'ELO-Patch-Tools.bat'))
-foreach ($resource in @(@('SCAN_PS','scan.ps1'),@('SERVER_PS','server.ps1'),@('CLI_PS','cli.ps1'),@('UI_HTML','ui.html'),@('REPORT_PS','report.ps1'),@('UPDATE_PS','update.ps1'))) {
+foreach ($resource in @(@('SCAN_PS','scan.ps1'),@('SERVER_PS','server.ps1'),@('CLI_PS','cli.ps1'),@('UI_HTML','ui.html'),@('REPORT_PS','report.ps1'),@('UPDATE_PS','update.ps1'),@('CATALOG_PS','catalog.ps1'))) {
     $match = [regex]::Match($batText, '(?ms)^::ELO_PATCH_BEGIN:' + $resource[0] + '\r?\n(.*?)^::ELO_PATCH_END:' + $resource[0] + '\s*$')
     $expected = [IO.File]::ReadAllText((Join-Path $PSScriptRoot $resource[1])).TrimEnd("`r", "`n")
     if (-not $match.Success -or ($match.Groups[1].Value.TrimEnd("`r", "`n") -replace "`r`n", "`n") -cne ($expected -replace "`r`n", "`n")) { throw "Embedded $($resource[0]) differs from source" }
@@ -408,7 +408,62 @@ function boot(hash = '#token=test-session-token') {
  assert(unsafe.el('error').textContent.includes('request failed')); assert(!unsafe.el('error').textContent.includes('expired'));
  await unsafe.el('exportLog').click();
  assert(!((await unsafe.downloads[0].text()).includes('UNTRUSTED')));
- console.log('PASS: JVM evidence/export, exact advisory allowlist, bounded errors/warnings, admin/access denial, rollback/recovery lock, unavailable update, locales and token security');
+ // ---- wizard: honest progress, automatic advance, reachable steps, restore.
+ const shown=(view,n) => view.el('step'+n).attrs.hidden === undefined;
+ const visibleSteps=view => [1,2,3,4,5].filter(n => shown(view,n)).join(',');
+ const wiz=boot(); await tick();
+ assert.equal(visibleSteps(wiz),'1','the wizard starts on the scan step');
+ assert.equal(wiz.el('nav1').attrs['data-state'],'current'); assert.equal(wiz.el('nav4').disabled,true,'confirm step needs a preview');
+ assert.equal(wiz.el('progress').attrs.hidden,'', 'no progress bar while idle'); assert(!wiz.el('progressText').textContent.includes('unavailable'));
+ await wiz.el('scan').click();
+ wiz.status({state:'scanning'}); await wiz.poll();
+ assert.equal(wiz.el('progress').attrs.hidden,undefined,'bar visible only while scanning'); assert(wiz.el('progressText').textContent.includes('Scanning drives'));
+ assert(!wiz.el('progressText').textContent.includes('Progress unavailable'),'never the dead-end message');
+ assert.equal(visibleSteps(wiz),'1'); assert.equal(wiz.el('nav3').disabled,true,'no later step while scanning');
+ wiz.status({state:'completed'}); await wiz.poll();
+ assert.equal(visibleSteps(wiz),'2','a finished scan advances the wizard on its own');
+ assert.equal(wiz.el('progress').attrs.hidden,''); assert.equal(wiz.el('progressText').textContent,'');
+ assert(wiz.el('scanSummary').textContent.includes('Java runtimes found: 1'));
+ assert.equal(wiz.el('cards').children.length,1); const card=wiz.el('cards').children[0];
+ assert.equal(card.attrs['aria-checked'],'true'); assert(card.children[0].textContent.includes('Example vendor <img> 17.0.1'),'runtime card shows text literally');
+ await wiz.el('toStep3').click(); assert.equal(visibleSteps(wiz),'3');
+ await wiz.el('update').click(); assert.equal(visibleSteps(wiz),'4','a received preview opens the confirm step');
+ assert.equal(wiz.el('previewKind').textContent,'Runtime update'); assert.equal(wiz.el('apply').disabled,true);
+ await wiz.el('back4').click(); assert.equal(visibleSteps(wiz),'3'); assert.equal(wiz.el('apply').disabled,true,'going back drops the preview');
+ await wiz.el('update').click(); wiz.el('confirm').checked=true; wiz.el('confirm').onchange();
+ await wiz.el('apply').click();
+ assert.equal(visibleSteps(wiz),'5','a completed action opens the report step');
+ assert(wiz.el('finalNotice').textContent.includes('updated and verified')); assert.equal(wiz.el('restore').attrs.hidden,undefined,'restore is offered after an update');
+ await wiz.el('restore').click(); assert.equal(visibleSteps(wiz),'4');
+ assert.equal(JSON.parse(wiz.calls.at(-1).options.body).actionId,'restore-backup'); assert.equal(wiz.el('previewKind').textContent,'Restore from backup');
+ assert(wiz.el('confirmation').textContent.includes('restore preview'));
+ wiz.el('confirm').checked=true; wiz.el('confirm').onchange(); await wiz.el('apply').click();
+ assert.equal(visibleSteps(wiz),'5'); assert(wiz.el('finalNotice').textContent.includes('restored from the backup ZIP')); assert.equal(wiz.el('restore').attrs.hidden,'','restore only after an update in this page session');
+ changeLocale(wiz,'de'); assert(wiz.el('finalNotice').textContent.includes('wiederhergestellt'));
+ changeLocale(wiz,'en');
+ await wiz.el('startOver').click(); assert.equal(visibleSteps(wiz),'1');
+ // The shown step falls back when its prerequisite disappears (changed evidence invalidates the preview).
+ const fallback=boot(); await tick(); await fallback.el('toStep3').click(); await fallback.el('mitigate').click();
+ assert.equal(visibleSteps(fallback),'4');
+ fallback.results([row({classificationEvidence:both('Changed evidence','Geänderter Nachweis')})]); await fallback.poll();
+ assert.equal(visibleSteps(fallback),'3','a stale preview cannot keep the confirm step open'); assert.equal(fallback.el('apply').disabled,true);
+ fallback.results([]); fallback.status({state:'completed'}); await fallback.poll();
+ assert.equal(visibleSteps(fallback),'1','no results sends the wizard back to the scan step'); assert.equal(fallback.el('nav2').disabled,true);
+ // A cancelled scan or an empty result never advances; empty results explain what to do.
+ const cancelled=boot(); await tick(); await cancelled.el('scan').click(); cancelled.status({state:'cancelled'}); await cancelled.poll();
+ assert.equal(visibleSteps(cancelled),'1');
+ const empty=boot(); await tick(); empty.results([]); await empty.el('scan').click(); empty.status({state:'completed'}); await empty.poll();
+ assert.equal(visibleSteps(empty),'1'); assert(empty.el('scanSummary').textContent.includes('No Java runtime found'));
+ changeLocale(empty,'de'); assert(empty.el('scanSummary').textContent.includes('Keine Java-Runtime gefunden'));
+ // Busy indicator while a request is pending; stable server codes for the new update outcomes.
+ const outcomes=boot(); await tick();
+ for (const [code,text] of [['update_not_needed','newest release'],['no_backup_for_target','No backup made'],['restore_failed_no_change','restore was rejected'],['update_failed_rolled_back','failed validation'],['update_rejected_no_change','rejected before the runtime was replaced']]) {
+   outcomes.failure(code==='update_not_needed'||code==='no_backup_for_target'?409:422,{error:code,warnings:[both('Detail A','Detail B')]}); await outcomes.el('update').click();
+   assert(outcomes.el('error').textContent.includes(text),'message for '+code); assert(outcomes.el('error').textContent.includes('Detail A'));
+   outcomes.failure(null);
+ }
+ outcomes.failure(500,{error:'update_manual_recovery_required',warnings:[both('ZIP restore needed','ZIP noetig')]}); await outcomes.el('update').click();
+ assert(outcomes.el('recoveryNotice').textContent.includes('CRITICAL')); assert.equal(outcomes.el('apply').disabled,true); assert.equal(outcomes.el('nav2').disabled,true); console.log('PASS: JVM evidence/export, exact advisory allowlist, bounded errors/warnings, admin/access denial, rollback/recovery lock, unavailable update, locales and token security');
 })().catch(error => { console.error(error); process.exitCode=1; });
 '@
 $tests | & node - $htmlPath

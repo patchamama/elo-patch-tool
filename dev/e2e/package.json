@@ -1,0 +1,6 @@
+{
+  "name": "elo-patch-tools-e2e",
+  "private": true,
+  "description": "Opt-in browser E2E (Chrome) for the wizard. Install with: npm install --prefix dev/e2e",
+  "devDependencies": { "playwright-core": "1.65.1" }
+}

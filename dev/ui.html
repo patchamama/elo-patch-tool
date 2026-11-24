@@ -39,7 +39,7 @@
  and canonicalize, enforce local read-only traversal, handle reparse points safely,
  and reject invalid/inaccessible roots. Do not echo the root into activity logs.
  POST cancel -> {}; both respond {ok:true}. Cancel is a request, not completion.
- POST preview -> {actionId: mitigate|update-runtime, resultId}; response
+ POST preview -> {actionId: mitigate|update-runtime|restore-backup, resultId}; response
  {previewId, summary:{en,de}, warnings:[{en,de}]}. Preview must be read-only and
  explain exact scope, backup, rollback, compatibility and provenance as applicable.
  POST action -> {actionId, resultId, previewId}; response {ok:true} ONLY on completion.
@@ -59,71 +59,267 @@
  options, busy scan or manual recovery: never infer expiry solely from HTTP status.
  422 verification_failed_rolled_back means the previous environment value AND type
  were restored/read back; probe_failed_no_change means no write occurred. 500
- rollback_failed_manual_recovery_required and 409 manual_recovery_required_close_session
- latch a visible manual-recovery lock for this page lifetime, including across polling
- success/network errors. Malformed warnings on recognized recovery errors are discarded
- without hiding that lock. Other malformed/unknown error bodies discard all server text;
- fallback is auth for 401, access denied for 403, otherwise generic failure.
- 503 update_unavailable_provenance_compatibility_backup_replacement_rollback_not_verified
- means automatic update is unavailable (no download/replacement). This server currently
- supports mitigation only. Request errors remain visible through successful background
- polls until another explicit request; poll errors clear on a validated refresh.
+ rollback_failed_manual_recovery_required, update_manual_recovery_required and 409
+ manual_recovery_required_close_session latch a visible manual-recovery lock for this
+ page lifetime, including across polling success/network errors. Malformed warnings on
+ recognized recovery errors are discarded without hiding that lock. Other malformed/
+ unknown error bodies discard all server text; fallback is auth for 401, access denied
+ for 403, otherwise generic failure. Runtime update (update-runtime) and restore from the
+ session backup ZIP (restore-backup) follow the same preview/confirm/apply contract.
+ Request errors remain visible through successful background polls until another
+ explicit request; poll errors clear on a validated refresh.
  No backend diagnostic text is logged. JSON export retains all documented JVM
  evidence and advisory metadata, lastSuccessfulRefresh (ISO timestamp|null) and
  assessmentComplete (false for active/cancelled/failed scans or stale snapshots),
  and recoveryRequired (a sticky client-side safety lock, not proof of recovery).
  Activity export contains fixed translated events only.
- This UI does not implement backend scanning, updates, rollback or BAT extraction.
+ Wizard: five steps (scan, runtime, action, confirm, report). Steps are purely a
+ presentation layer over the same requests; a step is reachable only when its
+ prerequisite (results, selection, preview) exists, and the displayed step falls back
+ whenever that prerequisite disappears (new scan, changed evidence, expired preview).
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <title>ELO Patch Tools</title>
 <style>
-body{font:16px system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;color:#202830;background:#f5f7fa}section{background:white;padding:1rem;margin:1rem 0;border:1px solid #ccd3dc;border-radius:.4rem}button,select{font:inherit;padding:.5rem;margin:.3rem}button:disabled{opacity:.55}pre{white-space:pre-wrap;overflow-wrap:anywhere}label{display:block;margin:.5rem 0}#error{color:#a01818}progress{width:100%}small{display:block}h1,h2{line-height:1.2}input[type=text]{font:inherit;width:min(95%,45rem);padding:.5rem}.table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%}th,td{padding:.5rem;border:1px solid #ccd3dc;text-align:left;vertical-align:top;white-space:pre-wrap;overflow-wrap:anywhere}td{min-width:7rem}a{color:#174f92}
+:root{--bg:#f3f5fa;--surface:#fff;--surface-2:#f7f9fd;--text:#18202f;--muted:#586377;--line:#dde3ee;--accent:#2457e6;--accent-ink:#fff;--accent-soft:#e8eefd;--ok:#12733a;--ok-soft:#e3f5ea;--warn:#975a00;--warn-soft:#fdf1da;--bad:#b3261e;--bad-soft:#fde8e6;--shadow:0 1px 2px rgba(20,30,60,.06),0 8px 24px rgba(20,30,60,.06);--radius:14px}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1220;--surface:#151c2e;--surface-2:#1a2336;--text:#e7ecf6;--muted:#9aa6bd;--line:#26314a;--accent:#6d93ff;--accent-ink:#0b1226;--accent-soft:#1d2b52;--ok:#5fd18a;--ok-soft:#12301f;--warn:#f0b24a;--warn-soft:#38290e;--bad:#ff8a80;--bad-soft:#3b1815;--shadow:none}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:980px;margin:0 auto;padding:0 16px 48px}
+svg.i{width:1.25em;height:1.25em;flex:none;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;vertical-align:-.2em}
+header.top{display:flex;align-items:center;gap:12px;padding:20px 0 8px}
+header.top .logo{display:grid;place-items:center;width:40px;height:40px;border-radius:12px;background:var(--accent);color:var(--accent-ink)}
+header.top .logo svg{width:22px;height:22px}
+h1{font-size:1.25rem;line-height:1.2;margin:0;letter-spacing:-.01em}
+.sub{margin:0;color:var(--muted);font-size:.875rem}
+.lang{margin-left:auto;display:flex;align-items:center;gap:6px;color:var(--muted);font-size:.875rem}
+select{font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:.4rem .6rem}
+.stepper{list-style:none;display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:12px 0 18px;padding:0;counter-reset:s}
+.stepper li{min-width:0}
+.step{width:100%;display:flex;flex-direction:column;align-items:center;gap:6px;padding:10px 4px;border:0;background:transparent;color:var(--muted);font:inherit;font-size:.8125rem;cursor:pointer;border-radius:12px;position:relative}
+.step .dot{display:grid;place-items:center;width:38px;height:38px;border-radius:50%;background:var(--surface);border:1.5px solid var(--line);color:var(--muted);transition:background .15s,border-color .15s,color .15s}
+.step[data-state=current] .dot{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.step[data-state=current]{color:var(--text);font-weight:600}
+.step[data-state=done] .dot{background:var(--ok-soft);border-color:var(--ok);color:var(--ok)}
+.step:disabled{cursor:not-allowed;opacity:.55}
+.step:focus-visible,.btn:focus-visible,.rt:focus-visible,.card:focus-visible,summary:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.step .lbl{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+@media (max-width:560px){.step .lbl{display:none}.step[data-state=current] .lbl{display:block}}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:20px;margin:0 0 16px;box-shadow:var(--shadow)}
+.panel[hidden]{display:none}
+.panel h2{display:flex;align-items:center;gap:10px;font-size:1.125rem;margin:0 0 4px;letter-spacing:-.01em}
+.panel h2 .ico{display:grid;place-items:center;width:32px;height:32px;border-radius:10px;background:var(--accent-soft);color:var(--accent)}
+.lead{margin:.25rem 0 1rem;color:var(--muted)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;font:inherit;font-weight:600;padding:.6rem 1rem;border-radius:11px;border:1px solid var(--line);background:var(--surface);color:var(--text);cursor:pointer;transition:background .12s,border-color .12s,transform .05s}
+.btn:hover:not(:disabled){background:var(--surface-2);border-color:var(--muted)}
+.btn:active:not(:disabled){transform:translateY(1px)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.primary:hover:not(:disabled){filter:brightness(1.08);background:var(--accent)}
+.btn.ghost{background:transparent}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn[hidden],[hidden]{display:none!important}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:14px}
+.row.between{justify-content:space-between}
+.banner{margin:0 0 14px;padding:12px 14px;border-radius:12px;border:1px solid var(--line);background:var(--surface);white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-size:.9375rem}
+.banner:empty{display:none}
+#error{border-color:var(--bad);background:var(--bad-soft);color:var(--bad)}
+#recoveryNotice{border-color:var(--bad);background:var(--bad-soft);color:var(--bad);font-weight:600}
+.busy{display:flex;align-items:center;gap:10px;margin:0 0 14px;padding:12px 14px;border-radius:12px;background:var(--accent-soft);color:var(--text);border:1px solid var(--line)}
+.status-line{display:flex;align-items:center;gap:10px;min-height:2rem;margin:.25rem 0}
+.spin{width:18px;height:18px;border-radius:50%;border:2.5px solid var(--line);border-top-color:var(--accent);animation:spin .8s linear infinite}
+.spin[hidden]{display:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation:none;border-top-color:var(--accent);border-right-color:var(--accent)}.step .dot{transition:none}}
+progress{width:100%;height:8px;border-radius:6px;overflow:hidden;appearance:none;-webkit-appearance:none;border:0;background:var(--line);margin:.25rem 0}
+progress::-webkit-progress-bar{background:var(--line)}
+progress::-webkit-progress-value{background:var(--accent)}
+progress::-moz-progress-bar{background:var(--accent)}
+progress:indeterminate{background:linear-gradient(90deg,var(--line) 0,var(--accent) 50%,var(--line) 100%);background-size:200% 100%;animation:slide 1.2s linear infinite}
+@keyframes slide{to{background-position:-200% 0}}
+.muted{color:var(--muted);font-size:.875rem}
+details{border:1px solid var(--line);border-radius:12px;background:var(--surface-2);margin:12px 0}
+details>summary{cursor:pointer;padding:10px 14px;font-weight:600;display:flex;align-items:center;gap:8px;list-style:none}
+details>summary::-webkit-details-marker{display:none}
+details>summary::after{content:"";margin-left:auto;width:8px;height:8px;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(45deg);transition:transform .15s}
+details[open]>summary::after{transform:rotate(-135deg)}
+details>.body{padding:0 14px 14px}
+label.field{display:block;font-weight:600;margin:.5rem 0}
+input[type=text]{display:block;width:100%;font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:.55rem .7rem;margin-top:.35rem}
+.cards{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}
+.rt,.card{text-align:left;font:inherit;color:var(--text);background:var(--surface);border:1.5px solid var(--line);border-radius:13px;padding:14px;cursor:pointer;display:flex;flex-direction:column;gap:6px;transition:border-color .12s,background .12s,box-shadow .12s}
+.rt:hover:not(:disabled),.card:hover:not(:disabled){border-color:var(--muted)}
+.rt[aria-checked=true]{border-color:var(--accent);background:var(--accent-soft);box-shadow:0 0 0 1px var(--accent) inset}
+.rt .t{font-weight:700;display:flex;align-items:center;gap:8px}
+.rt .p{font-size:.8125rem;color:var(--muted);overflow-wrap:anywhere}
+.badge{display:inline-flex;align-items:center;gap:6px;align-self:flex-start;font-size:.75rem;font-weight:700;padding:.15rem .55rem;border-radius:999px;background:var(--surface-2);border:1px solid var(--line);color:var(--muted)}
+.badge::before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor}
+.badge[data-status=vulnerable]{color:var(--bad);background:var(--bad-soft);border-color:transparent}
+.badge[data-status=patched],.badge[data-status=not-affected],.badge[data-status=safe],.badge[data-status=mitigated]{color:var(--ok);background:var(--ok-soft);border-color:transparent}
+.badge[data-status=inconclusive],.badge[data-status=unsupported]{color:var(--warn);background:var(--warn-soft);border-color:transparent}
+.card{flex-direction:row;align-items:flex-start;gap:14px}
+.card .ico{display:grid;place-items:center;flex:none;width:44px;height:44px;border-radius:12px;background:var(--accent-soft);color:var(--accent)}
+.card .ico svg{width:24px;height:24px}
+.card .tt{font-weight:700;display:block}
+.card .dd{display:block;color:var(--muted);font-size:.875rem;font-weight:400}
+.card:disabled{opacity:.5;cursor:not-allowed}
+.card.rec{border-color:var(--accent)}
+.preview{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-size:.9375rem;background:var(--surface-2);border:1px solid var(--line);border-radius:12px;padding:14px;margin:8px 0}
+.confirm{display:flex;gap:10px;align-items:flex-start;margin:14px 0;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface-2)}
+.confirm input{margin-top:.25rem;width:18px;height:18px;flex:none}
+.done{display:flex;gap:12px;align-items:flex-start;padding:14px;border-radius:12px;background:var(--ok-soft);color:var(--ok);margin-bottom:12px;font-weight:600}
+.done:empty,.done[hidden]{display:none}
+.table-wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:.8125rem}
+th,td{padding:.45rem .55rem;border:1px solid var(--line);text-align:left;vertical-align:top;white-space:pre-wrap;overflow-wrap:anywhere}
+th{background:var(--surface-2)}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-size:.8125rem;margin:8px 0}
+a{color:var(--accent)}
+ol.manual{padding-left:1.25rem;margin:.5rem 0}
+ol.manual li{margin:.35rem 0}
+.sec{margin-top:8px}
 </style>
 </head>
 <body>
-<h1>ELO Patch Tools</h1>
-<label><span data-i18n="language">Language</span> <select id="language"><option value="en">English</option><option value="de">Deutsch</option></select></label>
-<p data-i18n="intro"></p>
-<pre id="error" role="alert"></pre>
-<pre id="recoveryNotice" role="alert"></pre>
-<section aria-labelledby="scanHeading">
-<h2 id="scanHeading" data-i18n="scanHeading"></h2>
-<p id="status" role="status" aria-live="polite"></p>
-<progress id="progress" max="100" aria-label="Progress"></progress><p id="progressText"></p>
-<label><span data-i18n="searchPath"></span><input id="searchPath" type="text" maxlength="1024" autocomplete="off" spellcheck="false" aria-describedby="searchHelp"></label>
-<p id="searchHelp" data-i18n="searchHelp"></p>
-<button id="scan" data-i18n="scan"></button><button id="cancel" data-i18n="cancel" disabled></button>
-<label><span data-i18n="results"></span><select id="results"></select></label>
-<p id="resultNotice" role="status"></p>
-<div class="table-wrap"><table><caption data-i18n="jvmTable"></caption><thead><tr><th scope="col" data-i18n="path"></th><th scope="col" data-i18n="runtimeRoot"></th><th scope="col" data-i18n="version"></th><th scope="col" data-i18n="vendor"></th><th scope="col" data-i18n="architecture"></th><th scope="col" data-i18n="classification"></th><th scope="col" data-i18n="eloRationale"></th><th scope="col" data-i18n="classificationEvidence"></th></tr></thead><tbody id="jvmRows"></tbody></table></div>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></symbol>
+<symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></symbol>
+<symbol id="i-update" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></symbol>
+<symbol id="i-file" viewBox="0 0 24 24"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5M10 13h6M10 17h6"/></symbol>
+<symbol id="i-book" viewBox="0 0 24 24"><path d="M5 4h10a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3z"/><path d="M5 17a3 3 0 0 1 3-3h10"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12l4.5 4.5L19 7"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z"/></symbol>
+<symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+<symbol id="i-next" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+<symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
+<symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 11l5 5 5-5M5 20h14"/></symbol>
+<symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></symbol>
+<symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></symbol>
+<symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.01"/></symbol>
+<symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12M4 6v.01M4 12v.01M4 18v.01"/></symbol>
+</svg>
+<div class="wrap">
+<header class="top">
+<div class="logo"><svg class="i"><use href="#i-cpu"/></svg></div>
+<div><h1>ELO Patch Tools</h1><p class="sub" data-i18n="tagline"></p></div>
+<label class="lang"><svg class="i"><use href="#i-globe"/></svg><span data-i18n="language"></span> <select id="language"><option value="en">English</option><option value="de">Deutsch</option></select></label>
+</header>
+<nav aria-label="Steps"><ol class="stepper" id="stepper">
+<li><button class="step" id="nav1" type="button" data-state="current"><span class="dot"><svg class="i"><use href="#i-search"/></svg></span><span class="lbl" data-i18n="step1"></span></button></li>
+<li><button class="step" id="nav2" type="button" data-state="todo" disabled><span class="dot"><svg class="i"><use href="#i-cpu"/></svg></span><span class="lbl" data-i18n="step2"></span></button></li>
+<li><button class="step" id="nav3" type="button" data-state="todo" disabled><span class="dot"><svg class="i"><use href="#i-update"/></svg></span><span class="lbl" data-i18n="step3"></span></button></li>
+<li><button class="step" id="nav4" type="button" data-state="todo" disabled><span class="dot"><svg class="i"><use href="#i-shield"/></svg></span><span class="lbl" data-i18n="step4"></span></button></li>
+<li><button class="step" id="nav5" type="button" data-state="todo" disabled><span class="dot"><svg class="i"><use href="#i-file"/></svg></span><span class="lbl" data-i18n="step5"></span></button></li>
+</ol></nav>
+<div id="busy" class="busy" role="status" aria-live="polite" hidden><span class="spin"></span><span data-i18n="working"></span></div>
+<pre id="error" class="banner" role="alert"></pre>
+<pre id="recoveryNotice" class="banner" role="alert"></pre>
+
+<section class="panel" id="step1" aria-labelledby="h1s">
+<h2 id="h1s"><span class="ico"><svg class="i"><use href="#i-search"/></svg></span><span data-i18n="step1Title"></span></h2>
+<p class="lead" data-i18n="step1Text"></p>
+<div class="status-line"><span class="spin" id="spinner" hidden></span><span id="status" role="status" aria-live="polite"></span></div>
+<progress id="progress" max="100" aria-label="Progress" hidden></progress><p id="progressText" class="muted"></p>
+<p id="scanSummary" class="muted" role="status"></p>
+<p id="resultNotice" class="muted" role="status"></p>
+<details><summary><svg class="i"><use href="#i-list"/></svg><span data-i18n="advanced"></span></summary><div class="body">
+<label class="field"><span data-i18n="searchPath"></span><input id="searchPath" type="text" maxlength="1024" autocomplete="off" spellcheck="false" aria-describedby="searchHelp"></label>
+<p id="searchHelp" class="muted" data-i18n="searchHelp"></p>
+</div></details>
+<div class="row">
+<button id="scan" class="btn primary" type="button"><svg class="i"><use href="#i-play"/></svg><span data-i18n="scan"></span></button>
+<button id="cancel" class="btn" type="button" disabled><svg class="i"><use href="#i-stop"/></svg><span data-i18n="cancel"></span></button>
+<button id="toStep2" class="btn ghost" type="button" hidden><span data-i18n="continue"></span><svg class="i"><use href="#i-next"/></svg></button>
+</div>
+</section>
+
+<section class="panel" id="step2" aria-labelledby="h2s" hidden>
+<h2 id="h2s"><span class="ico"><svg class="i"><use href="#i-cpu"/></svg></span><span data-i18n="step2Title"></span></h2>
+<p class="lead" data-i18n="step2Text"></p>
+<div class="cards" id="cards" role="radiogroup" aria-labelledby="h2s"></div>
+<label class="field" hidden><span data-i18n="results"></span><select id="results"></select></label>
+<details><summary><svg class="i"><use href="#i-info"/></svg><span data-i18n="evidence"></span></summary><div class="body">
 <pre id="details"></pre>
+<div class="table-wrap"><table><caption data-i18n="jvmTable"></caption><thead><tr><th scope="col" data-i18n="path"></th><th scope="col" data-i18n="runtimeRoot"></th><th scope="col" data-i18n="version"></th><th scope="col" data-i18n="vendor"></th><th scope="col" data-i18n="architecture"></th><th scope="col" data-i18n="classification"></th><th scope="col" data-i18n="eloRationale"></th><th scope="col" data-i18n="classificationEvidence"></th></tr></thead><tbody id="jvmRows"></tbody></table></div>
+</div></details>
+<div class="row between">
+<button id="back2" class="btn ghost" type="button"><svg class="i"><use href="#i-back"/></svg><span data-i18n="back"></span></button>
+<button id="toStep3" class="btn primary" type="button" disabled><span data-i18n="continue"></span><svg class="i"><use href="#i-next"/></svg></button>
+</div>
 </section>
-<section aria-labelledby="actionHeading">
-<h2 id="actionHeading" data-i18n="actionHeading"></h2>
-<p data-i18n="warning"></p>
-<button id="mitigate" data-i18n="mitigate" disabled></button><button id="update" data-i18n="update" disabled></button>
-<h3 data-i18n="preview"></h3><pre id="preview"></pre>
-<label><input id="confirm" type="checkbox" disabled><span id="confirmation"></span></label>
-<button id="apply" data-i18n="apply" disabled></button>
+
+<section class="panel" id="step3" aria-labelledby="h3s" hidden>
+<h2 id="h3s"><span class="ico"><svg class="i"><use href="#i-update"/></svg></span><span data-i18n="step3Title"></span></h2>
+<p class="lead" data-i18n="warning"></p>
+<div class="cards">
+<button id="update" class="card rec" type="button" disabled><span class="ico"><svg class="i"><use href="#i-update"/></svg></span><span><span class="tt" data-i18n="update"></span><span class="dd" data-i18n="updateDesc"></span></span></button>
+<button id="mitigate" class="card" type="button" disabled><span class="ico"><svg class="i"><use href="#i-shield"/></svg></span><span><span class="tt" data-i18n="mitigate"></span><span class="dd" data-i18n="mitigateDesc"></span></span></button>
+</div>
+<details><summary><svg class="i"><use href="#i-book"/></svg><span data-i18n="manualHeading"></span></summary><div class="body"><p class="muted" data-i18n="manualIntro"></p><ol id="manual" class="manual"></ol></div></details>
+<div class="row"><button id="back3" class="btn ghost" type="button"><svg class="i"><use href="#i-back"/></svg><span data-i18n="back"></span></button></div>
 </section>
-<section aria-labelledby="securityHeading"><h2 id="securityHeading" data-i18n="securityHeading"></h2><p data-i18n="securityHelp"></p><p id="verifiedOn"></p><ul id="advisories"></ul></section>
-<section aria-labelledby="manualHeading"><h2 id="manualHeading" data-i18n="manualHeading"></h2><p data-i18n="manualIntro"></p><ol id="manual"></ol></section>
-<section aria-labelledby="exportHeading"><h2 id="exportHeading" data-i18n="exportHeading"></h2><button id="exportTechnical" data-i18n="technicalReport"></button><button id="exportJson" data-i18n="exportJson"></button><button id="exportLog" data-i18n="exportLog"></button><pre id="activity" aria-live="polite"></pre></section>
+
+<section class="panel" id="step4" aria-labelledby="h4s" hidden>
+<h2 id="h4s"><span class="ico"><svg class="i"><use href="#i-shield"/></svg></span><span data-i18n="step4Title"></span></h2>
+<p class="muted"><span data-i18n="previewKind"></span>: <strong id="previewKind"></strong></p>
+<pre id="preview" class="preview"></pre>
+<label class="confirm"><input id="confirm" type="checkbox" disabled><span id="confirmation"></span></label>
+<div class="row between">
+<button id="back4" class="btn ghost" type="button"><svg class="i"><use href="#i-back"/></svg><span data-i18n="back"></span></button>
+<button id="apply" class="btn primary" type="button" disabled><svg class="i"><use href="#i-check"/></svg><span data-i18n="apply"></span></button>
+</div>
+</section>
+
+<section class="panel" id="step5" aria-labelledby="h5s" hidden>
+<h2 id="h5s"><span class="ico"><svg class="i"><use href="#i-file"/></svg></span><span data-i18n="step5Title"></span></h2>
+<p id="finalNotice" class="done" role="status"></p>
+<p class="lead" data-i18n="reportText"></p>
+<div class="row">
+<button id="exportTechnical" class="btn primary" type="button"><svg class="i"><use href="#i-download"/></svg><span data-i18n="technicalReport"></span></button>
+<button id="exportJson" class="btn" type="button"><svg class="i"><use href="#i-download"/></svg><span data-i18n="exportJson"></span></button>
+<button id="exportLog" class="btn" type="button"><svg class="i"><use href="#i-download"/></svg><span data-i18n="exportLog"></span></button>
+</div>
+<div class="row">
+<button id="restore" class="btn" type="button" hidden><svg class="i"><use href="#i-undo"/></svg><span data-i18n="restore"></span></button>
+<button id="startOver" class="btn ghost" type="button"><svg class="i"><use href="#i-search"/></svg><span data-i18n="startOver"></span></button>
+</div>
+<p id="restoreHint" class="muted" hidden data-i18n="restoreHint"></p>
+<details><summary><svg class="i"><use href="#i-list"/></svg><span data-i18n="exportHeading"></span></summary><div class="body"><pre id="activity" aria-live="polite"></pre></div></details>
+</section>
+
+<details class="sec"><summary><svg class="i"><use href="#i-info"/></svg><span data-i18n="securityHeading"></span></summary><div class="body">
+<p class="muted" data-i18n="securityHelp"></p><p id="verifiedOn"></p><ul id="advisories"></ul></div></details>
+</div>
 <script>
 'use strict';
 (() => {
 const messages = {
  en: {
- language:'Language',intro:'Local, read-only discovery. No change is made by scanning or previewing. Keep this session open while work is running.',
+ working:'Working… preparing or applying the change can take a minute (verified download, tests, backup). Please keep this page open.',language:'Language',tagline:'Java runtime check, update and recovery for ELO servers',intro:'Local, read-only discovery. No change is made by scanning or previewing. Keep this session open while work is running.',
+ step1:'Scan',step2:'Runtime',step3:'Action',step4:'Confirm',step5:'Report',
+ step1Title:'Find Java runtimes',step1Text:'A read-only scan looks for Java in X:\\java and X:\\ELO\\java on every drive (C: to Z:). Nothing is changed.',
+ step2Title:'Choose a runtime',step2Text:'Select the Java runtime you want to work on.',step3Title:'Choose an action',step4Title:'Review and confirm',step5Title:'Report and next steps',
+ continue:'Continue',back:'Back',startOver:'Scan again',advanced:'Advanced: search another folder',evidence:'Technical evidence',
+ scanningNow:'Scanning drives',foundN:'Java runtimes found: {n}.',foundNone:'No Java runtime found. Open “Advanced” to search another folder, then scan again.',
+ updateDesc:'Installs the newest release of the same Java branch and vendor. Includes a verified backup, a Java self-test and automatic rollback.',
+ mitigateDesc:'Adds -XX:-UseBASE64Intrinsics to the machine environment. Quick and temporary; it is not a Java update.',
+ doneUpdate:'The runtime was updated and verified. The backup ZIP and the previous runtime were kept. Scan again to confirm the new version.',
+ doneMitigation:'The mitigation was applied and verified for newly started JVMs. Running processes stay unprotected until they are restarted.',
+ doneRestore:'The previous runtime was restored from the backup ZIP and verified.',
+ restore:'Restore previous version',restoreHint:'Reverts this session’s update from the verified backup ZIP; the updated runtime is kept next to it.',
+ restoreBackup:'Restore from backup',confirmRestore:'I reviewed the restore preview and authorize replacing the current runtime with the backup.',
+ reportText:'Download the technical report for your team. It lists detected JVMs, actions, backup and restore commands.',
+ updateNotNeeded:'This runtime is already the newest release of its branch. Nothing to update.',noBackup:'No backup made in this session exists for this runtime.',restoreFailed:'The restore was rejected before the runtime was swapped. The current runtime is unchanged.',
  technicalReport:'Download technical HTML report',scanHeading:'Discovery',scan:'Start read-only scan',cancel:'Cancel scan',results:'Select JVM for preview',none:'No JVMs found',
- actionHeading:'Separate, optional changes',warning:'Temporary mitigation is not a runtime update. Updating may affect compatibility and vendor support. Nothing is applied automatically.',
- mitigate:'Preview temporary mitigation',update:'Preview runtime update',preview:'Change preview',apply:'Apply confirmed change',
+ actionHeading:'Separate, optional changes',warning:'Pick one change. Updating may affect compatibility and vendor support; the temporary mitigation is not a runtime update. Nothing is applied before you confirm.',
+ mitigate:'Temporary mitigation',update:'Update Java runtime',preview:'Change preview',apply:'Apply confirmed change',
  confirmMitigation:'I reviewed the mitigation preview, backup and rollback plan and authorize this change.',confirmUpdate:'I reviewed the update preview, compatibility risks, backup and rollback plan and authorize this runtime update.',
  noPreview:'Select a JVM and preview one change. A new scan, search root, selection or preview clears confirmation.',
  manualHeading:'Manual patch instructions',manualIntro:'These instructions do not execute commands or change the system. Follow ELO and runtime vendor guidance for your exact installation.',
@@ -133,7 +329,7 @@ const messages = {
  'Separate runtime update: obtain a vendor-approved, compatible patched runtime from a trusted vendor source. Verify integrity, architecture and ELO support. Do not replace a running runtime or use an arbitrary download.',
  'Stop only the affected service during the approved window, apply the chosen change using the vendor procedure, then restart. Check service health and effective JVM options/version. If checks fail, stop and restore the saved configuration/runtime.',
  'Rescan and document the outcome. Keep the backup until validated. Contact ELO support if paths, service ownership or compatibility are uncertain.'],
- exportHeading:'Reports',exportJson:'Export JSON results',exportLog:'Export activity log',
+ exportHeading:'Activity log',exportJson:'Export JSON results',exportLog:'Export activity log',
  idle:'Ready',scanning:'Scanning',cancelling:'Cancellation requested; waiting for the scanner',completed:'Scan completed',cancelled:'Scan cancelled; results may be incomplete',error:'Operation failed',unknown:'Unknown',
  vulnerable:'Potentially vulnerable',safe:'No vulnerability detected by current rules',mitigated:'Mitigation detected',unsupported:'Unsupported runtime',
  progress:'Progress',indeterminate:'Progress unavailable',path:'Installation path',version:'Runtime version',classification:'Assessment',
@@ -151,7 +347,7 @@ const messages = {
  incompleteScan:'The scan is incomplete or exceeds evidence limits. Choose a narrower accessible local directory and review permissions without bypassing access controls.',
  inaccessiblePath:'The selected local directory is missing or inaccessible. Check the directory and permissions.',
  scanBusy:'A scan is already running. Wait for completion or request cancellation.',completedScan:'Complete a successful scan before requesting a change.',
- targetIneligible:'The selected JVM is not eligible for mitigation. Review the scan evidence.',optionsUnsupported:'Existing JVM/environment settings are ambiguous or unsupported. Review them with your administrator before making changes.',
+ targetIneligible:'The selected JVM is not eligible for this change. Review the scan evidence.',optionsUnsupported:'Existing JVM/environment settings are ambiguous or unsupported. Review them with your administrator before making changes.',
  scanSent:'Scan requested',cancelSent:'Cancellation requested',previewReady:'Preview received',actionSent:'Confirmed action completed',connected:'Session connected',report:'Report exported',log:'Activity log exported',
  units:'items checked',previewKind:'Selected change',mitigation:'Temporary mitigation',runtimeUpdate:'Runtime update',
  searchPath:'Optional local search directory',searchHelp:'On ready fixed or removable drives C: through Z:, the scan checks only X:\\java\\bin\\java.exe and X:\\ELO\\java\\bin\\java.exe at each drive root. Optionally enter an absolute local directory to search after the root checks, e.g. C:\\ELO data. It is read-only search data, never a command. Network/device paths and wildcards are not accepted.',
@@ -163,10 +359,24 @@ const messages = {
  verifiedDate:'Source verification date (UTC)',noAdvisories:'No verified advisory information supplied. Do not infer that this runtime is safe.'
  },
  de: {
- language:'Sprache',intro:'Lokale, schreibgeschützte Suche. Scan und Vorschau ändern nichts. Lassen Sie diese Sitzung während laufender Vorgänge geöffnet.',
+ working:'In Arbeit … Vorbereitung oder Anwendung der Änderung kann eine Minute dauern (geprüfter Download, Tests, Backup). Bitte lassen Sie diese Seite geöffnet.',language:'Sprache',tagline:'Java-Runtime prüfen, aktualisieren und wiederherstellen für ELO-Server',intro:'Lokale, schreibgeschützte Suche. Scan und Vorschau ändern nichts. Lassen Sie diese Sitzung während laufender Vorgänge geöffnet.',
+ step1:'Scan',step2:'Runtime',step3:'Aktion',step4:'Bestätigen',step5:'Bericht',
+ step1Title:'Java-Runtimes finden',step1Text:'Ein schreibgeschützter Scan sucht Java in X:\\java und X:\\ELO\\java auf allen Laufwerken (C: bis Z:). Es wird nichts geändert.',
+ step2Title:'Runtime auswählen',step2Text:'Wählen Sie die Java-Runtime, die Sie bearbeiten möchten.',step3Title:'Aktion wählen',step4Title:'Prüfen und bestätigen',step5Title:'Bericht und nächste Schritte',
+ continue:'Weiter',back:'Zurück',startOver:'Erneut scannen',advanced:'Erweitert: anderen Ordner durchsuchen',evidence:'Technische Nachweise',
+ scanningNow:'Laufwerke werden durchsucht',foundN:'Gefundene Java-Runtimes: {n}.',foundNone:'Keine Java-Runtime gefunden. Öffnen Sie „Erweitert“, um einen anderen Ordner zu durchsuchen, und scannen Sie erneut.',
+ updateDesc:'Installiert die neueste Version desselben Java-Branches und Herstellers. Mit geprüftem Backup, Java-Selbsttest und automatischer Wiederherstellung.',
+ mitigateDesc:'Ergänzt -XX:-UseBASE64Intrinsics in der Systemumgebung. Schnell und vorübergehend; kein Java-Update.',
+ doneUpdate:'Die Runtime wurde aktualisiert und geprüft. Backup-ZIP und vorherige Runtime blieben erhalten. Scannen Sie erneut, um die neue Version zu bestätigen.',
+ doneMitigation:'Die Risikominderung wurde angewendet und für neu gestartete JVMs geprüft. Laufende Prozesse bleiben bis zum Neustart ungeschützt.',
+ doneRestore:'Die vorherige Runtime wurde aus dem Backup-ZIP wiederhergestellt und geprüft.',
+ restore:'Vorherige Version wiederherstellen',restoreHint:'Macht das Update dieser Sitzung aus dem geprüften Backup-ZIP rückgängig; die aktualisierte Runtime bleibt daneben erhalten.',
+ restoreBackup:'Aus Backup wiederherstellen',confirmRestore:'Ich habe die Wiederherstellungsvorschau geprüft und genehmige den Austausch der aktuellen Runtime gegen das Backup.',
+ reportText:'Laden Sie den technischen Bericht für Ihr Team herunter. Er listet erkannte JVMs, Aktionen, Backup und Wiederherstellungsbefehle.',
+ updateNotNeeded:'Diese Runtime ist bereits die neueste Version ihres Branches. Nichts zu aktualisieren.',noBackup:'Für diese Runtime existiert kein in dieser Sitzung erstelltes Backup.',restoreFailed:'Die Wiederherstellung wurde abgelehnt, bevor die Runtime getauscht wurde. Die aktuelle Runtime ist unverändert.',
  technicalReport:'Technischen HTML-Bericht herunterladen',scanHeading:'Suche',scan:'Schreibgeschützten Scan starten',cancel:'Scan abbrechen',results:'JVM für Vorschau auswählen',none:'Keine JVMs gefunden',
- actionHeading:'Getrennte, optionale Änderungen',warning:'Die vorübergehende Risikominderung ist kein Laufzeit-Update. Ein Update kann Kompatibilität und Herstellersupport beeinträchtigen. Nichts wird automatisch angewendet.',
- mitigate:'Vorübergehende Risikominderung prüfen',update:'Laufzeit-Update prüfen',preview:'Änderungsvorschau',apply:'Bestätigte Änderung anwenden',
+ actionHeading:'Getrennte, optionale Änderungen',warning:'Wählen Sie eine Änderung. Ein Update kann Kompatibilität und Herstellersupport beeinträchtigen; die vorübergehende Risikominderung ist kein Laufzeit-Update. Nichts wird vor Ihrer Bestätigung angewendet.',
+ mitigate:'Vorübergehende Risikominderung',update:'Java-Runtime aktualisieren',preview:'Änderungsvorschau',apply:'Bestätigte Änderung anwenden',
  confirmMitigation:'Ich habe die Vorschau zur Risikominderung sowie Sicherung und Wiederherstellung geprüft und genehmige diese Änderung.',confirmUpdate:'Ich habe die Update-Vorschau, Kompatibilitätsrisiken sowie Sicherung und Wiederherstellung geprüft und genehmige dieses Laufzeit-Update.',
  noPreview:'Wählen Sie eine JVM und prüfen Sie eine Änderung. Ein neuer Scan, Suchpfad, eine Auswahl oder eine Vorschau setzt die Bestätigung zurück.',
  manualHeading:'Anleitung für die manuelle Korrektur',manualIntro:'Diese Anleitung führt keine Befehle aus und ändert das System nicht. Beachten Sie die ELO- und Laufzeit-Herstellerhinweise für Ihre konkrete Installation.',
@@ -176,7 +386,7 @@ const messages = {
  'Getrenntes Laufzeit-Update: Beziehen Sie eine vom Hersteller freigegebene, kompatible und korrigierte Laufzeit aus einer vertrauenswürdigen Herstellerquelle. Prüfen Sie Integrität, Architektur und ELO-Unterstützung. Ersetzen Sie keine laufende Laufzeit und verwenden Sie keinen beliebigen Download.',
  'Stoppen Sie nur den betroffenen Dienst im genehmigten Wartungsfenster, führen Sie die gewählte Änderung nach Herstellerverfahren aus und starten Sie ihn erneut. Prüfen Sie Dienstzustand und wirksame JVM-Optionen beziehungsweise Version. Bei Fehlern stoppen und gesicherte Konfiguration oder Laufzeit wiederherstellen.',
  'Scannen Sie erneut und dokumentieren Sie das Ergebnis. Bewahren Sie die Sicherung bis zur erfolgreichen Prüfung auf. Bei unklaren Pfaden, Dienstzuordnung oder Kompatibilität wenden Sie sich an den ELO-Support.'],
- exportHeading:'Berichte',exportJson:'JSON-Ergebnisse exportieren',exportLog:'Aktivitätsprotokoll exportieren',
+ exportHeading:'Aktivitätsprotokoll',exportJson:'JSON-Ergebnisse exportieren',exportLog:'Aktivitätsprotokoll exportieren',
  idle:'Bereit',scanning:'Scan läuft',cancelling:'Abbruch angefordert; Scanner wird abgewartet',completed:'Scan abgeschlossen',cancelled:'Scan abgebrochen; Ergebnisse möglicherweise unvollständig',error:'Vorgang fehlgeschlagen',unknown:'Unbekannt',
  vulnerable:'Möglicherweise verwundbar',safe:'Nach aktuellen Regeln keine Schwachstelle erkannt',mitigated:'Risikominderung erkannt',unsupported:'Nicht unterstützte Laufzeit',
  progress:'Fortschritt',indeterminate:'Fortschritt nicht verfügbar',path:'Installationspfad',version:'Laufzeitversion',classification:'Bewertung',
@@ -194,7 +404,7 @@ const messages = {
  incompleteScan:'Der Scan ist unvollständig oder überschreitet Nachweisgrenzen. Engeres zugängliches lokales Verzeichnis wählen und Berechtigungen prüfen, ohne den Zugriffsschutz zu umgehen.',
  inaccessiblePath:'Das gewählte lokale Verzeichnis fehlt oder ist unzugänglich. Verzeichnis und Berechtigungen prüfen.',
  scanBusy:'Ein Scan läuft bereits. Abschluss abwarten oder Abbruch anfordern.',completedScan:'Vor einer Änderung einen erfolgreichen Scan abschließen.',
- targetIneligible:'Die gewählte JVM ist für diese Risikominderung nicht geeignet. Scan-Nachweise prüfen.',optionsUnsupported:'Vorhandene JVM-/Umgebungseinstellungen sind mehrdeutig oder nicht unterstützt. Vor Änderungen mit Ihrem Administrator prüfen.',
+ targetIneligible:'Die gewählte JVM ist für diese Änderung nicht geeignet. Scan-Nachweise prüfen.',optionsUnsupported:'Vorhandene JVM-/Umgebungseinstellungen sind mehrdeutig oder nicht unterstützt. Vor Änderungen mit Ihrem Administrator prüfen.',
  scanSent:'Scan angefordert',cancelSent:'Abbruch angefordert',previewReady:'Vorschau empfangen',actionSent:'Bestätigte Änderung abgeschlossen',connected:'Sitzung verbunden',report:'Bericht exportiert',log:'Aktivitätsprotokoll exportiert',
  units:'Elemente geprüft',previewKind:'Gewählte Änderung',mitigation:'Vorübergehende Risikominderung',runtimeUpdate:'Laufzeit-Update',
  searchPath:'Optionales lokales Suchverzeichnis',searchHelp:'Auf bereiten festen oder Wechsellaufwerken C: bis Z: prüft der Scan nur X:\\java\\bin\\java.exe und X:\\ELO\\java\\bin\\java.exe im Laufwerksstamm. Optional ein absolutes lokales Verzeichnis eingeben, das nach den Stammprüfungen durchsucht wird, z. B. C:\\ELO data. Die Eingabe ist nur ein schreibgeschützter Suchpfad, niemals ein Befehl. Netzwerk- und Gerätepfade sowie Platzhalter sind nicht zulässig.',
@@ -212,6 +422,7 @@ history.replaceState(null, '', location.pathname + location.search);
 let language = 'en', state = 'idle', rows = [], preview = null, pending = false, polling = false, lastError = '';
 let progress = null, checked = null, lastSuccessfulRefresh = null, security = {verifiedOn:null,advisories:[]};
 let lastWarnings = [], errorFromPoll = false, recoveryRequired = false, recoveryWarnings = [];
+let step = 1, awaitingScan = false, scanStartedAt = null, finalKind = '', canRestore = false, cardsKey = '';
 const events = [], states = ['idle','scanning','cancelling','completed','cancelled','error'];
 const t = key => messages[language][key] || messages[language].unknown;
 const safeText = value => typeof value === 'string' ? (token ? value.split(token).join('[redacted]') : value).slice(0,16000) : '';
@@ -255,6 +466,7 @@ const errorMessages = Object.fromEntries(Object.entries({
  boundaryRejected:['loopback_only','host_rejected','origin_rejected','cross_site','origin_required'],
  expired:['preview_expired_or_mismatched','stale_preview'],
  updateRefused:['update_preview_refused'],updateRejected:['update_rejected_no_change'],updateRolledBack:['update_failed_rolled_back'],updateManualRecovery:['update_manual_recovery_required'],
+ updateNotNeeded:['update_not_needed'],noBackup:['no_backup_for_target'],restoreFailed:['restore_failed_no_change'],
  rollbackFailed:['rollback_failed_manual_recovery_required'],manualRecovery:['manual_recovery_required_close_session'],
  rolledBack:['verification_failed_rolled_back'],probeFailed:['probe_failed_no_change'],
  updateUnavailable:['update_unavailable_provenance_compatibility_backup_replacement_rollback_not_verified'],
@@ -308,6 +520,27 @@ async function api(path, body) {
 }
 async function acknowledge(path, body) { const data = await api(path,body); if (!keys(data,['ok']) || data.ok !== true) throw 'failed'; }
 function selected() { return rows.find(row => row.id === $('results').value); }
+// ---- wizard (presentation only): a step is reachable when its prerequisite exists.
+const reachable = n => n === 1 || ((n === 2 || n === 5) && rows.length > 0) || (n === 3 && !!selected()) || (n === 4 && !!preview);
+function goto(n) { if (reachable(n)) { step = n; render(); } }
+function fixStep() { while (step > 1 && !reachable(step)) step = step === 5 ? 1 : step - 1; }
+const previewKinds = {'mitigate':'mitigation','update-runtime':'runtimeUpdate','restore-backup':'restoreBackup'};
+function toggle(id, hidden) { if (hidden) $(id).setAttribute('hidden',''); else $(id).removeAttribute('hidden'); }
+function renderCards() {
+ const key = JSON.stringify(rows.map(row => [row.id,row.status]))+'|'+$('results').value+'|'+language;
+ if (key === cardsKey) return;
+ cardsKey = key; $('cards').replaceChildren();
+ rows.forEach(row => {
+ const card = document.createElement('button'), title = document.createElement('span'), path = document.createElement('span'), badge = document.createElement('span');
+ card.className = 'rt'; card.setAttribute('type','button'); card.setAttribute('role','radio'); card.setAttribute('aria-checked',String(row.id === $('results').value));
+ title.className = 't'; title.textContent = safeText(row.vendor)+' '+safeText(row.version)+(row.architecture === 'unknown' ? '' : ' · '+row.architecture);
+ path.className = 'p'; path.textContent = safeText(row.runtimeRoot);
+ badge.className = 'badge'; badge.setAttribute('data-status',row.status); badge.textContent = t(row.status);
+ card.append(title); card.append(path); card.append(badge);
+ card.onclick = () => { if (pending || running()) return; $('results').value = row.id; clearPreview(); render(); };
+ $('cards').append(card);
+ });
+}
 function render() {
  document.documentElement.lang = language;
  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
@@ -315,9 +548,13 @@ function render() {
  $('recoveryNotice').textContent = recoveryRequired ? [t('recoveryGuidance'),...recoveryWarnings.map(localized)].join('\n') : '';
  $('status').textContent = t(recoveryRequired ? 'error' : state);
  $('resultNotice').textContent = lastError || recoveryRequired || running() || state === 'cancelled' || state === 'error' ? t('resultNotice') : '';
+ // Honest progress: a moving bar only while the scanner runs; a summary once it is done.
+ const elapsed = scanStartedAt === null ? '' : ' · '+Math.max(0,Math.round((Date.now()-scanStartedAt)/1000))+' s';
+ toggle('progress',!running()); toggle('spinner',!running()); toggle('busy',!pending);
  $('progress').setAttribute('aria-label',t('progress'));
  if (progress === null) $('progress').removeAttribute('value'); else $('progress').value = progress;
- $('progressText').textContent = (progress === null ? t('indeterminate') : t('progress')+': '+progress+'%') + (checked === null ? '' : ' — '+checked+' '+t('units'));
+ $('progressText').textContent = running() ? (progress === null ? t('scanningNow') : t('progress')+': '+progress+'%')+elapsed+(checked === null ? '' : ' — '+checked+' '+t('units')) : '';
+ $('scanSummary').textContent = !running() && state === 'completed' && !lastError ? (rows.length ? t('foundN').replace('{n}',String(rows.length)) : t('foundNone')) : '';
  const old = $('results').value;
  $('results').replaceChildren();
  if (!rows.length) { const option = document.createElement('option'); option.textContent = t('none'); option.value = ''; $('results').append(option); }
@@ -329,6 +566,7 @@ function render() {
  rows.forEach(item => { const tr = document.createElement('tr'); cells(item).forEach(value => { const td = document.createElement('td'); td.textContent = value; tr.append(td); }); $('jvmRows').append(tr); });
  const labels = ['path','runtimeRoot','version','vendor','architecture','classification','eloRationale','classificationEvidence'];
  $('details').textContent = row ? cells(row).map((value,index) => t(labels[index])+': '+value).join('\n') : '';
+ renderCards();
  $('verifiedOn').textContent = security.verifiedOn ? t('verifiedDate')+': '+security.verifiedOn : t('noAdvisories');
  $('advisories').replaceChildren();
  security.advisories.forEach(item => {
@@ -341,12 +579,30 @@ function render() {
  $('cancel').disabled = pending || state !== 'scanning' || !token || recoveryRequired;
  $('results').disabled = pending || running();
  $('mitigate').disabled = $('update').disabled = pending || running() || !row || !token || recoveryRequired || (!!lastError && errorFromPoll);
- $('preview').textContent = preview ? t('previewKind')+': '+t(preview.actionId === 'mitigate' ? 'mitigation' : 'runtimeUpdate')+'\n'+localized(preview.summary)+(preview.warnings.length ? '\n'+preview.warnings.map(localized).join('\n') : '') : t('noPreview');
- $('confirmation').textContent = t(preview && preview.actionId === 'update-runtime' ? 'confirmUpdate' : 'confirmMitigation');
+ $('preview').textContent = preview ? localized(preview.summary)+(preview.warnings.length ? '\n\n'+preview.warnings.map(w => '• '+localized(w)).join('\n') : '') : t('noPreview');
+ $('previewKind').textContent = preview ? t(previewKinds[preview.actionId]) : '';
+ $('confirmation').textContent = t(preview && preview.actionId === 'update-runtime' ? 'confirmUpdate' : preview && preview.actionId === 'restore-backup' ? 'confirmRestore' : 'confirmMitigation');
  $('confirm').disabled = pending || !preview || running() || recoveryRequired;
  $('apply').disabled = pending || !preview || !$('confirm').checked || running() || recoveryRequired;
  $('manual').replaceChildren(); messages[language].manual.forEach(text => { const li = document.createElement('li'); li.textContent = text; $('manual').append(li); });
  renderLog();
+ // wizard chrome
+ fixStep();
+ for (let n = 1; n <= 5; n++) {
+ toggle('step'+n, step !== n);
+ const nav = $('nav'+n);
+ nav.setAttribute('data-state', step === n ? 'current' : n < step ? 'done' : 'todo');
+ if (step === n) nav.setAttribute('aria-current','step'); else nav.removeAttribute('aria-current');
+ nav.disabled = pending || !reachable(n) || (running() && n !== 1) || recoveryRequired && n !== 5;
+ }
+ toggle('toStep2', !(rows.length > 0 && !running()));
+ $('toStep3').disabled = pending || running() || !row;
+ $('back2').disabled = $('back3').disabled = $('back4').disabled = pending;
+ $('startOver').disabled = pending || running() || !token;
+ toggle('restore', !canRestore); toggle('restoreHint', !canRestore);
+ $('restore').disabled = pending || running() || !row || !token || recoveryRequired || !canRestore;
+ const done = {'mitigate':'doneMitigation','update-runtime':'doneUpdate','restore-backup':'doneRestore'}[finalKind];
+ $('finalNotice').textContent = done && !lastError ? t(done) : '';
 }
 async function refresh() {
  if (polling || pending || !token) return;
@@ -358,7 +614,12 @@ async function refresh() {
  if (!keys(result,['results','security']) || !Array.isArray(result.results) || result.results.length > 250 || result.results.some(row => !validRow(row)) || new Set(result.results.map(row => row.id)).size !== result.results.length || !validSecurity(result.security)) throw 'invalid';
  const nextRows = result.results;
  if (state !== status.state || JSON.stringify(rows) !== JSON.stringify(nextRows) || JSON.stringify(security) !== JSON.stringify(result.security)) clearPreview();
+ if (status.state === 'scanning' && scanStartedAt === null) scanStartedAt = Date.now();
  state = status.state; rows = nextRows; security = result.security;
+ if (state !== 'scanning' && state !== 'cancelling') scanStartedAt = null;
+ // A finished scan moves the wizard on by itself; anything else releases the wait.
+ if (awaitingScan && state === 'completed') { awaitingScan = false; if (rows.length) step = 2; }
+ if (awaitingScan && (state === 'cancelled' || state === 'error')) awaitingScan = false;
  progress = Number.isFinite(status.progress) ? Math.max(0,Math.min(100,status.progress)) : null;
  checked = Number.isSafeInteger(status.checked) && status.checked >= 0 ? status.checked : null;
  lastSuccessfulRefresh = new Date().toISOString();
@@ -380,7 +641,7 @@ $('searchPath').oninput = () => { clearPreview(); render(); };
 $('scan').onclick = () => {
  const searchPath = $('searchPath').value;
  if (searchPath !== '' && !validSearchPath(searchPath)) { clearPreview(); fail('invalidPath'); return; }
- return perform(async () => { clearPreview(); await acknowledge('scan',searchPath === '' ? {} : {searchPath}); state = 'scanning'; rows = []; lastSuccessfulRefresh = null; progress = null; checked = null; log('scanSent'); });
+ return perform(async () => { clearPreview(); await acknowledge('scan',searchPath === '' ? {} : {searchPath}); state = 'scanning'; rows = []; lastSuccessfulRefresh = null; progress = null; checked = null; canRestore = false; finalKind = ''; awaitingScan = true; scanStartedAt = Date.now(); step = 1; log('scanSent'); });
 };
 $('cancel').onclick = () => perform(async () => { clearPreview(); await acknowledge('cancel',{}); state = 'cancelling'; log('cancelSent'); });
 async function getPreview(actionId) {
@@ -388,16 +649,27 @@ async function getPreview(actionId) {
  await perform(async () => {
  clearPreview(); const data = await api('preview',{actionId,resultId:row.id});
  if (!keys(data,['previewId','summary','warnings']) || !validId(data.previewId) || !bilingual(data.summary,4096) || !Array.isArray(data.warnings) || data.warnings.length > 16 || data.warnings.some(w => !bilingual(w,2048))) throw 'invalid';
- preview = {previewId:data.previewId,actionId,resultId:row.id,summary:data.summary,warnings:data.warnings}; log('previewReady');
+ preview = {previewId:data.previewId,actionId,resultId:row.id,summary:data.summary,warnings:data.warnings}; step = 4; log('previewReady');
  });
 }
 $('mitigate').onclick = () => getPreview('mitigate');
 $('update').onclick = () => getPreview('update-runtime');
+$('restore').onclick = () => getPreview('restore-backup');
 $('apply').onclick = () => {
  if (!preview || !$('confirm').checked || running() || lastError || recoveryRequired) return;
  const request = {actionId:preview.actionId,resultId:preview.resultId,previewId:preview.previewId};
- return perform(async () => { clearPreview(); await acknowledge('action',request); log('actionSent'); });
+ return perform(async () => {
+ clearPreview(); await acknowledge('action',request); log('actionSent');
+ finalKind = request.actionId; canRestore = request.actionId === 'update-runtime'; step = 5;
+ });
 };
+for (let n = 1; n <= 5; n++) $('nav'+n).onclick = () => goto(n);
+$('toStep2').onclick = () => goto(2);
+$('toStep3').onclick = () => goto(3);
+$('back2').onclick = () => goto(1);
+$('back3').onclick = () => goto(2);
+$('back4').onclick = () => { clearPreview(); goto(3); };
+$('startOver').onclick = () => { clearPreview(); finalKind = ''; step = 1; render(); };
 // The authenticated backend creates the sanitized report; no UI rows, paths,
 // raw diagnostics or client action claims are submitted as evidence.
 async function exportTechnicalReport() {
