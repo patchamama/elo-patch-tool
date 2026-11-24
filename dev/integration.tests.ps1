@@ -1,4 +1,4 @@
-﻿# Windows PowerShell 5.1 integration checks. No live discovery, Java, registry or browser.
+# Windows PowerShell 5.1 integration checks. No live discovery, Java, registry or browser.
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $bat = Join-Path $repo 'ELO-Patch-Tools.bat'
@@ -241,7 +241,7 @@ try {
     $response=Request POST '/api/cancel' '{}'
     Assert ($response.Status -eq 200 -and $response.Body.ok) 'cancel request contract'
     $response=Request POST '/api/preview' '{"actionId":"update-runtime","resultId":"fixture"}'
-    Assert ($response.Status -eq 503 -and $response.Body.warnings.Count -gt 0) 'HTTP runtime update unavailable with warnings'
+    Assert ($response.Status -eq 409 -and $response.Body.error -cin @('target_not_eligible','completed_scan_required')) 'HTTP runtime update refuses an unknown target before any change'
     $response=Request POST '/api/scan' '{"searchPath":"relative"}'
     Assert ($response.Status -eq 400) 'invalid manual path rejected before scan'
     $response=Request POST '/api/scan' '{"searchPath":"C:\\safe","searchPath":"C:\\other"}'

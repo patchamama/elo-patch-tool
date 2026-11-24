@@ -188,15 +188,17 @@ Assert ($observed.Options.Machine -eq 'Present' -and $observed.Options.User -eq 
 Assert (($observed | ConvertTo-Json -Depth 10) -notmatch 'secret-token') 'options never retained'
 foreach ($lang in @('en','de')) { $h=ConvertTo-EloTechnicalReportHtml $observed $lang; Assert ($h -notmatch 'secret-token') 'options not rendered'; Assert ($h.Contains('JAVA_TOOL_OPTIONS')) 'options section' }
 $failed = New-EloTechnicalReport -ResourceCollector $resources -Actions @(@{Kind='Update';Status='Failed'})
-Assert ((ConvertTo-EloTechnicalReportHtml $failed en).Contains('No restore CLI available')) 'missing restore CLI'
+Assert ((ConvertTo-EloTechnicalReportHtml $failed en).Contains('Manual recovery') -and -not (ConvertTo-EloTechnicalReportHtml $failed en).Contains('Expand-Archive')) 'failed update without evidence shows guidance but no invented command'
 $recoverActions=@(@{Kind='Update';Status='Failed';RuntimeIndex=1},@{Kind='Backup';Status='Proven';RuntimeIndex=1;Verified=$true;BackupVerified=$true;EvidenceVerified=$true;EvidenceCode='BackupManifestMatched'})
 $evidence=@{Validated=$true;RuntimeIndex=1;Archive="C:\backups\java's.zip";Original='C:\ELO\java';Destination='C:\isolated\recovery'}
 $recoveryReport=New-EloTechnicalReport -ResourceCollector $resources -OptionsCollector { $null } -JvmEvidence @(@{Version='17.0.10';Verified=$true}) -Actions $recoverActions -RecoveryEvidence $evidence
 foreach ($lang in @('en','de')) {
     $h=ConvertTo-EloTechnicalReportHtml $recoveryReport $lang
     Assert ($h.Contains('Expand-Archive -LiteralPath') -and $h.Contains('java&#39;&#39;s.zip') -and $h.Contains('C:\ELO\java')) 'verified recovery escaped and rendered'
-    Assert ($h -notmatch 'Remove-Item|--restore') 'no destructive or invented CLI command'
+    Assert ($h.Contains('Remove-Item -LiteralPath') -and $h.Contains('Move-Item -LiteralPath') -and $h.Contains('tar -xf') -and $h.Contains('rmdir /s /q') -and $h.Contains('C:\isolated\recovery\tree') -and $h -notmatch '--restore') 'PowerShell and cmd restore commands, no invented CLI'
 }
+$onlyBackup=New-EloTechnicalReport -ResourceCollector $resources -OptionsCollector { $null } -JvmEvidence @(@{Version='17.0.10';Verified=$true}) -Actions @($recoverActions[1]) -RecoveryEvidence $evidence
+Assert ((ConvertTo-EloTechnicalReportHtml $onlyBackup en).Contains('Expand-Archive')) 'restore commands are offered after a successful update too'
 $evidence.Validated=$false
 $noRecovery=New-EloTechnicalReport -ResourceCollector $resources -OptionsCollector { $null } -JvmEvidence @(@{Version='17.0.10';Verified=$true}) -Actions $recoverActions -RecoveryEvidence $evidence
 Assert (-not (ConvertTo-EloTechnicalReportHtml $noRecovery en).Contains('Expand-Archive')) 'unverified archive never yields command'

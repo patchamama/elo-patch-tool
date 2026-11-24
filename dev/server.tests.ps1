@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot\update.ps1"
 . "$PSScriptRoot\server.ps1"
 . "$PSScriptRoot\scan.ps1"
 . "$PSScriptRoot\cli.ps1"
@@ -211,12 +212,79 @@ $s.State='completed'
 Reject { Preview } 409
 Reject { Invoke-EloApi $s (Request -Path /api/results) } 500
 Reset-Fake
-foreach ($route in @('/api/preview','/api/action')) {
-    $body='{"actionId":"update-runtime","resultId":"jvm1"}'
-    if ($route -eq '/api/action') { $body='{"actionId":"update-runtime","resultId":"jvm1","previewId":"fake"}' }
-    Reject { Invoke-EloApi $s (Request POST $route $body) } 503
+# Runtime update: ineligible targets and forged previews are refused; the module is never reached.
+Reject { Invoke-EloApi $s (Request POST '/api/preview' '{"actionId":"update-runtime","resultId":"jvm1"}') } 409
+Reject { Invoke-EloApi $s (Request POST '/api/action' '{"actionId":"update-runtime","resultId":"jvm1","previewId":"fake"}') } 409
+Assert ($script:Fake.Writes -eq 0 -and $script:Fake.Probes -eq 0) 'ineligible update touches nothing'
+function New-UpdateMock($Mode) {
+    $st=@{Mode=$Mode;Events=New-Object 'System.Collections.Generic.List[string]';Installed='old'}
+    $ad=@{
+        Clock={ [datetime]'2026-11-24T10:00:00Z' }
+        Admin={ $true }
+        Inspect={ param($Path) @{Vendor='Eclipse Adoptium';Branch='17';Architecture='x64';Fingerprint='fp-old'} }
+        Evidence={ param($Detected,$Package) @{Official=$true;PublishedHash=$true;Compatibility=$false} }
+        Preflight={ param($Paths) @{SafePaths=$true;Quiescent=($st.Mode -ne 'running');Permissions=$true;Space=$true} }.GetNewClosure()
+        Backup={ param($Paths) $st.Events.Add('backup') }.GetNewClosure()
+        VerifyBackup={ param($Paths,$Detected) $true }
+        Download={ param($Package,$Paths) $st.Events.Add('download'); if ($st.Mode -eq 'download') { throw 'download_failed' } }.GetNewClosure()
+        VerifyPackage={ param($Package,$Paths) $true }
+        Stage={ param($Package,$Paths) $st.Events.Add('stage') }.GetNewClosure()
+        Probe={ param($Path,$Package) $true }
+        Preserve={ param($Paths) $st.Events.Add('preserve'); $st.Installed='' }.GetNewClosure()
+        Replace={ param($Paths) $st.Events.Add('replace'); $st.Installed='new' }.GetNewClosure()
+        ValidateInstalled={ param($Paths,$Package) ($st.Mode -notin @('invalid','norestore')) }.GetNewClosure()
+        Restore={ param($Paths) $st.Events.Add('restore'); if ($st.Mode -eq 'norestore') { throw 'restore_failed' }; $st.Installed='old' }.GetNewClosure()
+        VerifyRestored={ param($Paths,$Detected) ($st.Installed -eq 'old') }.GetNewClosure()
+    }
+    $ctx=New-EloUpdateContext -Adapters $ad -Simulation
+    return @{State=$st;Factory={ param($Root,$Runtime) $ctx }.GetNewClosure()}
 }
-Assert ($script:Fake.Writes -eq 0 -and $script:Fake.Probes -eq 0) 'updates never download/replace/execute anything'
+function Reset-UpdateSession($Mode) {
+    Reset-Fake
+    $s.Targets=@{jvm1=[pscustomobject]@{Location='C:\ELO\java\bin\java.exe';Status='PotentiallyVulnerable';Vendor='Temurin';FullVersion='17.0.2+8'}}
+    $s.ReportJvms=@(@{Version='17.0.2+8';Verified=$true;ExecutionVerified=$true;Vendor='Temurin';VendorVerified=$true;Classification='PotentiallyVulnerable';ClassificationVerified=$true;EvidenceCode='AdvisoryRangeMatch'})
+    $s.ReportIndexes=@{jvm1=1}; $s.ReportActions=@(); $s.ReportRecovery=$null
+    $mock=New-UpdateMock $Mode; $s.Adapters.NewUpdateContext=$mock.Factory
+    return $mock
+}
+function UpdatePreview { Invoke-EloApi $s (Request POST /api/preview '{"actionId":"update-runtime","resultId":"jvm1"}') }
+function UpdateApply($Id) { Invoke-EloApi $s (Request POST /api/action ('{"actionId":"update-runtime","resultId":"jvm1","previewId":"'+$Id+'"}')) }
+function Get-ErrorCode([scriptblock]$Work) { try { & $Work; return 'no-error' } catch { return (ConvertTo-EloErrorResponse $_.Exception) } }
+# Success: preview is read-only, apply runs the whole transaction and reports backup + update.
+$m=Reset-UpdateSession 'ok'
+$up=UpdatePreview
+Assert ($m.State.Events.Count -eq 0 -and $up.summary.en.Contains('17.0.21.1+2') -and $up.summary.en.Contains(('C:\ELO\java.backup-'+$script:Fake.Now.ToString('yyyyMMddHHmmss')+'.zip')) -and $up.warnings.Count -eq 2) 'update preview is read-only and names version and backup'
+Assert ($up.summary.en.Length -le 4096 -and $up.summary.de.Length -le 4096 -and $up.warnings[0].en.Length -le 2048) 'update preview meets UI limits'
+Assert ((UpdateApply $up.previewId).ok -and $m.State.Installed -eq 'new') 'confirmed update installs the new runtime'
+Assert (($m.State.Events -join ',') -ceq 'backup,download,stage,preserve,replace') 'backup precedes download and replacement'
+Assert (@($s.ReportActions | Where-Object { $_.Kind -ceq 'Update' -and $_.Status -ceq 'Proven' }).Count -eq 1 -and @($s.ReportActions | Where-Object { $_.Kind -ceq 'Backup' -and $_.BackupVerified }).Count -eq 1) 'update and verified backup are recorded for the report'
+$s.Adapters.Resources={ @{ServerName='TEST-SERVER';WindowsVersion='10.0';WindowsBuild='20348';TotalRamBytes=8GB;Disks=@(@{Name='C:';TotalBytes=100GB;FreeBytes=40GB})} }
+$report=Get-EloSessionReportHtml $s en
+Assert ($report.Contains('17.0.21.1+2') -and $report.Contains('Expand-Archive') -and $report.Contains(('C:\ELO\java.backup-'+$script:Fake.Now.ToString('yyyyMMddHHmmss')+'.zip'))) 'report names the new version, backup ZIP and restore commands'
+Reject { UpdateApply $up.previewId } 409
+# Rejected before replacement (download failure): nothing replaced, failure recorded.
+$m=Reset-UpdateSession 'download'; $up=UpdatePreview
+$e=Get-ErrorCode { UpdateApply $up.previewId }
+Assert ($e.Status -eq 422 -and $e.Body.error -ceq 'update_rejected_no_change' -and $m.State.Installed -eq 'old' -and @($s.ReportActions | Where-Object { $_.Kind -ceq 'Update' -and $_.Status -ceq 'Failed' -and $_.EvidenceCode -ceq 'DownloadFailed' }).Count -eq 1) 'download failure leaves the runtime untouched and is reported'
+# Failed validation: rolled back, restore proven.
+$m=Reset-UpdateSession 'invalid'; $up=UpdatePreview
+$e=Get-ErrorCode { UpdateApply $up.previewId }
+Assert ($e.Status -eq 422 -and $e.Body.error -ceq 'update_failed_rolled_back' -and $m.State.Installed -eq 'old' -and @($s.ReportActions | Where-Object { $_.Kind -ceq 'Restore' -and $_.Status -ceq 'Proven' }).Count -eq 1) 'failed validation is rolled back and reported'
+# Failed restore: manual recovery locks the session.
+$m=Reset-UpdateSession 'norestore'; $up=UpdatePreview
+$e=Get-ErrorCode { UpdateApply $up.previewId }
+Assert ($e.Status -eq 500 -and $e.Body.error -ceq 'update_manual_recovery_required' -and $s.RecoveryRequired -and @($s.ReportActions | Where-Object { $_.Kind -ceq 'Restore' -and $_.Status -ceq 'Failed' }).Count -eq 1) 'failed restore requires manual recovery'
+# Running service blocks the preview (quiescence) and changes nothing.
+$m=Reset-UpdateSession 'running'
+$e=Get-ErrorCode { UpdatePreview }
+Assert ($e.Status -eq 409 -and $e.Body.error -ceq 'update_preview_refused' -and $e.Body.warnings[0].en.Contains('preflight_failed:Quiescent') -and $m.State.Events.Count -eq 0) 'running runtime blocks the update before any change'
+# Non-admin and non-Temurin targets are refused.
+$m=Reset-UpdateSession 'ok'; $script:Fake.Admin=$false
+Reject { UpdatePreview } 403
+$script:Fake.Admin=$true
+$m=Reset-UpdateSession 'ok'; $s.Targets.jvm1.Vendor='Azul Zulu'
+Reject { UpdatePreview } 409
+Assert ($script:Fake.Writes -eq 0 -and $script:Fake.Probes -eq 0) 'update flow never writes machine options'
 Reset-Fake; $p=Preview
 $other=New-EloServerSession -Port 54321 -UiHtml '<html>' -ScanSource '# none'
 Reject { Invoke-EloMitigation $other ([pscustomobject]@{actionId='mitigate';resultId='jvm1';previewId=$p.previewId}) } 409

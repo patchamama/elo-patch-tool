@@ -179,7 +179,7 @@ function New-EloTechnicalReport {
     $recovery=@{Available=$false;Archive=$null;Original=$null;Destination=$null}
     $failedUpdates=@($normalized | Where-Object { $_.Kind -eq 'Update' -and $_.Status -eq 'Failed' -and $null -ne $_.RuntimeIndex })
     $backups=@($normalized | Where-Object { $_.Kind -eq 'Backup' -and $_.Status -eq 'Proven' -and $_.RuntimeIndex -eq $RecoveryEvidence.RuntimeIndex })
-    if ((Test-EloReportProof $RecoveryEvidence.Validated) -and $backups.Count -gt 0 -and @($failedUpdates | Where-Object { $_.RuntimeIndex -eq $RecoveryEvidence.RuntimeIndex }).Count -gt 0 -and (Test-EloReportRecoveryPath $RecoveryEvidence.Archive) -and (Test-EloReportRecoveryPath $RecoveryEvidence.Original) -and (Test-EloReportRecoveryPath $RecoveryEvidence.Destination) -and $RecoveryEvidence.Archive -match '(?i)\.zip$' -and $RecoveryEvidence.Destination -ine $RecoveryEvidence.Original -and -not $RecoveryEvidence.Destination.StartsWith($RecoveryEvidence.Original.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -and -not $RecoveryEvidence.Original.StartsWith($RecoveryEvidence.Destination.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)) {
+    if ((Test-EloReportProof $RecoveryEvidence.Validated) -and $backups.Count -gt 0 -and (Test-EloReportRecoveryPath $RecoveryEvidence.Archive) -and (Test-EloReportRecoveryPath $RecoveryEvidence.Original) -and (Test-EloReportRecoveryPath $RecoveryEvidence.Destination) -and $RecoveryEvidence.Archive -match '(?i)\.zip$' -and $RecoveryEvidence.Destination -ine $RecoveryEvidence.Original -and -not $RecoveryEvidence.Destination.StartsWith($RecoveryEvidence.Original.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -and -not $RecoveryEvidence.Original.StartsWith($RecoveryEvidence.Destination.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)) {
         $recovery=@{Available=$true;Validated=$true;RuntimeIndex=$RecoveryEvidence.RuntimeIndex;Archive=$RecoveryEvidence.Archive;Original=$RecoveryEvidence.Original;Destination=$RecoveryEvidence.Destination}
     }
     @{System=$system;Jvms=$jvms;Actions=$normalized;Elo=$elo;Options=$options;Recovery=$recovery}
@@ -265,15 +265,25 @@ function ConvertTo-EloTechnicalReportHtml {
     if ($Language -eq 'de') { $optionLabels=@{Present='Flag vorhanden';Absent='Flag nicht vorhanden';Conflict='Konfligierendes aktivierendes Flag vorhanden';Unknown='Unbekannt / nicht verfuegbar'} }
     foreach ($scope in @('Machine','User','Process')) { $lines.Add('<li>'+$scope+': '+$optionLabels[$r.Options[$scope]]+'</li>') }
     if ($Language -eq 'de') { $lines.Add('</ul><p>Umgebungswerte beweisen keinen Schutz bestehender ELO-Prozesse.</p>') } else { $lines.Add('</ul><p>Environment values do not prove protection of existing ELO processes.</p>') }
-    if (@($r.Actions | Where-Object { $_.Kind -eq 'Update' -and $_.Status -eq 'Failed' }).Count -gt 0) {
-        if ($Language -eq 'de') { $lines.Add('<h2>Manuelle Wiederherstellung</h2><p>Keine Wiederherstellungs-CLI verfuegbar. Fehlgeschlagene Runtime behalten oder umbenennen, nicht loeschen; Wiederherstellung kontrolliert manuell durchfuehren.</p>') }
-        else { $lines.Add('<h2>Manual recovery</h2><p>No restore CLI available. Retain or rename the failed runtime, do not delete it; perform a controlled manual restore.</p>') }
+    if (@($r.Actions | Where-Object { $_.Kind -eq 'Update' -and $_.Status -eq 'Failed' }).Count -gt 0 -or @($r.Actions | Where-Object { $_.Kind -eq 'Backup' -and $_.Status -eq 'Proven' }).Count -gt 0) {
+        if ($Language -eq 'de') { $lines.Add('<h2>Manuelle Wiederherstellung</h2><p>Falls die Aktualisierung fehlschlaegt oder die alte Java-Version wieder benoetigt wird: ELO-Dienste und Java-Prozesse beenden, neue Runtime entfernen und die gesicherte Version aus dem Backup-ZIP zurueckspielen. Backup-ZIP und alte Runtime werden von diesem Werkzeug nie geloescht.</p>') }
+        else { $lines.Add('<h2>Manual recovery</h2><p>If the update fails, or the previous Java version is needed again: stop the ELO services and Java processes, remove the new runtime and restore the saved version from the backup ZIP. This tool never deletes the backup ZIP or the old runtime.</p>') }
         # Revalidate the trusted evidence against the normalized actions before rendering.
         $rr=New-EloTechnicalReport -ResourceCollector { $null } -OptionsCollector { $null } -JvmEvidence @($Report.Jvms | ForEach-Object { @{Version=$_.Version;Verified=($_.Status -ceq 'Proven')} }) -Actions $Report.Actions -RecoveryEvidence $Report.Recovery
         if ($rr.Recovery.Available) {
             $rec=$rr.Recovery
-            $cmd="Expand-Archive -LiteralPath '"+$rec.Archive.Replace("'","''")+"' -DestinationPath '"+$rec.Destination.Replace("'","''")+"'"
-            $lines.Add('<p>Original: '+(ConvertTo-EloReportEscapedText $rec.Original)+'</p><pre>'+(ConvertTo-EloReportEscapedText $cmd)+'</pre>')
+            $q={ param($s) "'"+$s.Replace("'","''")+"'" }
+            $cmd=@('# PowerShell (run as administrator)',
+                'Remove-Item -LiteralPath '+(& $q $rec.Original)+' -Recurse -Force',
+                'Expand-Archive -LiteralPath '+(& $q $rec.Archive)+' -DestinationPath '+(& $q $rec.Destination),
+                'Move-Item -LiteralPath '+(& $q ($rec.Destination.TrimEnd('\')+'\tree'))+' -Destination '+(& $q $rec.Original),
+                '',
+                'REM cmd.exe (run as administrator)',
+                'rmdir /s /q "'+$rec.Original+'"',
+                'mkdir "'+$rec.Destination+'"',
+                'tar -xf "'+$rec.Archive+'" -C "'+$rec.Destination+'"',
+                'move "'+$rec.Destination.TrimEnd('\')+'\tree" "'+$rec.Original+'"') -join "`r`n"
+            $lines.Add('<p>Original: '+(ConvertTo-EloReportEscapedText $rec.Original)+'</p><p>ZIP: '+(ConvertTo-EloReportEscapedText $rec.Archive)+'</p><pre>'+(ConvertTo-EloReportEscapedText $cmd)+'</pre>')
         } else { $lines.Add('<p>'+$t.Unknown+'</p>') }
     }
     $lines.Add('<h2>'+$t.Sources+'</h2><ul>')

@@ -22,7 +22,7 @@ Usage (embedded launcher): ELO-Patch-Tools.bat [options]
                           are NOT consent to apply. After the exact dynamic preview,
                           type APPLY MITIGATION at a live interactive console.
                           Denial, EOF, redirected input/output or no console abort.
-  --update-runtime        Separate option: NOT IMPLEMENTED; always fails closed.
+  --update-runtime        Separate option: NOT IMPLEMENTED in the CLI (use the web interface); always fails closed.
 No credentials, arbitrary commands, downloads, automatic updates or restarts.
 Unknown/duplicate options, conflicting modes and malformed paths are rejected.
 Quote paths with spaces. UNC, relative, device and command-like paths are rejected.
@@ -42,7 +42,7 @@ assessments. Earlier session observations are retained. No credentials are reque
 or stored: an official installation-specific ELO API contract is not verified and
 ELO version remains unknown. Machine-option readback and disposable JVM flag probes
 are separate scopes; neither proves mitigation in the currently running ELO process.
-Automatic runtime update remains disabled; no runtime backup/replacement is claimed.
+The CLI never updates a runtime; the web interface offers a confirmed update with verified backup and rollback.
 CLI JSON and UI JSON exports are raw diagnostics, NOT this sanitized HTML report.
 Review raw exports before sharing; never enter secrets into paths or JVM options.
 
@@ -85,7 +85,7 @@ Manual mitigation and recovery (performed by an authorized administrator):
    backend rollback fails, stop and perform manual recovery before any retry.
 6. For permanent runtime updates consult ELO/vendor support, verify provenance,
    compatibility and architecture, back up the runtime/configuration, and plan and
-   test replacement and restoration. Automatic runtime update is NOT IMPLEMENTED.
+   test replacement and restoration. Runtime update is NOT IMPLEMENTED in the CLI; the web interface offers it.
 
 Trusted embedding contract:
 Dot-source this module without side effects. Invoke-EloCli accepts string[] Arguments,
@@ -211,7 +211,7 @@ function Invoke-EloCli {
         }
         $report.keepTemp = $options.ContainsKey('--keep-temp')
         if ($options.ContainsKey('--update-runtime')) {
-            $code = 3; throw 'Runtime update not implemented: provenance, compatibility, backup, replacement and rollback are not verified.'
+            $code = 3; throw 'Runtime update not implemented in the CLI. Use the web interface (explicit confirmation, verified backup and rollback).'
         }
         $manualPath = $null
         if ($options.ContainsKey('--manual-path')) {

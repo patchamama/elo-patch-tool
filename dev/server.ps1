@@ -36,8 +36,9 @@ function New-EloServerSession {
     @{
         Port=$Port; Origin="http://127.0.0.1:$Port"; Token=(New-EloSecret); UiHtml=$UiHtml; ScanSource=$ScanSource
         State='idle'; Results=@(); Targets=@{}; Preview=$null; Worker=$null; Backup=$null; RecoveryRequired=$false; LastError=$null
-        ReportJvms=@(); ReportActions=@(); ReportIndexes=@{}
+        ReportJvms=@(); ReportActions=@(); ReportIndexes=@{}; UpdateContext=$null; ReportRecovery=$null
         Adapters=@{
+            NewUpdateContext={ param($Root,$Runtime) New-EloUpdateContext -Adapters (New-EloWindowsUpdateAdapters -ApprovedRoot $Root -Runtime $Runtime) -Production }
             Admin={ Test-EloAdministrator }; ReadOptions={ Get-EloMachineOptions }
             WriteOptions={ param($Value) Set-EloMachineOptions $Value }
             Fingerprint={ param($Path) Get-EloJavaFingerprint $Path }
@@ -392,15 +393,103 @@ function Invoke-EloMitigation {
         EvidenceCode='NewlyLaunchedJvmFlagVerified';EvidenceVerified=$true}
     return @{ok=$true}
 }
+function Stop-EloRequestDetail {
+    param([int]$Status,[string]$Code,[string]$Detail)
+    $e = New-Object System.InvalidOperationException($Code)
+    $e.Data['Status'] = $Status
+    if ($Detail -cmatch '^[A-Za-z0-9_:+.\-]{1,100}$') { $e.Data['Detail'] = $Detail }
+    throw $e
+}
+function ConvertTo-EloUpdateCode {
+    param([string]$Message)
+    $code=([string]$Message -split "`r?`n")[0]
+    if ($code -cmatch '^[a-z0-9_]{1,64}(:[A-Za-z0-9_+.\-]{1,32})?') { return $Matches[0] }
+    return 'update_failed'
+}
+function New-EloRuntimeUpdatePreview {
+    param($Session,[string]$ResultId)
+    $Session.Preview=$null; $Session.UpdateContext=$null
+    if (-not (& $Session.Adapters.Admin)) { Stop-EloRequest 403 'administrator_required' }
+    $target=$Session.Targets[$ResultId]
+    if (-not $target -or $target.Status -cne 'PotentiallyVulnerable' -or $target.Vendor -cne 'Temurin' -or
+        [string]$target.Location -cnotmatch '^[A-Za-z]:\\.+\\bin\\java\.exe$') { Stop-EloRequest 409 'target_not_eligible' }
+    $runtime=[IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName([string]$target.Location))
+    $root=[IO.Path]::GetDirectoryName($runtime)
+    if ([string]::IsNullOrEmpty($root) -or $root.Length -le 3) { Stop-EloRequestDetail 409 'update_preview_refused' 'runtime_not_below_a_directory' }
+    $now=& $Session.Adapters.Clock
+    $stamp=$now.ToString('yyyyMMddHHmmss')
+    $paths=@{Runtime=$runtime;Old=($runtime+'.old-'+$stamp);Stage=($runtime+'.stage-'+$stamp);Backup=($runtime+'.backup-'+$stamp+'.zip');Download=($runtime+'.download-'+$stamp+'.zip')}
+    $release=@(Get-EloVerifiedTemurinReleases)[0]
+    $package=@{}; foreach ($key in @('Vendor','Branch','Architecture','Version','Uri','Sha256')) { $package[$key]=[string]$release[$key] }
+    try {
+        $context=& $Session.Adapters.NewUpdateContext $root $runtime
+        $module=New-EloUpdatePreview -Context $context -Paths $paths -Package $package
+    } catch { Stop-EloRequestDetail 409 'update_preview_refused' (ConvertTo-EloUpdateCode $_.Exception.Message) }
+    $Session.UpdateContext=$context
+    $preview=@{Id=(New-EloSecret);ResultId=$ResultId;ActionId='update-runtime';Module=$module;Paths=$paths;Package=$package
+        JavaPath=[string]$target.Location;FromVersion=[string]$target.FullVersion;Expires=$now.AddMinutes(2)}
+    $Session.Preview=$preview
+    $from=[string]$target.FullVersion; $to=$package.Version
+    $summaryEn="Replace the runtime in $runtime ($from) with Eclipse Temurin $to (windows/x64, SHA256 $($package.Sha256)). Steps: verified ZIP backup $($paths.Backup); pinned HTTPS download; extraction to $($paths.Stage); Java self-test; rename old runtime to $($paths.Old); install; re-test. Any failure restores the old runtime. The old runtime and the backup are kept; nothing is deleted."
+    $summaryDe="Runtime in $runtime ($from) durch Eclipse Temurin $to (windows/x64, SHA256 $($package.Sha256)) ersetzen. Schritte: geprueftes ZIP-Backup $($paths.Backup); festgelegter HTTPS-Download; Entpacken nach $($paths.Stage); Java-Selbsttest; alte Runtime nach $($paths.Old) umbenennen; installieren; erneut testen. Bei jedem Fehler wird die alte Runtime wiederhergestellt. Alte Runtime und Backup bleiben erhalten; es wird nichts geloescht."
+    return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe};warnings=@(
+        @{en='ELO compatibility with this runtime is NOT verified; the update can affect ELO support. Confirming accepts this risk. A running ELO service or Java process using this runtime blocks the update; stop them first. No service is stopped or restarted by this tool.';de='Die ELO-Kompatibilitaet dieser Runtime ist NICHT geprueft; das Update kann den ELO-Support beeintraechtigen. Mit der Bestaetigung wird dieses Risiko akzeptiert. Ein laufender ELO-Dienst oder Java-Prozess mit dieser Runtime blockiert das Update; zuerst beenden. Dieses Werkzeug beendet oder startet keine Dienste.'}
+        @{en='The download is limited to the pinned official Eclipse Adoptium release and its published SHA256. Installing the vendor package with its installer remains the preferred long-term fix.';de='Der Download ist auf die festgelegte offizielle Eclipse-Adoptium-Version und ihre veroeffentlichte SHA256 beschraenkt. Die Installation des Herstellerpakets mit dem Installer bleibt die bevorzugte langfristige Loesung.'})}
+}
+function Add-EloUpdateReportActions {
+    param($Session,[string]$Outcome,$Preview,[int]$RuntimeIndex,[string]$FailureCode)
+    $from=$Preview.FromVersion; $to=$Preview.Package.Version
+    if ($Outcome -in @('Success','SimulatedSuccess','RolledBack','ManualRecoveryRequired')) {
+        $Session.ReportActions+=@{Kind='Backup';Status='Proven';Verified=$true;BackupVerified=$true;RuntimeIndex=$RuntimeIndex;EvidenceCode='BackupManifestMatched';EvidenceVerified=$true;FromVersion=$from;BackupVersion=$from}
+        $Session.ReportRecovery=@{Validated=$true;RuntimeIndex=$RuntimeIndex;Archive=$Preview.Paths.Backup;Original=$Preview.Paths.Runtime;Destination=($Preview.Paths.Runtime+'.restore')}
+    }
+    switch ($Outcome) {
+        { $_ -in @('Success','SimulatedSuccess') } { $Session.ReportActions+=@{Kind='Update';Status='Proven';Verified=$true;RuntimeIndex=$RuntimeIndex;EvidenceCode='InstalledRuntimeValidated';EvidenceVerified=$true;FromVersion=$from;ToVersion=$to} }
+        'RolledBack' {
+            $Session.ReportActions+=@{Kind='Update';Status='Failed';RuntimeIndex=$RuntimeIndex;EvidenceCode='ValidationFailed';EvidenceVerified=$true}
+            $Session.ReportActions+=@{Kind='Restore';Status='Proven';Verified=$true;RuntimeIndex=$RuntimeIndex;EvidenceCode='OriginalRuntimeRestored';EvidenceVerified=$true;FromVersion=$to;ToVersion=$from}
+        }
+        'ManualRecoveryRequired' {
+            $Session.ReportActions+=@{Kind='Update';Status='Failed';RuntimeIndex=$RuntimeIndex;EvidenceCode='ValidationFailed';EvidenceVerified=$true}
+            $Session.ReportActions+=@{Kind='Restore';Status='Failed';RuntimeIndex=$RuntimeIndex;EvidenceCode='RestoreFailed';EvidenceVerified=$true}
+        }
+        default {
+            $code='ValidationFailed'; if ($FailureCode -cmatch '^(download|package_verification|unverified_https|unverified_response|truncated|redirect)') { $code='DownloadFailed' }
+            $Session.ReportActions+=@{Kind='Update';Status='Failed';RuntimeIndex=$RuntimeIndex;EvidenceCode=$code;EvidenceVerified=$true}
+        }
+    }
+}
+function Invoke-EloRuntimeUpdateAction {
+    param($Session,$Body)
+    $preview=$Session.Preview; $Session.Preview=$null # consume even on failure
+    $context=$Session.UpdateContext; $Session.UpdateContext=$null
+    if (-not $preview -or -not $context -or $preview.ActionId -cne 'update-runtime' -or $preview.Id -cne $Body.previewId -or
+        $preview.ResultId -cne $Body.resultId -or $Body.actionId -cne 'update-runtime' -or (& $Session.Adapters.Clock) -ge $preview.Expires) { Stop-EloRequest 409 'preview_expired_or_mismatched' }
+    if (-not (& $Session.Adapters.Admin)) { Stop-EloRequest 403 'administrator_required' }
+    $target=$Session.Targets[$Body.resultId]
+    if (-not $target -or $target.Location -cne $preview.JavaPath -or $target.Status -cne 'PotentiallyVulnerable') { Stop-EloRequest 409 'stale_preview' }
+    $index=[int]$Session.ReportIndexes[$Body.resultId]
+    $module=$preview.Module
+    # The UI confirmation states the unverified-compatibility risk; it authorises all module confirmations.
+    $result=Invoke-EloRuntimeUpdate -Context $context -Confirmation $module.Confirmation -BranchConfirmation $module.BranchConfirmation -CompatibilityConfirmation $module.CompatibilityConfirmation
+    $failure=ConvertTo-EloUpdateCode $result.Error
+    Add-EloUpdateReportActions $Session ([string]$result.Status) $preview $index $failure
+    switch ([string]$result.Status) {
+        { $_ -in @('Success','SimulatedSuccess') } { return @{ok=$true} }
+        'RolledBack' { Stop-EloRequestDetail 422 'update_failed_rolled_back' $failure }
+        'ManualRecoveryRequired' { $Session.State='error'; $Session.RecoveryRequired=$true; Stop-EloRequestDetail 500 'update_manual_recovery_required' $failure }
+        default { Stop-EloRequestDetail 422 'update_rejected_no_change' $failure }
+    }
+}
 function Get-EloSessionReportHtml {
     param($Session,[ValidateSet('en','de')][string]$Language)
-    $report=New-EloTechnicalReport -ResourceCollector $Session.Adapters.Resources -OptionsCollector $Session.Adapters.ReportOptions -JvmEvidence $Session.ReportJvms -Actions $Session.ReportActions
+    $report=New-EloTechnicalReport -ResourceCollector $Session.Adapters.Resources -OptionsCollector $Session.Adapters.ReportOptions -JvmEvidence $Session.ReportJvms -Actions $Session.ReportActions -RecoveryEvidence $Session.ReportRecovery
     $html=ConvertTo-EloTechnicalReportHtml $report -Language $Language
     $states=@{idle='Ready';scanning='Scanning';cancelling='Cancelling';completed='Completed';cancelled='Cancelled';error='Failed'}
-    $notice='Session scan state: '; $scope='Session observations (including earlier scans); only a completed scan is a complete snapshot. Automatic runtime update is disabled. ELO API support and running ELO process mitigation are not verified.'
+    $notice='Session scan state: '; $scope='Session observations (including earlier scans); only a completed scan is a complete snapshot. A runtime update is performed only after explicit confirmation. ELO API support and running ELO process mitigation are not verified.'
     if ($Language -eq 'de') {
         $states=@{idle='Bereit';scanning='Scan laeuft';cancelling='Abbruch angefordert';completed='Abgeschlossen';cancelled='Abgebrochen';error='Fehlgeschlagen'}
-        $notice='Scanstatus der Sitzung: '; $scope='Sitzungsnachweise (auch fruehere Scans); nur ein abgeschlossener Scan ist eine vollstaendige Momentaufnahme. Automatisches Runtime-Update ist deaktiviert. ELO-API-Unterstuetzung und Risikominderung im laufenden ELO-Prozess sind nicht nachgewiesen.'
+        $notice='Scanstatus der Sitzung: '; $scope='Sitzungsnachweise (auch fruehere Scans); nur ein abgeschlossener Scan ist eine vollstaendige Momentaufnahme. Ein Runtime-Update erfolgt nur nach ausdruecklicher Bestaetigung. ELO-API-Unterstuetzung und Risikominderung im laufenden ELO-Prozess sind nicht nachgewiesen.'
     }
     $state=$states[$Session.State]; if (-not $state) { $state='Unknown / Unbekannt' }
     # A failed rollback can invalidate earlier machine-option evidence. Do not
@@ -448,9 +537,12 @@ function Invoke-EloApi {
             $body=ConvertFrom-EloBody $Request.Body -Required $required
             foreach ($key in $required) { if ($body.$key -cnotmatch '^[A-Za-z0-9_-]{1,128}$') { Stop-EloRequest 400 'invalid_id' } }
             if ($body.actionId -cnotin @('mitigate','update-runtime')) { Stop-EloRequest 400 'invalid_action' }
-            if ($body.actionId -ceq 'update-runtime') { $Session.Preview=$null; Stop-EloRequest 503 'update_unavailable_provenance_compatibility_backup_replacement_rollback_not_verified' }
             if ($Session.RecoveryRequired) { Stop-EloRequest 409 'manual_recovery_required_close_session' }
             if ($Session.State -cne 'completed' -or $Session.Worker) { Stop-EloRequest 409 'completed_scan_required' }
+            if ($body.actionId -ceq 'update-runtime') {
+                if ($Request.Target -ceq '/api/preview') { return New-EloRuntimeUpdatePreview $Session $body.resultId }
+                return Invoke-EloRuntimeUpdateAction $Session $body
+            }
             if ($Request.Target -ceq '/api/preview') { return New-EloMitigationPreview $Session $body.resultId }
             return Invoke-EloMitigation $Session $body
         }
@@ -519,6 +611,13 @@ function ConvertTo-EloErrorResponse {
         'scan_incomplete' { $warnings+=@{en='The scan encountered inaccessible/skipped locations or traversal limits. Results are not a complete assessment. Select a narrower accessible local root; review permissions without bypassing access controls.';de='Der Scan traf auf unzugaengliche/uebersprungene Orte oder Suchgrenzen. Keine vollstaendige Bewertung. Engeren zugaenglichen lokalen Suchpfad waehlen und Berechtigungen pruefen, ohne Zugriffsschutz zu umgehen.'} }
         'inaccessible_path' { $warnings+=@{en='The selected local directory is missing or inaccessible. Select an accessible directory and check permissions.';de='Das ausgewaehlte lokale Verzeichnis fehlt oder ist unzugaenglich. Zugaengliches Verzeichnis waehlen und Berechtigungen pruefen.'} }
         'update_unavailable_provenance_compatibility_backup_replacement_rollback_not_verified' { $warnings+=@{en='Automatic runtime update is unavailable: provenance, ELO compatibility, validated backups, reversible replacement and rollback guarantees are not implemented and verified. Nothing was downloaded or replaced.';de='Automatisches Laufzeit-Update nicht verfuegbar: Herkunft, ELO-Kompatibilitaet, validierte Sicherung, reversible Ersetzung und Wiederherstellung sind nicht implementiert und geprueft. Nichts heruntergeladen oder ersetzt.'} }
+    }
+    $detail=''; if ($cursor -and $cursor.Data.Contains('Detail')) { $detail=' ['+[string]$cursor.Data['Detail']+']' }
+    switch ($code) {
+        'update_preview_refused' { $warnings+=@{en="The runtime update cannot be offered for this JVM (only Eclipse Temurin 17 x64 below a dedicated directory, stopped, writable, with enough disk space).$detail Nothing was downloaded or changed.";de="Das Runtime-Update kann fuer diese JVM nicht angeboten werden (nur Eclipse Temurin 17 x64 unterhalb eines eigenen Verzeichnisses, beendet, beschreibbar, genug Speicherplatz).$detail Nichts wurde heruntergeladen oder geaendert."} }
+        'update_rejected_no_change' { $warnings+=@{en="The update was rejected before the runtime was replaced.$detail The original runtime is unchanged.";de="Das Update wurde abgelehnt, bevor die Runtime ersetzt wurde.$detail Die urspruengliche Runtime ist unveraendert."} }
+        'update_failed_rolled_back' { $warnings+=@{en="The new runtime failed validation.$detail The original runtime was restored and verified; the failed runtime and the backup ZIP were kept.";de="Die neue Runtime bestand die Pruefung nicht.$detail Die urspruengliche Runtime wurde wiederhergestellt und geprueft; fehlgeschlagene Runtime und Backup-ZIP bleiben erhalten."} }
+        'update_manual_recovery_required' { $warnings+=@{en="Automatic restore failed.$detail Further actions are locked. Restore manually from the backup ZIP using the commands in the technical report.";de="Automatische Wiederherstellung fehlgeschlagen.$detail Weitere Aktionen sind gesperrt. Manuell aus dem Backup-ZIP wiederherstellen; Befehle stehen im technischen Bericht."} }
     }
     return @{Status=$status;Body=@{error=$code;warnings=@($warnings)}}
 }

@@ -5,7 +5,7 @@ if (-not (Test-Path -LiteralPath $htmlPath)) { throw 'Missing dev/ui.html' }
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw 'Node.js is required for isolated browser-contract tests.' }
 # Verify embedded resources against their authoritative development sources.
 $batText = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) 'ELO-Patch-Tools.bat'))
-foreach ($resource in @(@('SCAN_PS','scan.ps1'),@('SERVER_PS','server.ps1'),@('CLI_PS','cli.ps1'),@('UI_HTML','ui.html'),@('REPORT_PS','report.ps1'))) {
+foreach ($resource in @(@('SCAN_PS','scan.ps1'),@('SERVER_PS','server.ps1'),@('CLI_PS','cli.ps1'),@('UI_HTML','ui.html'),@('REPORT_PS','report.ps1'),@('UPDATE_PS','update.ps1'))) {
     $match = [regex]::Match($batText, '(?ms)^::ELO_PATCH_BEGIN:' + $resource[0] + '\r?\n(.*?)^::ELO_PATCH_END:' + $resource[0] + '\s*$')
     $expected = [IO.File]::ReadAllText((Join-Path $PSScriptRoot $resource[1])).TrimEnd("`r", "`n")
     if (-not $match.Success -or ($match.Groups[1].Value.TrimEnd("`r", "`n") -replace "`r`n", "`n") -cne ($expected -replace "`r`n", "`n")) { throw "Embedded $($resource[0]) differs from source" }

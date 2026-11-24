@@ -142,6 +142,7 @@ const messages = {
  accessDenied:'Access denied. Check elevation and filesystem/registry permissions without bypassing access controls. No protection is claimed.',
  adminNeeded:'Mitigation requires an elevated administrator session. Read-only scanning does not require elevation. This is not a session-token error.',
  boundaryRejected:'The local service rejected the request boundary. Reopen the original local session link; do not bypass origin or host checks.',
+ updateRefused:'The runtime update cannot be offered for this JVM. Nothing was downloaded or changed.',updateRejected:'The update was rejected before the runtime was replaced. The original runtime is unchanged.',updateRolledBack:'The new runtime failed validation. The original runtime was restored and verified; the failed runtime and the backup ZIP were kept.',updateManualRecovery:'Automatic restore failed. Manual recovery from the backup ZIP is required (see the technical report).',
  rollbackFailed:'Rollback failed — manual recovery is required.',manualRecovery:'Manual recovery is required before any further change.',
  recoveryGuidance:'CRITICAL: JAVA_TOOL_OPTIONS may still be changed. Further requests that could change state are locked in this page. Restore the exact previous value AND registry type saved from the preview using an approved Registry Editor procedure, with your administrator. Verify manually before closing this session and starting another. Opening a new session alone does not restore the environment. Existing JVM protection is not claimed.',
  rolledBack:'Verification failed. The exact previous environment value and registry type were restored and read back. No protection is claimed.',
@@ -184,6 +185,7 @@ const messages = {
  accessDenied:'Zugriff verweigert. Administratorrechte und Datei-/Registrierungsberechtigungen prüfen, ohne den Zugriffsschutz zu umgehen. Kein Schutz zugesichert.',
  adminNeeded:'Risikominderung erfordert eine erhöhte Administratorsitzung. Schreibgeschützte Scans benötigen keine Erhöhung. Dies ist kein Sitzungstoken-Fehler.',
  boundaryRejected:'Der lokale Dienst hat die Anfragegrenzen abgelehnt. Öffnen Sie den ursprünglichen lokalen Sitzungslink erneut; Herkunfts- und Host-Prüfungen nicht umgehen.',
+ updateRefused:'Das Runtime-Update kann für diese JVM nicht angeboten werden. Nichts wurde heruntergeladen oder geändert.',updateRejected:'Das Update wurde abgelehnt, bevor die Runtime ersetzt wurde. Die ursprüngliche Runtime ist unverändert.',updateRolledBack:'Die neue Runtime bestand die Prüfung nicht. Die ursprüngliche Runtime wurde wiederhergestellt und geprüft; fehlgeschlagene Runtime und Backup-ZIP bleiben erhalten.',updateManualRecovery:'Automatische Wiederherstellung fehlgeschlagen. Manuelle Wiederherstellung aus dem Backup-ZIP ist erforderlich (siehe technischer Bericht).',
  rollbackFailed:'Wiederherstellung fehlgeschlagen — manuelle Wiederherstellung erforderlich.',manualRecovery:'Vor weiteren Änderungen ist eine manuelle Wiederherstellung erforderlich.',
  recoveryGuidance:'KRITISCH: JAVA_TOOL_OPTIONS ist möglicherweise noch geändert. Weitere zustandsändernde Anfragen sind auf dieser Seite gesperrt. Stellen Sie mit Ihrem Administrator den exakten alten Wert UND Registrierungstyp aus der Vorschau mit einem freigegebenen Registrierungseditor-Verfahren wieder her. Vor dem Schließen dieser Sitzung und dem Start einer neuen Sitzung manuell prüfen. Eine neue Sitzung allein stellt die Umgebung nicht wieder her. Kein Schutz bestehender JVMs zugesichert.',
  rolledBack:'Prüfung fehlgeschlagen. Der exakte alte Umgebungswert und Registrierungstyp wurden wiederhergestellt und zurückgelesen. Kein Schutz zugesichert.',
@@ -252,6 +254,7 @@ const errorMessages = Object.fromEntries(Object.entries({
  auth:['authentication_required'],accessDenied:['access_denied'],adminNeeded:['administrator_required'],
  boundaryRejected:['loopback_only','host_rejected','origin_rejected','cross_site','origin_required'],
  expired:['preview_expired_or_mismatched','stale_preview'],
+ updateRefused:['update_preview_refused'],updateRejected:['update_rejected_no_change'],updateRolledBack:['update_failed_rolled_back'],updateManualRecovery:['update_manual_recovery_required'],
  rollbackFailed:['rollback_failed_manual_recovery_required'],manualRecovery:['manual_recovery_required_close_session'],
  rolledBack:['verification_failed_rolled_back'],probeFailed:['probe_failed_no_change'],
  updateUnavailable:['update_unavailable_provenance_compatibility_backup_replacement_rollback_not_verified'],
@@ -261,7 +264,7 @@ const errorMessages = Object.fromEntries(Object.entries({
  optionsUnsupported:['unsupported_environment_type','unsupported_options','ambiguous_option_quoting','malformed_option_quoting','ambiguous_intrinsics_option','ambiguous_jvm_options','ambiguous_environment_expansion'],
  failed:['operation_failed','scan_failed','unknown_route','method_rejected','unexpected_body','json_required','invalid_id','invalid_action','invalid_json','invalid_parameters','missing_parameter','request_timeout','incomplete_request','invalid_header','headers_too_large','invalid_request_line','duplicate_header','unsupported_framing','invalid_length','length_required','body_too_large','incomplete_body','invalid_utf8']
 }).flatMap(([key,codes]) => codes.map(code => [code,key])));
-const recoveryCodes = ['rollback_failed_manual_recovery_required','manual_recovery_required_close_session'];
+const recoveryCodes = ['rollback_failed_manual_recovery_required','manual_recovery_required_close_session','update_manual_recovery_required'];
 class ApiFailure extends Error {
  constructor(key,warnings = [],recovery = false) { super(key); this.key = key; this.warnings = warnings; this.recovery = recovery; }
 }
