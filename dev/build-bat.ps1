@@ -6,7 +6,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $batPath = Join-Path $root 'ELO-Patch-Tools.bat'
 $blocks = [ordered]@{
     SCAN_PS = 'scan.ps1'; CLI_PS = 'cli.ps1'; SERVER_PS = 'server.ps1'; UI_HTML = 'ui.html'
-    REPORT_PS = 'report.ps1'; UPDATE_PS = 'update.ps1'
+    REPORT_PS = 'report.ps1'; UPDATE_PS = 'update.ps1'; CATALOG_PS = 'catalog.ps1'
 }
 $text = [IO.File]::ReadAllText($batPath)
 $text = $text -replace "`r`n", "`n"
@@ -26,9 +26,15 @@ if (-not $text.Contains("UPDATE_PS='update.ps1'")) {
     $text = $text.Replace("REPORT_PS='report.ps1'}", "REPORT_PS='report.ps1';UPDATE_PS='update.ps1'}")
     $text = $text.Replace('|UI_HTML|REPORT_PS)$', '|UI_HTML|REPORT_PS|UPDATE_PS)$')
 }
+if (-not $text.Contains("CATALOG_PS='catalog.ps1'")) {
+    $text = $text.Replace("UPDATE_PS='update.ps1'}", "UPDATE_PS='update.ps1';CATALOG_PS='catalog.ps1'}")
+    $text = $text.Replace('|REPORT_PS|UPDATE_PS)$', '|REPORT_PS|UPDATE_PS|CATALOG_PS)$')
+}
 # Backend loads the update module next to the other trusted modules.
-if (-not $text.Contains("'update.ps1')")) {
-    $text = $text.Replace(". (Join-Path `$PSScriptRoot 'report.ps1')`n", ". (Join-Path `$PSScriptRoot 'report.ps1')`n. (Join-Path `$PSScriptRoot 'update.ps1')`n")
+$reportLine = '. (Join-Path $PSScriptRoot ''report.ps1'')'
+foreach ($module in @('catalog.ps1', 'update.ps1')) {
+    $line = '. (Join-Path $PSScriptRoot ''' + $module + ''')'
+    if (-not $text.Contains($line + "`n")) { $text = $text.Replace($reportLine + "`n", $reportLine + "`n" + $line + "`n") }
 }
 $text = $text.Replace('rem Single-file integration candidate. Automatic runtime update is unavailable.', 'rem Single-file tool. A runtime update runs only after explicit confirmation.')
 [IO.File]::WriteAllText($batPath, ($text -replace "`n", "`r`n"), (New-Object Text.UTF8Encoding($false)))
