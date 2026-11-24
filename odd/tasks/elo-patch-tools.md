@@ -18,13 +18,14 @@ S11. "importante, no debe de buscarse la instalación de java en cualquier lugar
 S12. "poner en el reporte que si falla en algun momento la actualización de java, que se puede descomprimir la versión del backup y pon la ruta original donde estaba para informar donde descomprimirla con el comando desde el terminal de como eliminar la nueva versión y descomprimir la version del backup, también poner comando del cli para hacerlo desde el terminal. También el sistema debe de detectar si existe el patch desde la variable de entrono, es decir, si existe: JAVA_TOOL_OPTIONS con los parámetros requeridos y como parte del reporte se puede poner eso en caso de tener una version antigua de java no patcheada."
 
 ## Tasks
-T1 [S1,S2,S7] Core scanning and classification; route: writer; commit: pending.
-T2 [S1,S5,S6] Web interface; route: writer; commit: pending.
-T3 [S1,S3,S4,S6,S7] Integration, mitigation and update safety; route: inline; commit: pending.
-T4 [S1-S12] Independent verification and delivery; route: verifier; commit: pending.
-T5 [S8-S10,S12] Bilingual technical report, recovery guidance, environment observation and optional ELO version lookup; route: writer; commit: pending.
-T6 [S2,S4,S7,S11] Restricted drive-root discovery and safe verified runtime updates; route: parallel writers; commit: pending.
+T1 [S1,S2,S7] Core scanning and classification; route: writer; DONE (a3a4db7, a5ea6eb).
+T2 [S1,S5,S6] Web interface; route: writer; DONE (a3a4db7, 5dc134c adds update error messages).
+T3 [S1,S3,S4,S6,S7] Integration, mitigation and update safety; route: inline; DONE (1e2e702, 0daed5d, 5dc134c).
+T4 [S1-S12] Verification and delivery; route: inline; DONE: all dev/*.tests.ps1 pass (PowerShell 5.1; ui.tests under pwsh 7) and dev/update.live.tests.ps1 passed live (9ffc3f5).
+T5 [S8-S10,S12] Bilingual technical report, recovery guidance, environment observation and optional ELO version lookup; route: writer; DONE (5dc134c: PowerShell and cmd restore commands, also after a successful update). ELO API version lookup stays unavailable: no verified installation-specific contract.
+T6 [S2,S4,S7,S11] Restricted drive-root discovery and safe verified runtime updates; route: inline; DONE (0daed5d, 5dc134c, 9ffc3f5): Temurin 17.0.21.1+2 pinned, real adapters, Java self-test probe, live update + rollback verified.
 
+Known limits: only Eclipse Temurin 17 x64 can be updated (Azul Zulu on the test ELO host is refused); runtime must be below a dedicated directory (not a drive root); quiescence is best effort; ELO compatibility is never assumed.
 ## Log
 L1: "bien, ahora estamos ejecutandonos en un hyperV con windows y elo dms de prueba y todo está a salvo y aquí probaremos la herramienta, empieza con toda la implementación"
 L2: "sí" — authorized initialization of Git.
@@ -34,3 +35,4 @@ L5: si se hace el parche sin instalación, informarlo en el reporte de que se pa
 L6: sí.... importante, no debe de buscarse la instalación de java en cualquier lugar, sino en todas las torres c: hasta z: para ver si existe en alguna la ruta \java\bin o \ELO\java\bin y habilita la opción de actualizar java y testear que la actualización se hizo bien corriendo un pequeño applet de java que puedes crear y descargar, y siempre hacer un backup en un zip de la instación inicial. Sí no se encuentra java instalado, que brinde la opción de poner el path donde se encuentra pero también que busque si hay varias instalaciones pues puede pasar.
 L7: Read-only BAT scan returned C:\ELO\java\bin\java.exe, Azul Zulu 21.0.1+12-LTS, inconclusive; reached 10,000-entry budget in ELO temp. The result is incomplete.
 L8: poner en el reporte que si falla en algun momento la actualización de java, que se puede descomprimir la versión del backup y pon la ruta original donde estaba para informar donde descomprimirla con el comando desde el terminal de como eliminar la nueva versión y descomprimir la version del backup, también poner comando del cli para hacerlo desde el terminal. También el sistema debe de detectar si existe el patch desde la variable de entrono, es decir, si existe: JAVA_TOOL_OPTIONS con los parámetros requeridos y como parte del reporte se puede poner eso en caso de tener una version antigua de java no patcheada.
+L9: user authorized running tests and unblocking the production update gate on this disposable Hyper-V test machine; verified live (real download, self-test, replacement, rollback, restore commands). Bugs found live and fixed: OS_ARCH x86_64, optional JAVA_RUNTIME_VERSION, signed final URL (host pinning), per-request TLS unavailable on .NET Framework, directory mtime in fingerprint.
