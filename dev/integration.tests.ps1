@@ -125,11 +125,11 @@ try {
     $env:TEMP=$run; $env:TMP=$run
     $manual=Invoke-Bat $copy '--cli --manual --json'
     $json=ConvertFrom-Json $manual.Out
-    Assert ($manual.Code -eq 0 -and $json.readme -match 'NOT IMPLEMENTED') 'BAT CLI JSON/manual without scan'
+    Assert ($manual.Code -eq 0 -and $json.readme -match '--update-runtime') 'BAT CLI JSON/manual without scan'
     Assert-Clean
     $update=Invoke-Bat $copy '--cli --update-runtime --json'
     $json=ConvertFrom-Json $update.Out
-    Assert ($update.Code -eq 3 -and $json.error -match 'not implemented') 'runtime update fails closed'
+    Assert ($update.Code -eq 2 -and $json.error -match 'requires --target') 'runtime update without explicit flags fails closed'
     Assert-Clean
     $headless=Invoke-Bat $copy '--no-browser'
     Assert ($headless.Code -ne 0 -and $headless.Err -match 'no_browser_requires_private_launch_handler') 'web no-browser explicitly refuses unsafe delivery'

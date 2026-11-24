@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\update.ps1"
+. "$PSScriptRoot\catalog.ps1"
 . "$PSScriptRoot\server.ps1"
 . "$PSScriptRoot\scan.ps1"
 . "$PSScriptRoot\cli.ps1"
@@ -221,7 +222,7 @@ function New-UpdateMock($Mode) {
     $ad=@{
         Clock={ [datetime]'2026-11-24T10:00:00Z' }
         Admin={ $true }
-        Inspect={ param($Path) @{Vendor='Eclipse Adoptium';Branch='17';Architecture='x64';Fingerprint='fp-old'} }
+        Inspect={ param($Path) if ($st.Mode -ceq 'zulu') { @{Vendor='Azul Zulu';Branch='21';Architecture='x64';ImageType='jdk';Fingerprint='fp-old'} } else { @{Vendor='Eclipse Adoptium';Branch='17';Architecture='x64';ImageType='jdk';Fingerprint='fp-old'} } }.GetNewClosure()
         Evidence={ param($Detected,$Package) @{Official=$true;PublishedHash=$true;Compatibility=$false} }
         Preflight={ param($Paths) @{SafePaths=$true;Quiescent=($st.Mode -ne 'running');Permissions=$true;Space=$true} }.GetNewClosure()
         Backup={ param($Paths) $st.Events.Add('backup') }.GetNewClosure()
@@ -237,14 +238,29 @@ function New-UpdateMock($Mode) {
         VerifyRestored={ param($Paths,$Detected) ($st.Installed -eq 'old') }.GetNewClosure()
     }
     $ctx=New-EloUpdateContext -Adapters $ad -Simulation
-    return @{State=$st;Factory={ param($Root,$Runtime) $ctx }.GetNewClosure()}
+    return @{State=$st;Factory={ param($Root,$Runtime,$StopServices) $st.StopServices=[bool]$StopServices; $ctx }.GetNewClosure()}
 }
 function Reset-UpdateSession($Mode) {
     Reset-Fake
     $s.Targets=@{jvm1=[pscustomobject]@{Location='C:\ELO\java\bin\java.exe';Status='PotentiallyVulnerable';Vendor='Temurin';FullVersion='17.0.2+8'}}
     $s.ReportJvms=@(@{Version='17.0.2+8';Verified=$true;ExecutionVerified=$true;Vendor='Temurin';VendorVerified=$true;Classification='PotentiallyVulnerable';ClassificationVerified=$true;EvidenceCode='AdvisoryRangeMatch'})
     $s.ReportIndexes=@{jvm1=1}; $s.ReportActions=@(); $s.ReportRecovery=$null
-    $mock=New-UpdateMock $Mode; $s.Adapters.NewUpdateContext=$mock.Factory
+    $mock=New-UpdateMock $Mode; $s.Adapters.NewUpdateContext=$mock.Factory; $s.LastUpdate=$null
+    $st=$mock.State
+    $vendor='Eclipse Adoptium'; $branch='17'; $installed='17.0.2+8'; $latest='17.0.21.1+2'
+    if ($Mode -ceq 'zulu') { $vendor='Azul Zulu'; $branch='21'; $installed='21.0.1+12'; $latest='21.0.13.1+2' }
+    if ($Mode -ceq 'current') { $installed='17.0.21.1+2' }
+    $identityValue=@{Vendor=$vendor;Branch=$branch;Architecture='x64';ImageType='jdk';Version=$installed}
+    $releaseValue=@{Vendor=$vendor;Branch=$branch;Architecture='x64';ImageType='jdk';Version=$latest;Uri='https://fixture.invalid/runtime.zip';Sha256=('a'*64);Size=200000000}
+    $s.Adapters.Identity={ param($Path) if ($Mode -ceq 'unknown-vendor') { throw 'unrecognized_runtime_identity' }; $identityValue }.GetNewClosure()
+    $s.Adapters.ResolveRelease={ param($Identity) $releaseValue }.GetNewClosure()
+    $s.Adapters.RuntimeUsers={ param($Path)
+        if ($Mode -ceq 'services') { return @{Services=@(@{Name='ELO-SRV01-1'},@{Name='ELO-Flows-Worker-1'});Processes=@()} }
+        if ($Mode -ceq 'process') { return @{Services=@();Processes=@(@{Id=1;Name='java.exe'})} }
+        return @{Services=@();Processes=@()}
+    }.GetNewClosure()
+    $st.Restores=New-Object 'System.Collections.Generic.List[object]'
+    $s.Adapters.RestoreBackup={ param($Root,$Runtime,$Backup,$StopServices,$Stamp) $st.Restores.Add(@{Root=$Root;Runtime=$Runtime;Backup=$Backup;Stop=$StopServices}); if ($Mode -ceq 'restore-fails') { throw 'backup_entry_mismatch' } }.GetNewClosure()
     return $mock
 }
 function UpdatePreview { Invoke-EloApi $s (Request POST /api/preview '{"actionId":"update-runtime","resultId":"jvm1"}') }
@@ -259,7 +275,9 @@ Assert ((UpdateApply $up.previewId).ok -and $m.State.Installed -eq 'new') 'confi
 Assert (($m.State.Events -join ',') -ceq 'backup,download,stage,preserve,replace') 'backup precedes download and replacement'
 Assert (@($s.ReportActions | Where-Object { $_.Kind -ceq 'Update' -and $_.Status -ceq 'Proven' }).Count -eq 1 -and @($s.ReportActions | Where-Object { $_.Kind -ceq 'Backup' -and $_.BackupVerified }).Count -eq 1) 'update and verified backup are recorded for the report'
 $s.Adapters.Resources={ @{ServerName='TEST-SERVER';WindowsVersion='10.0';WindowsBuild='20348';TotalRamBytes=8GB;Disks=@(@{Name='C:';TotalBytes=100GB;FreeBytes=40GB})} }
+$s.Adapters.EloVersion={ param($Roots) if ($Roots -contains 'C:\ELO') { '25.00.010.476816' } else { $null } }
 $report=Get-EloSessionReportHtml $s en
+Assert ($report.Contains('25.00.010.476816')) 'report shows the ELO version read from the installed Indexserver files'
 Assert ($report.Contains('17.0.21.1+2') -and $report.Contains('Expand-Archive') -and $report.Contains(('C:\ELO\java.backup-'+$script:Fake.Now.ToString('yyyyMMddHHmmss')+'.zip'))) 'report names the new version, backup ZIP and restore commands'
 Reject { UpdateApply $up.previewId } 409
 # Rejected before replacement (download failure): nothing replaced, failure recorded.
@@ -278,12 +296,52 @@ Assert ($e.Status -eq 500 -and $e.Body.error -ceq 'update_manual_recovery_requir
 $m=Reset-UpdateSession 'running'
 $e=Get-ErrorCode { UpdatePreview }
 Assert ($e.Status -eq 409 -and $e.Body.error -ceq 'update_preview_refused' -and $e.Body.warnings[0].en.Contains('preflight_failed:Quiescent') -and $m.State.Events.Count -eq 0) 'running runtime blocks the update before any change'
-# Non-admin and non-Temurin targets are refused.
+# Non-admin and unrecognised runtimes are refused.
 $m=Reset-UpdateSession 'ok'; $script:Fake.Admin=$false
 Reject { UpdatePreview } 403
 $script:Fake.Admin=$true
-$m=Reset-UpdateSession 'ok'; $s.Targets.jvm1.Vendor='Azul Zulu'
-Reject { UpdatePreview } 409
+$m=Reset-UpdateSession 'unknown-vendor'
+$e=Get-ErrorCode { UpdatePreview }
+Assert ($e.Status -eq 409 -and $e.Body.error -ceq 'update_preview_refused' -and $e.Body.warnings[0].en.Contains('unrecognized_runtime_identity')) 'unrecognised vendor refused with a stable code'
+# Azul Zulu 21 is updated to the newest release of ITS branch.
+$m=Reset-UpdateSession 'zulu'; $up=UpdatePreview
+Assert ($up.summary.en.Contains('Azul Zulu JDK 21') -and $up.summary.en.Contains('21.0.1+12') -and $up.summary.en.Contains('21.0.13.1+2') -and $up.summary.de.Contains('Azul Zulu')) 'Zulu preview names vendor, branch, installed and latest version'
+Assert ((UpdateApply $up.previewId).ok -and @($s.ReportActions | Where-Object { $_.Kind -ceq 'Update' -and $_.ToVersion -ceq '21.0.13.1+2' -and $_.FromVersion -ceq '21.0.1+12' }).Count -eq 1) 'Zulu update recorded with exact versions'
+# Already newest: nothing offered.
+$m=Reset-UpdateSession 'current'
+$e=Get-ErrorCode { UpdatePreview }
+Assert ($e.Status -eq 409 -and $e.Body.error -ceq 'update_not_needed' -and $m.State.Events.Count -eq 0) 'no update offered when the newest release is installed'
+# Services that use the runtime are listed, stopped only because the preview said so.
+$m=Reset-UpdateSession 'services'; $up=UpdatePreview
+Assert ($up.warnings[0].en.Contains('ELO-SRV01-1') -and $up.warnings[0].en.Contains('STOPPED') -and $m.State.StopServices -eq $true) 'preview lists the services to stop and asks the backend for service control'
+$m=Reset-UpdateSession 'ok'; $up=UpdatePreview
+Assert ($m.State.StopServices -eq $false) 'no service control without services'
+# Another process using the runtime blocks the change.
+$m=Reset-UpdateSession 'process'
+$e=Get-ErrorCode { UpdatePreview }
+Assert ($e.Status -eq 409 -and $e.Body.warnings[0].en.Contains('runtime_in_use_by_java.exe') -and $m.State.Events.Count -eq 0) 'a foreign process using the runtime blocks the update'
+# Restore from the session backup.
+function RestorePreview { Invoke-EloApi $s (Request POST /api/preview '{"actionId":"restore-backup","resultId":"jvm1"}') }
+function RestoreApply($Id) { Invoke-EloApi $s (Request POST /api/action ('{"actionId":"restore-backup","resultId":"jvm1","previewId":"'+$Id+'"}')) }
+$m=Reset-UpdateSession 'ok'
+$e=Get-ErrorCode { RestorePreview }
+Assert ($e.Status -eq 409 -and $e.Body.error -ceq 'no_backup_for_target') 'restore needs a backup made in this session'
+$up=UpdatePreview; $null=UpdateApply $up.previewId
+$fakeBackup=Join-Path ([IO.Path]::GetTempPath()) ('elo-fake-backup-'+[guid]::NewGuid().ToString('N')+'.zip'); [IO.File]::WriteAllText($fakeBackup,'x')
+try {
+    $s.LastUpdate.Backup=$fakeBackup
+    $s.Adapters.Identity={ param($Path) @{Vendor='Eclipse Adoptium';Branch='17';Architecture='x64';ImageType='jdk';Version='17.0.2+8'} }
+    $rp=RestorePreview
+    Assert ($rp.summary.en.Contains('17.0.2+8') -and $rp.summary.en.Contains('replaced-') -and $m.State.Restores.Count -eq 0) 'restore preview is read-only and names the version'
+    Assert ((RestoreApply $rp.previewId).ok -and $m.State.Restores.Count -eq 1 -and $m.State.Restores[0].Backup -ceq $fakeBackup -and $m.State.Restores[0].Runtime -ceq 'C:\ELO\java') 'restore runs through the backend adapter'
+    Assert (@($s.ReportActions | Where-Object { $_.Kind -ceq 'Restore' -and $_.Status -ceq 'Proven' -and $_.ToVersion -ceq '17.0.2+8' }).Count -eq 1 -and $null -eq $s.LastUpdate) 'restore recorded for the report'
+    # A restore that is rejected leaves a failed action and a stable error.
+    $m=Reset-UpdateSession 'restore-fails'
+    $up=UpdatePreview; $null=UpdateApply $up.previewId; $s.LastUpdate.Backup=$fakeBackup
+    $rp=RestorePreview
+    $e=Get-ErrorCode { RestoreApply $rp.previewId }
+    Assert ($e.Status -eq 422 -and $e.Body.error -ceq 'restore_failed_no_change' -and $e.Body.warnings[0].en.Contains('backup_entry_mismatch') -and @($s.ReportActions | Where-Object { $_.Kind -ceq 'Restore' -and $_.Status -ceq 'Failed' }).Count -eq 1) 'rejected restore is reported and changes nothing'
+} finally { Remove-Item -LiteralPath $fakeBackup -Force -ErrorAction SilentlyContinue }
 Assert ($script:Fake.Writes -eq 0 -and $script:Fake.Probes -eq 0) 'update flow never writes machine options'
 Reset-Fake; $p=Preview
 $other=New-EloServerSession -Port 54321 -UiHtml '<html>' -ScanSource '# none'

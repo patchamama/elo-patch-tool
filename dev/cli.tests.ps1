@@ -6,7 +6,7 @@ function Assert($Condition, $Message) {
     if (-not $Condition) { throw "FAIL: $Message" }
     $script:checks++
 }
-$script:scanCalls = 0; $script:applyCalls = 0; $script:previewCalls = 0
+$script:scanCalls = 0; $script:applyCalls = 0; $script:previewCalls = 0; $script:updatePreviewCalls = 0; $script:updateApplyCalls = 0
 $script:seenPath = $null
 $scanner = {
     param($ManualPath)
@@ -20,6 +20,8 @@ $actions = @{
     IsAdmin = { $true }
     Preview = { param($Result) $script:previewCalls++; @{ Summary = 'Save old value; global effect'; Token = 'opaque' } }
     Apply = { param($Preview) $script:applyCalls++; @{ ok = $true } }
+    UpdatePreview = { param($Result) $script:updatePreviewCalls++; @{ Summary = 'Replace runtime with the newest release; backup kept'; Token = 'opaque' } }
+    UpdateApply = { param($Preview) $script:updateApplyCalls++; @{ ok = $true } }
 }
 $modify = @('--cli','--mitigate','--target','0','--confirm-admin','--confirm-mitigation','--json')
 $r = Invoke-EloCli -Arguments $modify -Scanner $scanner -Actions $actions
@@ -58,9 +60,27 @@ foreach ($flags in @(@('--mitigate','--target','0'), @('--mitigate','--target','
     $r = Invoke-EloCli -Arguments $flags -Scanner $scanner -Actions $actions
     Assert ($r.ExitCode -ne 0 -and $script:applyCalls -eq 0) 'explicit confirmations required'
 }
-$r = Invoke-EloCli -Arguments @('--update-runtime','--json') -Scanner $scanner -Actions $actions
-Assert ($r.ExitCode -ne 0 -and $r.Output -match 'not implemented' -and $script:applyCalls -eq 0) 'update fails closed'
+# Runtime update from the CLI: same discipline as the mitigation (explicit flags, preview, typed phrase).
+foreach ($flags in @(@('--update-runtime','--json'), @('--update-runtime','--target','0','--json'), @('--update-runtime','--target','0','--confirm-admin','--json'), @('--update-runtime','--target','0','--confirm-admin','--confirm-mitigation','--json'), @('--mitigate','--target','0','--confirm-admin','--confirm-update','--json'))) {
+    $r = Invoke-EloCli -Arguments $flags -Scanner $scanner -Actions $actions
+    Assert ($r.ExitCode -ne 0 -and $script:updateApplyCalls -eq 0 -and $script:applyCalls -eq 0) ('update/mitigation flags must match: '+($flags -join ' '))
+}
+$updateArgs = @('--cli','--update-runtime','--target','0','--confirm-admin','--confirm-update','--json')
+$r = Invoke-EloCli -Arguments $updateArgs -Scanner $scanner -Actions $actions
+Assert ($r.ExitCode -ne 0 -and $script:updateApplyCalls -eq 0) 'noninteractive process refuses an update despite flags'
 $script:consoleEvents.Clear()
+$updateConsole = @{ IsInteractive = { $true }; Write = { param($Text) $script:consoleEvents.Add([string]$Text) }; ReadLine = { $script:consoleEvents.Add('READ'); 'APPLY UPDATE' } }
+$script:updatePreviewCalls = 0; $script:updateApplyCalls = 0
+$r = Invoke-EloCli -Arguments $updateArgs -Scanner $scanner -Actions $actions -Console $updateConsole
+Assert ($r.ExitCode -eq 0 -and $script:updatePreviewCalls -eq 1 -and $script:updateApplyCalls -eq 1 -and $script:applyCalls -eq 0) 'confirmed update runs the update backend once, never the mitigation'
+Assert ($script:consoleEvents[0] -like 'Replace runtime*' -and ($script:consoleEvents -join '|') -like '*Type APPLY UPDATE*' -and $script:consoleEvents[-1] -ceq 'READ') 'update preview and typed phrase are shown before reading'
+$script:consoleEvents.Clear()
+$wrongPhrase = @{ IsInteractive = { $true }; Write = { param($Text) $script:consoleEvents.Add([string]$Text) }; ReadLine = { 'APPLY MITIGATION' } }
+$before = $script:updateApplyCalls
+$r = Invoke-EloCli -Arguments $updateArgs -Scanner $scanner -Actions $actions -Console $wrongPhrase
+Assert ($r.ExitCode -ne 0 -and $script:updateApplyCalls -eq $before -and $r.Output -match 'Update cancelled') 'the mitigation phrase cannot authorize an update'
+$script:consoleEvents.Clear()
+$script:applyCalls = 0
 $r = Invoke-InteractiveTestCli -Arguments $modify -Scanner $scanner -Actions $actions
 Assert ($script:consoleEvents[0] -ceq 'Save old value; global effect' -and $script:consoleEvents[2] -ceq 'READ') 'dynamic preview and prompt before input'
 Assert ($r.ExitCode -eq 0 -and $script:applyCalls -eq 1 -and $script:previewCalls -eq 1) 'confirmed trusted action once'

@@ -90,6 +90,39 @@ function Test-EloReportRecoveryPath {
     param($Path)
     return ($Path -is [string] -and $Path.Length -le 1024 -and $Path -cmatch '^[A-Za-z]:\\[^\x00-\x1f\x7f"<>|?*/:]+$' -and $Path -notmatch '(^|\\)\.{1,2}(\\|$)' -and $Path -notmatch '[\r\n]')
 }
+function Get-EloInstalledIndexserverVersion {
+    # Read-only: the installed ELO Indexserver announces its build in
+    # <ELO root>\servers\<instance>\webapps\ix-<repository>\version.txt (first line that starts with
+    # a 25.00.010.476816-style number). No credentials, no network, no service call. Bounded:
+    # at most 20 instances and 20 webapps per root, files of at most 8 MiB read as a stream until the first version line. Returns the highest or $null.
+    param([string[]]$EloRoots)
+    $best=$null; $bestParts=$null
+    foreach ($root in @($EloRoots | Where-Object { $_ } | Select-Object -Unique -First 8)) {
+        try {
+            $servers=Join-Path $root 'servers'
+            if (-not [IO.Directory]::Exists($servers)) { continue }
+            foreach ($instance in @([IO.Directory]::GetDirectories($servers) | Select-Object -First 20)) {
+                $webapps=Join-Path $instance 'webapps'
+                if (-not [IO.Directory]::Exists($webapps)) { continue }
+                foreach ($app in @([IO.Directory]::GetDirectories($webapps,'ix-*') | Select-Object -First 20)) {
+                    $file=Join-Path $app 'version.txt'
+                    $info=New-Object IO.FileInfo($file)
+                    if (-not $info.Exists -or $info.Length -gt 8388608 -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
+                    foreach ($line in [IO.File]::ReadLines($file)) {
+                        if ($line -cmatch '^(\d{2}\.\d{2}\.\d{3}\.\d{1,9})(\s|$)') {
+                            $parts=@($Matches[1].Split('.') | ForEach-Object { [int64]$_ })
+                            $newer=($null -eq $best)
+                            if (-not $newer) { for ($i=0; $i -lt 4; $i++) { if ($parts[$i] -ne $bestParts[$i]) { $newer=($parts[$i] -gt $bestParts[$i]); break } } }
+                            if ($newer) { $best=$Matches[1]; $bestParts=$parts }
+                            break
+                        }
+                    }
+                }
+            }
+        } catch { }
+    }
+    return $best
+}
 function New-EloTechnicalReport {
     param(
         [scriptblock]$ResourceCollector = { Get-EloReportWindowsResources },
@@ -192,9 +225,9 @@ function ConvertTo-EloTechnicalReportHtml {
     foreach ($scope in @('Machine','User','Process')) { if (@('Present','Absent','Conflict','Unknown') -ccontains $Report.Options[$scope]) { $r.Options[$scope]=$Report.Options[$scope] } }
     if ($Report.System.Status -ceq 'Failed') { $r.System.Status='Failed' }
     if ($Report.Elo.Status -ceq 'Failed') { $r.Elo.Status='Failed' }
-    $t=@{Title='Technical report';Server='Server';Windows='Windows version / build';Ram='Total RAM';Disk='Disk: total / free';Jvm='Detected JVM versions';Execution='Execution evidence';Elo='ELO version';Unknown='Unknown / unavailable';Failed='Failed';NotPerformed='Not performed';Proven='Verified';Update='Runtime update';Mitigation='Temporary mitigation';Backup='Backup';Restore='Restore';From='Previous version';To='Verified resulting version';BackupVersion='Verified backup JVM version';Sources='Official information sources';Notice='States reflect supplied verified evidence only. Compatibility, vulnerability and successful remediation are not inferred. No credentials or raw diagnostics are included.';Missing='Missing official installation-specific endpoint, authentication method, version operation and response schema. Java Client IXConnectionIF getVersion/getImplVersion is not a universal REST API contract.'}
+    $t=@{Title='Technical report';Server='Server';Windows='Windows version / build';Ram='Total RAM';Disk='Disk: total / free';Jvm='Detected JVM versions';Execution='Execution evidence';Elo='ELO version (installed Indexserver files)';Unknown='Unknown / unavailable';Failed='Failed';NotPerformed='Not performed';Proven='Verified';Update='Runtime update';Mitigation='Temporary mitigation';Backup='Backup';Restore='Restore';From='Previous version';To='Verified resulting version';BackupVersion='Verified backup JVM version';Sources='Official information sources';Notice='States reflect supplied verified evidence only. Compatibility, vulnerability and successful remediation are not inferred. No credentials or raw diagnostics are included.';Missing='Missing official installation-specific endpoint, authentication method, version operation and response schema. Java Client IXConnectionIF getVersion/getImplVersion is not a universal REST API contract.'}
     if ($Language -eq 'de') {
-        $t=@{Title='Technischer Bericht';Server='Server';Windows='Windows-Version / Build';Ram='Gesamter RAM';Disk='Datentraeger: gesamt / frei';Jvm='Erkannte JVM-Versionen';Execution='Ausfuehrungsnachweis';Elo='ELO-Version';Unknown='Unbekannt / nicht verfuegbar';Failed='Fehlgeschlagen';NotPerformed='Nicht ausgefuehrt';Proven='Nachgewiesen';Update='Runtime-Aktualisierung';Mitigation='Vorlaeufige Risikominderung';Backup='Sicherung';Restore='Wiederherstellung';From='Vorherige Version';To='Nachgewiesene Ergebnisversion';BackupVersion='Nachgewiesene JVM-Version der Sicherung';Sources='Offizielle Informationsquellen';Notice='Statusangaben beruhen nur auf uebergebenen Nachweisen. Kompatibilitaet, Verwundbarkeit und erfolgreiche Behebung werden nicht abgeleitet. Keine Zugangsdaten oder Rohdiagnosen enthalten.';Missing='Offizieller installationsspezifischer Endpunkt, Authentifizierungsmethode, Versionsoperation und Antwortschema fehlen. Java Client IXConnectionIF getVersion/getImplVersion ist kein universeller REST-API-Vertrag.'}
+        $t=@{Title='Technischer Bericht';Server='Server';Windows='Windows-Version / Build';Ram='Gesamter RAM';Disk='Datentraeger: gesamt / frei';Jvm='Erkannte JVM-Versionen';Execution='Ausfuehrungsnachweis';Elo='ELO-Version (installierte Indexserver-Dateien)';Unknown='Unbekannt / nicht verfuegbar';Failed='Fehlgeschlagen';NotPerformed='Nicht ausgefuehrt';Proven='Nachgewiesen';Update='Runtime-Aktualisierung';Mitigation='Vorlaeufige Risikominderung';Backup='Sicherung';Restore='Wiederherstellung';From='Vorherige Version';To='Nachgewiesene Ergebnisversion';BackupVersion='Nachgewiesene JVM-Version der Sicherung';Sources='Offizielle Informationsquellen';Notice='Statusangaben beruhen nur auf uebergebenen Nachweisen. Kompatibilitaet, Verwundbarkeit und erfolgreiche Behebung werden nicht abgeleitet. Keine Zugangsdaten oder Rohdiagnosen enthalten.';Missing='Offizieller installationsspezifischer Endpunkt, Authentifizierungsmethode, Versionsoperation und Antwortschema fehlen. Java Client IXConnectionIF getVersion/getImplVersion ist kein universeller REST-API-Vertrag.'}
     }
     $facts=@{Classification='Vulnerability classification';Evidence='Evidence / method';Association='Runtime association';PotentiallyVulnerable='Potentially vulnerable';NotAffected='Not affected by the matched advisory';Fixed='Fixed version according to matched advisory';AdvisoryRangeMatch='Matched advisory affected-version range';AdvisoryExcludesVersion='Advisory excludes observed version';AdvisoryFixedVersion='Observed version matches advisory fixed release';EffectiveJvmFlagObserved='Effective JVM flag verified';InstalledRuntimeValidated='Installed runtime manifest and version probe verified';BackupManifestMatched='Backup contents matched original manifest';OriginalRuntimeRestored='Original runtime restored and verified';DownloadFailed='Download failed';ValidationFailed='Postcondition validation failed';RestoreFailed='Restoration failed; manual recovery required';OperationCancelled='Operation cancelled';Checked='Source verification date';Fetched='Fetched by parent';Supplied='User-supplied text; site access returned HTTP 403; not independently fetched';Changes='Advisories may change. Source access does not prove applicability or successful remediation.'}
     if ($Language -eq 'de') {
@@ -235,7 +268,7 @@ function ConvertTo-EloTechnicalReportHtml {
         if ($j.Vendor -eq 'Temurin') {
             $advice=$t.Vendor+': Temurin; <a href="https://adoptium.net/temurin/releases">'+$t.Download+'</a>; <a href="https://adoptium.net/installation/">'+$t.Install+'</a>'
         } elseif ($j.Vendor -ceq 'Azul Zulu') {
-            $advice=$t.Vendor+': Azul Zulu. '+$t.Upgrade
+            $advice=$t.Vendor+': Azul Zulu; <a href="https://www.azul.com/downloads/?os=windows&amp;package=jdk">'+$t.Download+'</a>; <a href="https://docs.azul.com/core/install/windows">'+$t.Install+'</a>. '+$t.Upgrade
         }
         $lines.Add('<li>JVM #'+$j.RuntimeIndex+': '+$advice+'</li>')
     }

@@ -22,7 +22,9 @@ Usage (embedded launcher): ELO-Patch-Tools.bat [options]
                           are NOT consent to apply. After the exact dynamic preview,
                           type APPLY MITIGATION at a live interactive console.
                           Denial, EOF, redirected input/output or no console abort.
-  --update-runtime        Separate option: NOT IMPLEMENTED in the CLI (use the web interface); always fails closed.
+  --update-runtime        Separate option: update the selected runtime to the newest release of its branch
+                          (Eclipse Temurin / Azul Zulu). Needs --target N --confirm-admin --confirm-update and
+                          a typed APPLY UPDATE; a verified backup ZIP and automatic rollback are included.
 No credentials, arbitrary commands, downloads, automatic updates or restarts.
 Unknown/duplicate options, conflicting modes and malformed paths are rejected.
 Quote paths with spaces. UNC, relative, device and command-like paths are rejected.
@@ -42,7 +44,7 @@ assessments. Earlier session observations are retained. No credentials are reque
 or stored: an official installation-specific ELO API contract is not verified and
 ELO version remains unknown. Machine-option readback and disposable JVM flag probes
 are separate scopes; neither proves mitigation in the currently running ELO process.
-The CLI never updates a runtime; the web interface offers a confirmed update with verified backup and rollback.
+The CLI updates a runtime only with --update-runtime plus a typed confirmation; the web interface offers the same update step by step.
 CLI JSON and UI JSON exports are raw diagnostics, NOT this sanitized HTML report.
 Review raw exports before sharing; never enter secrets into paths or JVM options.
 
@@ -85,7 +87,7 @@ Manual mitigation and recovery (performed by an authorized administrator):
    backend rollback fails, stop and perform manual recovery before any retry.
 6. For permanent runtime updates consult ELO/vendor support, verify provenance,
    compatibility and architecture, back up the runtime/configuration, and plan and
-   test replacement and restoration. Runtime update is NOT IMPLEMENTED in the CLI; the web interface offers it.
+   test replacement and restoration. Runtime update: use the web interface or --update-runtime (verified backup, rollback and a typed confirmation).
 
 Trusted embedding contract:
 Dot-source this module without side effects. Invoke-EloCli accepts string[] Arguments,
@@ -110,7 +112,7 @@ Invoke-EloCli returns { ExitCode, Output }; the embedding launcher emits Output 
 propagates ExitCode. Direct execution does this too. No sibling files are loaded.
 --no-browser/--keep-temp are returned as launcher hints, not cleanup guarantees.
 Exit codes: 0 success/help/manual; 1 failed/cancelled scan or action; 2 invalid usage;
-3 runtime update not implemented. Only modification requests prompt; no credentials.
+3 reserved. Only modification requests prompt; no credentials.
 '@
 }
 
@@ -140,7 +142,29 @@ function New-EloCliBackendAdapters {
             resultId=$Preview.ResultId; previewId=$Preview.PreviewId; actionId='mitigate'
         })
     }.GetNewClosure()
-    @{ IsAdmin=$admin; Preview=$preview; Apply=$apply }
+    $updatePreview = {
+        param($Result)
+        if ($Session.Worker -or $Session.RecoveryRequired -or $Session.State -ne 'idle') {
+            throw 'fresh_idle_backend_session_required'
+        }
+        $null = ConvertTo-EloUiResults $Session ([pscustomobject]@{ Results=@($Result) })
+        $Session.State = 'completed'
+        $ids = @($Session.Targets.Keys)
+        if ($ids.Count -ne 1) { throw 'backend_target_mapping_failed' }
+        $view = New-EloRuntimeUpdatePreview $Session $ids[0]
+        @{ Summary=$view.summary.en; Warnings=$view.warnings; View=$view
+           ResultId=$ids[0]; PreviewId=$view.previewId }
+    }.GetNewClosure()
+    $updateApply = {
+        param($Preview)
+        if ($Session.RecoveryRequired -or $Session.Worker -or $Session.State -ne 'completed') {
+            throw 'backend_not_ready'
+        }
+        Invoke-EloRuntimeUpdateAction $Session ([pscustomobject]@{
+            resultId=$Preview.ResultId; previewId=$Preview.PreviewId; actionId='update-runtime'
+        })
+    }.GetNewClosure()
+    @{ IsAdmin=$admin; Preview=$preview; Apply=$apply; UpdatePreview=$updatePreview; UpdateApply=$updateApply }
 }
 
 function New-EloCliConsole {
@@ -186,7 +210,7 @@ function Invoke-EloCli {
         $options = @{}
         $allowed = @('--help','--cli','--scan','--json','--no-browser','--keep-temp',
             '--manual-path','--manual','--mitigate','--target','--confirm-admin',
-            '--confirm-mitigation','--update-runtime')
+            '--confirm-mitigation','--confirm-update','--update-runtime')
         for ($i=0; $i -lt $Arguments.Count; $i++) {
             $arg = $Arguments[$i]
             if ($allowed -cnotcontains $arg -or $options.ContainsKey($arg)) { throw 'Unknown or duplicate option.' }
@@ -200,19 +224,19 @@ function Invoke-EloCli {
         }
         $modes = @('--help','--manual','--mitigate','--update-runtime') | Where-Object { $options.ContainsKey($_) }
         if (@($modes).Count -gt 1 -or ($options.ContainsKey('--scan') -and @($modes).Count -gt 0)) { throw 'Conflicting modes.' }
-        if (-not $options.ContainsKey('--mitigate') -and
-            ($options.ContainsKey('--target') -or $options.ContainsKey('--confirm-admin') -or $options.ContainsKey('--confirm-mitigation'))) {
-            throw 'Action arguments require --mitigate.'
+        $isAction = $options.ContainsKey('--mitigate') -or $options.ContainsKey('--update-runtime')
+        if (-not $isAction -and
+            ($options.ContainsKey('--target') -or $options.ContainsKey('--confirm-admin') -or $options.ContainsKey('--confirm-mitigation') -or $options.ContainsKey('--confirm-update'))) {
+            throw 'Action arguments require --mitigate or --update-runtime.'
         }
+        if ($options.ContainsKey('--mitigate') -and $options.ContainsKey('--confirm-update')) { throw 'Use --confirm-mitigation with --mitigate.' }
+        if ($options.ContainsKey('--update-runtime') -and $options.ContainsKey('--confirm-mitigation')) { throw 'Use --confirm-update with --update-runtime.' }
         if ($options.ContainsKey('--help') -or $options.ContainsKey('--manual')) {
             $text = Get-EloCliReadme
             if ($json) { $text = @{ readme=$text } | ConvertTo-Json -Depth 4 }
             return [pscustomobject]@{ ExitCode=0; Output=$text }
         }
         $report.keepTemp = $options.ContainsKey('--keep-temp')
-        if ($options.ContainsKey('--update-runtime')) {
-            $code = 3; throw 'Runtime update not implemented in the CLI. Use the web interface (explicit confirmation, verified backup and rollback).'
-        }
         $manualPath = $null
         if ($options.ContainsKey('--manual-path')) {
             $manualPath = [string]$options['--manual-path']
@@ -222,13 +246,16 @@ function Invoke-EloCli {
                 if ($part -match '[. ]$' -or $part -match '^(?i:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)') { throw 'Invalid path component.' }
             }
         }
-        if ($options.ContainsKey('--mitigate')) {
+        # Both actions share one flow: preview, render, typed confirmation, apply.
+        $kind = 'mitigation'; $confirmFlag = '--confirm-mitigation'; $phrase = 'APPLY MITIGATION'; $previewName = 'Preview'; $applyName = 'Apply'
+        if ($options.ContainsKey('--update-runtime')) { $kind = 'update'; $confirmFlag = '--confirm-update'; $phrase = 'APPLY UPDATE'; $previewName = 'UpdatePreview'; $applyName = 'UpdateApply' }
+        if ($isAction) {
             if (-not $options.ContainsKey('--target') -or [string]$options['--target'] -cnotmatch '^(0|[1-9][0-9]{0,5})$' -or
-                -not $options.ContainsKey('--confirm-admin') -or -not $options.ContainsKey('--confirm-mitigation')) {
-                throw 'Mitigation requires --target N --confirm-admin --confirm-mitigation; read --help first.'
+                -not $options.ContainsKey('--confirm-admin') -or -not $options.ContainsKey($confirmFlag)) {
+                throw ($(if ($kind -eq 'update') { 'Update' } else { 'Mitigation' }) + ' requires --target N --confirm-admin '+$confirmFlag+'; read --help first.')
             }
             $code = 1
-            foreach ($name in @('IsAdmin','Preview','Apply')) {
+            foreach ($name in @('IsAdmin',$previewName,$applyName)) {
                 if ($Actions[$name] -isnot [scriptblock]) { throw 'Trusted action backend not available.' }
             }
             if ((& $Actions.IsAdmin) -ne $true) { throw 'Administrator privileges required.' }
@@ -238,10 +265,11 @@ function Invoke-EloCli {
         if ($null -eq $scan -or $null -eq $scan.Results -or $null -eq $scan.Cancelled) { throw 'Invalid scanner response.' }
         $report.scan = $scan
         if ($scan.Cancelled) { throw 'Scan cancelled; no action performed.' }
-        if ($options.ContainsKey('--mitigate')) {
+        if ($isAction) {
             $index = [int]$options['--target']; $rows = @($scan.Results)
-            if ($index -ge $rows.Count -or $rows[$index].Status -cne 'PotentiallyVulnerable') { throw 'Target not eligible.' }
-            $preview = & $Actions.Preview $rows[$index]
+            # A mitigation needs a potentially vulnerable JVM; an update only needs a runtime the backend can identify.
+            if ($index -ge $rows.Count -or ($kind -eq 'mitigation' -and $rows[$index].Status -cne 'PotentiallyVulnerable')) { throw 'Target not eligible.' }
+            $preview = & $Actions[$previewName] $rows[$index]
             if ($null -eq $preview -or [string]::IsNullOrWhiteSpace([string]$preview.Summary)) { throw 'Backend preview required.' }
             $report.action = @{ preview=$preview; result=$null }
             foreach ($name in @('IsInteractive','Write','ReadLine')) {
@@ -254,12 +282,12 @@ function Invoke-EloCli {
             if ($null -ne $preview.Warnings) {
                 $null = & $Console.Write (ConvertTo-Json -InputObject $preview.Warnings -Depth 10)
             }
-            $null = & $Console.Write 'Type APPLY MITIGATION to authorize this exact preview; anything else cancels:'
+            $null = & $Console.Write ('Type '+$phrase+' to authorize this exact preview; anything else cancels:')
             $answer = & $Console.ReadLine
-            if ($answer -isnot [string] -or $answer -cne 'APPLY MITIGATION') { throw 'Mitigation cancelled; no action performed.' }
+            if ($answer -isnot [string] -or $answer -cne $phrase) { throw ($(if ($kind -eq 'update') { 'Update' } else { 'Mitigation' }) + ' cancelled; no action performed.') }
             if ((& $Actions.IsAdmin) -ne $true) { throw 'Administrator privileges required.' }
             $report.readOnly = $false
-            $result = & $Actions.Apply $preview
+            $result = & $Actions[$applyName] $preview
             $report.action.result = $result
             if ($null -eq $result -or $result.ok -ne $true) { throw 'Backend did not confirm success.' }
         }

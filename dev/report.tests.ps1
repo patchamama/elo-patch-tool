@@ -162,6 +162,7 @@ foreach ($vendor in @('Unknown','Oracle','Temurin','<img>password=secret-token')
 }
 $zuluReport = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='21.0.1+12-LTS';Verified=$true;ExecutionVerified=$true;Vendor='Azul Zulu';VendorVerified=$true})
 Assert ($zuluReport.Jvms[0].Vendor -ceq 'Azul Zulu' -and $zuluReport.Jvms[0].Classification -ceq 'Unknown') 'Zulu vendor survives without fixed classification'
+Assert ((ConvertTo-EloTechnicalReportHtml $zuluReport 'en').Contains('https://docs.azul.com/core/install/windows') -and (ConvertTo-EloTechnicalReportHtml $zuluReport 'de').Contains('https://www.azul.com/downloads/'))  'Zulu report links to the vendor download and installation guide'
 Assert ($zuluReport.Jvms[0].Version -ceq '21.0.1+12-LTS') 'Zulu version survives report sanitization'
 $zuluClaim = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='21.0.13.1+2';Verified=$true;Vendor='Azul Zulu';VendorVerified=$true;Classification='Fixed';ClassificationVerified=$true;EvidenceCode='AdvisoryFixedVersion'})
 Assert ($zuluClaim.Jvms[0].Classification -ceq 'Unknown') 'No unsupported Zulu fixed classification accepted'
@@ -204,4 +205,22 @@ $noRecovery=New-EloTechnicalReport -ResourceCollector $resources -OptionsCollect
 Assert (-not (ConvertTo-EloTechnicalReportHtml $noRecovery en).Contains('Expand-Archive')) 'unverified archive never yields command'
 $conflict=New-EloTechnicalReport -ResourceCollector $resources -OptionsCollector { @{Machine='-XX:-UseBASE64Intrinsics -XX:+UseBASE64Intrinsics';User='-XX:-UseBASE64IntrinsicsExtra';Process=$null} }
 Assert ($conflict.Options.Machine -eq 'Conflict' -and $conflict.Options.User -eq 'Absent' -and $conflict.Options.Process -eq 'Absent') 'conflicts and exact token matching'
+# ELO version from the installed Indexserver files (read-only, bounded, no network).
+$eloScratch=Join-Path ([IO.Path]::GetTempPath()) ('elo-version-test-'+[guid]::NewGuid().ToString('N'))
+try {
+    foreach ($spec in @(@('inst1','ix-a','Change history of ELO Indexserver',"","25.00.010.476816 2025-12-05","24.00.099.1 2024-01-01"), @('inst2','ix-b','x','25.00.011.000002 2026-01-01'), @('inst3','im-ignored','25.99.999.999 2099-01-01'), @('inst4','ix-c','no version here'))) {
+        $dir=Join-Path $eloScratch ('servers\'+$spec[0]+'\webapps\'+$spec[1]); $null=[IO.Directory]::CreateDirectory($dir)
+        [IO.File]::WriteAllLines((Join-Path $dir 'version.txt'),[string[]]$spec[2..($spec.Count-1)])
+    }
+    Assert ((Get-EloInstalledIndexserverVersion @($eloScratch)) -ceq '25.00.011.000002') 'highest installed Indexserver version wins; only ix-* webapps count'
+    Assert ($null -eq (Get-EloInstalledIndexserverVersion @((Join-Path $eloScratch 'missing'),$null,''))) 'no ELO files means unknown, never invented'
+    $big=Join-Path $eloScratch 'servers\inst5\webapps\ix-big'; $null=[IO.Directory]::CreateDirectory($big)
+    [IO.File]::WriteAllText((Join-Path $big 'version.txt'),('x'*(9*1MB))+"`n26.00.000.1`n")
+    Assert ((Get-EloInstalledIndexserverVersion @($eloScratch)) -ceq '25.00.011.000002') 'oversized files are ignored'
+    $withVersion=New-EloTechnicalReport -ResourceCollector $resources -OptionsCollector { $null } -EloVersionAdapter { @{Verified=$true;Version='25.00.011.000002'} }
+    foreach ($lang in @('en','de')) { Assert ((ConvertTo-EloTechnicalReportHtml $withVersion $lang).Contains('25.00.011.000002')) "ELO version rendered ($lang)" }
+} finally {
+    $full=[IO.Path]::GetFullPath($eloScratch)
+    if ($full.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()),[StringComparison]::OrdinalIgnoreCase) -and (Split-Path -Leaf $full) -like 'elo-version-test-*') { Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue }
+}
 Write-Output 'PASS: deterministic bilingual report tests (synthetic adapters only)'
