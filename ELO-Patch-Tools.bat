@@ -1,6 +1,6 @@
 @echo off
 setlocal DisableDelayedExpansion
-rem Single-file integration candidate. Automatic runtime update is unavailable.
+rem Single-file tool. A runtime update runs only after explicit confirmation.
 rem Use normal cmd quoting; do not invoke with CALL (second expansion is unsafe).
 rem For percent-delimited names in the BAT path invoke via a quoted path variable.
 rem Production never overrides execution policy. Extracted scripts must be allowed
@@ -11,7 +11,7 @@ rem Only an ASCII session ID crosses FOR /F; Unicode TEMP paths stay in the envi
 set "ELO_PATCH_BASE=%TEMP%"
 if not defined ELO_PATCH_BASE set "ELO_PATCH_BASE=%TMP%"
 if not defined ELO_PATCH_BASE exit /b 1
-for /f "usebackq delims=" %%D in (`powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $dir=$null; try { $files=@{BOOTSTRAP_PS='launcher.ps1';BACKEND_PS='backend.ps1';SCAN_PS='scan.ps1';SERVER_PS='server.ps1';CLI_PS='cli.ps1';UI_HTML='ui.html';REPORT_PS='report.ps1'}; $blocks=@{}; $active=$null; $buffer=New-Object 'System.Collections.Generic.List[string]'; foreach($line in [IO.File]::ReadAllLines($env:ELO_PATCH_SOURCE,[Text.Encoding]::UTF8)) { if($line.TrimStart().StartsWith('::ELO_PATCH_',[StringComparison]::OrdinalIgnoreCase)) { if($line -cnotmatch '^::ELO_PATCH_(BEGIN|END):(BOOTSTRAP_PS|BACKEND_PS|SCAN_PS|SERVER_PS|CLI_PS|UI_HTML|REPORT_PS)$') { throw 'Malformed extraction marker' }; $kind=$Matches[1]; $name=$Matches[2]; if($kind -ceq 'BEGIN') { if($null -ne $active -or $blocks.ContainsKey($name)) { throw 'Duplicate or nested extraction marker' }; $active=$name; $buffer.Clear() } else { if($active -cne $name) { throw 'Unmatched extraction marker' }; $blocks[$name]=[string]::Join([Environment]::NewLine,$buffer); $active=$null } } elseif($null -ne $active) { $buffer.Add($line) } }; if($null -ne $active -or $blocks.Count -ne $files.Count) { throw 'Missing extraction marker' }; $id=[guid]::NewGuid().ToString('N'); $dir=Join-Path $env:ELO_PATCH_BASE ('elo-patch-'+$id); [void][IO.Directory]::CreateDirectory($dir); foreach($name in $files.Keys) { [IO.File]::WriteAllText((Join-Path $dir $files[$name]),$blocks[$name],[Text.Encoding]::UTF8) }; Write-Output $id } catch { if($null -ne $dir -and [IO.Directory]::Exists($dir)) { [IO.Directory]::Delete($dir,$true) }; [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"`) do set "ELO_PATCH_SESSION=%ELO_PATCH_BASE%\elo-patch-%%D"
+for /f "usebackq delims=" %%D in (`powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $dir=$null; try { $files=@{BOOTSTRAP_PS='launcher.ps1';BACKEND_PS='backend.ps1';SCAN_PS='scan.ps1';SERVER_PS='server.ps1';CLI_PS='cli.ps1';UI_HTML='ui.html';REPORT_PS='report.ps1';UPDATE_PS='update.ps1'}; $blocks=@{}; $active=$null; $buffer=New-Object 'System.Collections.Generic.List[string]'; foreach($line in [IO.File]::ReadAllLines($env:ELO_PATCH_SOURCE,[Text.Encoding]::UTF8)) { if($line.TrimStart().StartsWith('::ELO_PATCH_',[StringComparison]::OrdinalIgnoreCase)) { if($line -cnotmatch '^::ELO_PATCH_(BEGIN|END):(BOOTSTRAP_PS|BACKEND_PS|SCAN_PS|SERVER_PS|CLI_PS|UI_HTML|REPORT_PS|UPDATE_PS)$') { throw 'Malformed extraction marker' }; $kind=$Matches[1]; $name=$Matches[2]; if($kind -ceq 'BEGIN') { if($null -ne $active -or $blocks.ContainsKey($name)) { throw 'Duplicate or nested extraction marker' }; $active=$name; $buffer.Clear() } else { if($active -cne $name) { throw 'Unmatched extraction marker' }; $blocks[$name]=[string]::Join([Environment]::NewLine,$buffer); $active=$null } } elseif($null -ne $active) { $buffer.Add($line) } }; if($null -ne $active -or $blocks.Count -ne $files.Count) { throw 'Missing extraction marker' }; $id=[guid]::NewGuid().ToString('N'); $dir=Join-Path $env:ELO_PATCH_BASE ('elo-patch-'+$id); [void][IO.Directory]::CreateDirectory($dir); foreach($name in $files.Keys) { [IO.File]::WriteAllText((Join-Path $dir $files[$name]),$blocks[$name],[Text.Encoding]::UTF8) }; Write-Output $id } catch { if($null -ne $dir -and [IO.Directory]::Exists($dir)) { [IO.Directory]::Delete($dir,$true) }; [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"`) do set "ELO_PATCH_SESSION=%ELO_PATCH_BASE%\elo-patch-%%D"
 if not defined ELO_PATCH_SESSION exit /b 1
 rem Keep a live console for CLI confirmation; read-only modes never prompt.
 powershell.exe -NoProfile -File "%ELO_PATCH_SESSION%\launcher.ps1" %*
@@ -57,6 +57,7 @@ $script:EloPackagedRoot = $PSScriptRoot
 . (Join-Path $PSScriptRoot 'scan.ps1')
 . (Join-Path $PSScriptRoot 'server.ps1')
 . (Join-Path $PSScriptRoot 'report.ps1')
+. (Join-Path $PSScriptRoot 'update.ps1')
 . (Join-Path $PSScriptRoot 'cli.ps1')
 function New-EloPackagedCliActions {
     param([hashtable]$Session)
@@ -477,7 +478,7 @@ Usage (embedded launcher): ELO-Patch-Tools.bat [options]
                           are NOT consent to apply. After the exact dynamic preview,
                           type APPLY MITIGATION at a live interactive console.
                           Denial, EOF, redirected input/output or no console abort.
-  --update-runtime        Separate option: NOT IMPLEMENTED; always fails closed.
+  --update-runtime        Separate option: NOT IMPLEMENTED in the CLI (use the web interface); always fails closed.
 No credentials, arbitrary commands, downloads, automatic updates or restarts.
 Unknown/duplicate options, conflicting modes and malformed paths are rejected.
 Quote paths with spaces. UNC, relative, device and command-like paths are rejected.
@@ -497,7 +498,7 @@ assessments. Earlier session observations are retained. No credentials are reque
 or stored: an official installation-specific ELO API contract is not verified and
 ELO version remains unknown. Machine-option readback and disposable JVM flag probes
 are separate scopes; neither proves mitigation in the currently running ELO process.
-Automatic runtime update remains disabled; no runtime backup/replacement is claimed.
+The CLI never updates a runtime; the web interface offers a confirmed update with verified backup and rollback.
 CLI JSON and UI JSON exports are raw diagnostics, NOT this sanitized HTML report.
 Review raw exports before sharing; never enter secrets into paths or JVM options.
 
@@ -540,7 +541,7 @@ Manual mitigation and recovery (performed by an authorized administrator):
    backend rollback fails, stop and perform manual recovery before any retry.
 6. For permanent runtime updates consult ELO/vendor support, verify provenance,
    compatibility and architecture, back up the runtime/configuration, and plan and
-   test replacement and restoration. Automatic runtime update is NOT IMPLEMENTED.
+   test replacement and restoration. Runtime update is NOT IMPLEMENTED in the CLI; the web interface offers it.
 
 Trusted embedding contract:
 Dot-source this module without side effects. Invoke-EloCli accepts string[] Arguments,
@@ -666,7 +667,7 @@ function Invoke-EloCli {
         }
         $report.keepTemp = $options.ContainsKey('--keep-temp')
         if ($options.ContainsKey('--update-runtime')) {
-            $code = 3; throw 'Runtime update not implemented: provenance, compatibility, backup, replacement and rollback are not verified.'
+            $code = 3; throw 'Runtime update not implemented in the CLI. Use the web interface (explicit confirmation, verified backup and rollback).'
         }
         $manualPath = $null
         if ($options.ContainsKey('--manual-path')) {
@@ -774,8 +775,9 @@ function New-EloServerSession {
     @{
         Port=$Port; Origin="http://127.0.0.1:$Port"; Token=(New-EloSecret); UiHtml=$UiHtml; ScanSource=$ScanSource
         State='idle'; Results=@(); Targets=@{}; Preview=$null; Worker=$null; Backup=$null; RecoveryRequired=$false; LastError=$null
-        ReportJvms=@(); ReportActions=@(); ReportIndexes=@{}
+        ReportJvms=@(); ReportActions=@(); ReportIndexes=@{}; UpdateContext=$null; ReportRecovery=$null
         Adapters=@{
+            NewUpdateContext={ param($Root,$Runtime) New-EloUpdateContext -Adapters (New-EloWindowsUpdateAdapters -ApprovedRoot $Root -Runtime $Runtime) -Production }
             Admin={ Test-EloAdministrator }; ReadOptions={ Get-EloMachineOptions }
             WriteOptions={ param($Value) Set-EloMachineOptions $Value }
             Fingerprint={ param($Path) Get-EloJavaFingerprint $Path }
@@ -1130,15 +1132,103 @@ function Invoke-EloMitigation {
         EvidenceCode='NewlyLaunchedJvmFlagVerified';EvidenceVerified=$true}
     return @{ok=$true}
 }
+function Stop-EloRequestDetail {
+    param([int]$Status,[string]$Code,[string]$Detail)
+    $e = New-Object System.InvalidOperationException($Code)
+    $e.Data['Status'] = $Status
+    if ($Detail -cmatch '^[A-Za-z0-9_:+.\-]{1,100}$') { $e.Data['Detail'] = $Detail }
+    throw $e
+}
+function ConvertTo-EloUpdateCode {
+    param([string]$Message)
+    $code=([string]$Message -split "`r?`n")[0]
+    if ($code -cmatch '^[a-z0-9_]{1,64}(:[A-Za-z0-9_+.\-]{1,32})?') { return $Matches[0] }
+    return 'update_failed'
+}
+function New-EloRuntimeUpdatePreview {
+    param($Session,[string]$ResultId)
+    $Session.Preview=$null; $Session.UpdateContext=$null
+    if (-not (& $Session.Adapters.Admin)) { Stop-EloRequest 403 'administrator_required' }
+    $target=$Session.Targets[$ResultId]
+    if (-not $target -or $target.Status -cne 'PotentiallyVulnerable' -or $target.Vendor -cne 'Temurin' -or
+        [string]$target.Location -cnotmatch '^[A-Za-z]:\\.+\\bin\\java\.exe$') { Stop-EloRequest 409 'target_not_eligible' }
+    $runtime=[IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName([string]$target.Location))
+    $root=[IO.Path]::GetDirectoryName($runtime)
+    if ([string]::IsNullOrEmpty($root) -or $root.Length -le 3) { Stop-EloRequestDetail 409 'update_preview_refused' 'runtime_not_below_a_directory' }
+    $now=& $Session.Adapters.Clock
+    $stamp=$now.ToString('yyyyMMddHHmmss')
+    $paths=@{Runtime=$runtime;Old=($runtime+'.old-'+$stamp);Stage=($runtime+'.stage-'+$stamp);Backup=($runtime+'.backup-'+$stamp+'.zip');Download=($runtime+'.download-'+$stamp+'.zip')}
+    $release=@(Get-EloVerifiedTemurinReleases)[0]
+    $package=@{}; foreach ($key in @('Vendor','Branch','Architecture','Version','Uri','Sha256')) { $package[$key]=[string]$release[$key] }
+    try {
+        $context=& $Session.Adapters.NewUpdateContext $root $runtime
+        $module=New-EloUpdatePreview -Context $context -Paths $paths -Package $package
+    } catch { Stop-EloRequestDetail 409 'update_preview_refused' (ConvertTo-EloUpdateCode $_.Exception.Message) }
+    $Session.UpdateContext=$context
+    $preview=@{Id=(New-EloSecret);ResultId=$ResultId;ActionId='update-runtime';Module=$module;Paths=$paths;Package=$package
+        JavaPath=[string]$target.Location;FromVersion=[string]$target.FullVersion;Expires=$now.AddMinutes(2)}
+    $Session.Preview=$preview
+    $from=[string]$target.FullVersion; $to=$package.Version
+    $summaryEn="Replace the runtime in $runtime ($from) with Eclipse Temurin $to (windows/x64, SHA256 $($package.Sha256)). Steps: verified ZIP backup $($paths.Backup); pinned HTTPS download; extraction to $($paths.Stage); Java self-test; rename old runtime to $($paths.Old); install; re-test. Any failure restores the old runtime. The old runtime and the backup are kept; nothing is deleted."
+    $summaryDe="Runtime in $runtime ($from) durch Eclipse Temurin $to (windows/x64, SHA256 $($package.Sha256)) ersetzen. Schritte: geprueftes ZIP-Backup $($paths.Backup); festgelegter HTTPS-Download; Entpacken nach $($paths.Stage); Java-Selbsttest; alte Runtime nach $($paths.Old) umbenennen; installieren; erneut testen. Bei jedem Fehler wird die alte Runtime wiederhergestellt. Alte Runtime und Backup bleiben erhalten; es wird nichts geloescht."
+    return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe};warnings=@(
+        @{en='ELO compatibility with this runtime is NOT verified; the update can affect ELO support. Confirming accepts this risk. A running ELO service or Java process using this runtime blocks the update; stop them first. No service is stopped or restarted by this tool.';de='Die ELO-Kompatibilitaet dieser Runtime ist NICHT geprueft; das Update kann den ELO-Support beeintraechtigen. Mit der Bestaetigung wird dieses Risiko akzeptiert. Ein laufender ELO-Dienst oder Java-Prozess mit dieser Runtime blockiert das Update; zuerst beenden. Dieses Werkzeug beendet oder startet keine Dienste.'}
+        @{en='The download is limited to the pinned official Eclipse Adoptium release and its published SHA256. Installing the vendor package with its installer remains the preferred long-term fix.';de='Der Download ist auf die festgelegte offizielle Eclipse-Adoptium-Version und ihre veroeffentlichte SHA256 beschraenkt. Die Installation des Herstellerpakets mit dem Installer bleibt die bevorzugte langfristige Loesung.'})}
+}
+function Add-EloUpdateReportActions {
+    param($Session,[string]$Outcome,$Preview,[int]$RuntimeIndex,[string]$FailureCode)
+    $from=$Preview.FromVersion; $to=$Preview.Package.Version
+    if ($Outcome -in @('Success','SimulatedSuccess','RolledBack','ManualRecoveryRequired')) {
+        $Session.ReportActions+=@{Kind='Backup';Status='Proven';Verified=$true;BackupVerified=$true;RuntimeIndex=$RuntimeIndex;EvidenceCode='BackupManifestMatched';EvidenceVerified=$true;FromVersion=$from;BackupVersion=$from}
+        $Session.ReportRecovery=@{Validated=$true;RuntimeIndex=$RuntimeIndex;Archive=$Preview.Paths.Backup;Original=$Preview.Paths.Runtime;Destination=($Preview.Paths.Runtime+'.restore')}
+    }
+    switch ($Outcome) {
+        { $_ -in @('Success','SimulatedSuccess') } { $Session.ReportActions+=@{Kind='Update';Status='Proven';Verified=$true;RuntimeIndex=$RuntimeIndex;EvidenceCode='InstalledRuntimeValidated';EvidenceVerified=$true;FromVersion=$from;ToVersion=$to} }
+        'RolledBack' {
+            $Session.ReportActions+=@{Kind='Update';Status='Failed';RuntimeIndex=$RuntimeIndex;EvidenceCode='ValidationFailed';EvidenceVerified=$true}
+            $Session.ReportActions+=@{Kind='Restore';Status='Proven';Verified=$true;RuntimeIndex=$RuntimeIndex;EvidenceCode='OriginalRuntimeRestored';EvidenceVerified=$true;FromVersion=$to;ToVersion=$from}
+        }
+        'ManualRecoveryRequired' {
+            $Session.ReportActions+=@{Kind='Update';Status='Failed';RuntimeIndex=$RuntimeIndex;EvidenceCode='ValidationFailed';EvidenceVerified=$true}
+            $Session.ReportActions+=@{Kind='Restore';Status='Failed';RuntimeIndex=$RuntimeIndex;EvidenceCode='RestoreFailed';EvidenceVerified=$true}
+        }
+        default {
+            $code='ValidationFailed'; if ($FailureCode -cmatch '^(download|package_verification|unverified_https|unverified_response|truncated|redirect)') { $code='DownloadFailed' }
+            $Session.ReportActions+=@{Kind='Update';Status='Failed';RuntimeIndex=$RuntimeIndex;EvidenceCode=$code;EvidenceVerified=$true}
+        }
+    }
+}
+function Invoke-EloRuntimeUpdateAction {
+    param($Session,$Body)
+    $preview=$Session.Preview; $Session.Preview=$null # consume even on failure
+    $context=$Session.UpdateContext; $Session.UpdateContext=$null
+    if (-not $preview -or -not $context -or $preview.ActionId -cne 'update-runtime' -or $preview.Id -cne $Body.previewId -or
+        $preview.ResultId -cne $Body.resultId -or $Body.actionId -cne 'update-runtime' -or (& $Session.Adapters.Clock) -ge $preview.Expires) { Stop-EloRequest 409 'preview_expired_or_mismatched' }
+    if (-not (& $Session.Adapters.Admin)) { Stop-EloRequest 403 'administrator_required' }
+    $target=$Session.Targets[$Body.resultId]
+    if (-not $target -or $target.Location -cne $preview.JavaPath -or $target.Status -cne 'PotentiallyVulnerable') { Stop-EloRequest 409 'stale_preview' }
+    $index=[int]$Session.ReportIndexes[$Body.resultId]
+    $module=$preview.Module
+    # The UI confirmation states the unverified-compatibility risk; it authorises all module confirmations.
+    $result=Invoke-EloRuntimeUpdate -Context $context -Confirmation $module.Confirmation -BranchConfirmation $module.BranchConfirmation -CompatibilityConfirmation $module.CompatibilityConfirmation
+    $failure=ConvertTo-EloUpdateCode $result.Error
+    Add-EloUpdateReportActions $Session ([string]$result.Status) $preview $index $failure
+    switch ([string]$result.Status) {
+        { $_ -in @('Success','SimulatedSuccess') } { return @{ok=$true} }
+        'RolledBack' { Stop-EloRequestDetail 422 'update_failed_rolled_back' $failure }
+        'ManualRecoveryRequired' { $Session.State='error'; $Session.RecoveryRequired=$true; Stop-EloRequestDetail 500 'update_manual_recovery_required' $failure }
+        default { Stop-EloRequestDetail 422 'update_rejected_no_change' $failure }
+    }
+}
 function Get-EloSessionReportHtml {
     param($Session,[ValidateSet('en','de')][string]$Language)
-    $report=New-EloTechnicalReport -ResourceCollector $Session.Adapters.Resources -OptionsCollector $Session.Adapters.ReportOptions -JvmEvidence $Session.ReportJvms -Actions $Session.ReportActions
+    $report=New-EloTechnicalReport -ResourceCollector $Session.Adapters.Resources -OptionsCollector $Session.Adapters.ReportOptions -JvmEvidence $Session.ReportJvms -Actions $Session.ReportActions -RecoveryEvidence $Session.ReportRecovery
     $html=ConvertTo-EloTechnicalReportHtml $report -Language $Language
     $states=@{idle='Ready';scanning='Scanning';cancelling='Cancelling';completed='Completed';cancelled='Cancelled';error='Failed'}
-    $notice='Session scan state: '; $scope='Session observations (including earlier scans); only a completed scan is a complete snapshot. Automatic runtime update is disabled. ELO API support and running ELO process mitigation are not verified.'
+    $notice='Session scan state: '; $scope='Session observations (including earlier scans); only a completed scan is a complete snapshot. A runtime update is performed only after explicit confirmation. ELO API support and running ELO process mitigation are not verified.'
     if ($Language -eq 'de') {
         $states=@{idle='Bereit';scanning='Scan laeuft';cancelling='Abbruch angefordert';completed='Abgeschlossen';cancelled='Abgebrochen';error='Fehlgeschlagen'}
-        $notice='Scanstatus der Sitzung: '; $scope='Sitzungsnachweise (auch fruehere Scans); nur ein abgeschlossener Scan ist eine vollstaendige Momentaufnahme. Automatisches Runtime-Update ist deaktiviert. ELO-API-Unterstuetzung und Risikominderung im laufenden ELO-Prozess sind nicht nachgewiesen.'
+        $notice='Scanstatus der Sitzung: '; $scope='Sitzungsnachweise (auch fruehere Scans); nur ein abgeschlossener Scan ist eine vollstaendige Momentaufnahme. Ein Runtime-Update erfolgt nur nach ausdruecklicher Bestaetigung. ELO-API-Unterstuetzung und Risikominderung im laufenden ELO-Prozess sind nicht nachgewiesen.'
     }
     $state=$states[$Session.State]; if (-not $state) { $state='Unknown / Unbekannt' }
     # A failed rollback can invalidate earlier machine-option evidence. Do not
@@ -1186,9 +1276,12 @@ function Invoke-EloApi {
             $body=ConvertFrom-EloBody $Request.Body -Required $required
             foreach ($key in $required) { if ($body.$key -cnotmatch '^[A-Za-z0-9_-]{1,128}$') { Stop-EloRequest 400 'invalid_id' } }
             if ($body.actionId -cnotin @('mitigate','update-runtime')) { Stop-EloRequest 400 'invalid_action' }
-            if ($body.actionId -ceq 'update-runtime') { $Session.Preview=$null; Stop-EloRequest 503 'update_unavailable_provenance_compatibility_backup_replacement_rollback_not_verified' }
             if ($Session.RecoveryRequired) { Stop-EloRequest 409 'manual_recovery_required_close_session' }
             if ($Session.State -cne 'completed' -or $Session.Worker) { Stop-EloRequest 409 'completed_scan_required' }
+            if ($body.actionId -ceq 'update-runtime') {
+                if ($Request.Target -ceq '/api/preview') { return New-EloRuntimeUpdatePreview $Session $body.resultId }
+                return Invoke-EloRuntimeUpdateAction $Session $body
+            }
             if ($Request.Target -ceq '/api/preview') { return New-EloMitigationPreview $Session $body.resultId }
             return Invoke-EloMitigation $Session $body
         }
@@ -1257,6 +1350,13 @@ function ConvertTo-EloErrorResponse {
         'scan_incomplete' { $warnings+=@{en='The scan encountered inaccessible/skipped locations or traversal limits. Results are not a complete assessment. Select a narrower accessible local root; review permissions without bypassing access controls.';de='Der Scan traf auf unzugaengliche/uebersprungene Orte oder Suchgrenzen. Keine vollstaendige Bewertung. Engeren zugaenglichen lokalen Suchpfad waehlen und Berechtigungen pruefen, ohne Zugriffsschutz zu umgehen.'} }
         'inaccessible_path' { $warnings+=@{en='The selected local directory is missing or inaccessible. Select an accessible directory and check permissions.';de='Das ausgewaehlte lokale Verzeichnis fehlt oder ist unzugaenglich. Zugaengliches Verzeichnis waehlen und Berechtigungen pruefen.'} }
         'update_unavailable_provenance_compatibility_backup_replacement_rollback_not_verified' { $warnings+=@{en='Automatic runtime update is unavailable: provenance, ELO compatibility, validated backups, reversible replacement and rollback guarantees are not implemented and verified. Nothing was downloaded or replaced.';de='Automatisches Laufzeit-Update nicht verfuegbar: Herkunft, ELO-Kompatibilitaet, validierte Sicherung, reversible Ersetzung und Wiederherstellung sind nicht implementiert und geprueft. Nichts heruntergeladen oder ersetzt.'} }
+    }
+    $detail=''; if ($cursor -and $cursor.Data.Contains('Detail')) { $detail=' ['+[string]$cursor.Data['Detail']+']' }
+    switch ($code) {
+        'update_preview_refused' { $warnings+=@{en="The runtime update cannot be offered for this JVM (only Eclipse Temurin 17 x64 below a dedicated directory, stopped, writable, with enough disk space).$detail Nothing was downloaded or changed.";de="Das Runtime-Update kann fuer diese JVM nicht angeboten werden (nur Eclipse Temurin 17 x64 unterhalb eines eigenen Verzeichnisses, beendet, beschreibbar, genug Speicherplatz).$detail Nichts wurde heruntergeladen oder geaendert."} }
+        'update_rejected_no_change' { $warnings+=@{en="The update was rejected before the runtime was replaced.$detail The original runtime is unchanged.";de="Das Update wurde abgelehnt, bevor die Runtime ersetzt wurde.$detail Die urspruengliche Runtime ist unveraendert."} }
+        'update_failed_rolled_back' { $warnings+=@{en="The new runtime failed validation.$detail The original runtime was restored and verified; the failed runtime and the backup ZIP were kept.";de="Die neue Runtime bestand die Pruefung nicht.$detail Die urspruengliche Runtime wurde wiederhergestellt und geprueft; fehlgeschlagene Runtime und Backup-ZIP bleiben erhalten."} }
+        'update_manual_recovery_required' { $warnings+=@{en="Automatic restore failed.$detail Further actions are locked. Restore manually from the backup ZIP using the commands in the technical report.";de="Automatische Wiederherstellung fehlgeschlagen.$detail Weitere Aktionen sind gesperrt. Manuell aus dem Backup-ZIP wiederherstellen; Befehle stehen im technischen Bericht."} }
     }
     return @{Status=$status;Body=@{error=$code;warnings=@($warnings)}}
 }
@@ -1465,6 +1565,7 @@ const messages = {
  accessDenied:'Access denied. Check elevation and filesystem/registry permissions without bypassing access controls. No protection is claimed.',
  adminNeeded:'Mitigation requires an elevated administrator session. Read-only scanning does not require elevation. This is not a session-token error.',
  boundaryRejected:'The local service rejected the request boundary. Reopen the original local session link; do not bypass origin or host checks.',
+ updateRefused:'The runtime update cannot be offered for this JVM. Nothing was downloaded or changed.',updateRejected:'The update was rejected before the runtime was replaced. The original runtime is unchanged.',updateRolledBack:'The new runtime failed validation. The original runtime was restored and verified; the failed runtime and the backup ZIP were kept.',updateManualRecovery:'Automatic restore failed. Manual recovery from the backup ZIP is required (see the technical report).',
  rollbackFailed:'Rollback failed — manual recovery is required.',manualRecovery:'Manual recovery is required before any further change.',
  recoveryGuidance:'CRITICAL: JAVA_TOOL_OPTIONS may still be changed. Further requests that could change state are locked in this page. Restore the exact previous value AND registry type saved from the preview using an approved Registry Editor procedure, with your administrator. Verify manually before closing this session and starting another. Opening a new session alone does not restore the environment. Existing JVM protection is not claimed.',
  rolledBack:'Verification failed. The exact previous environment value and registry type were restored and read back. No protection is claimed.',
@@ -1507,6 +1608,7 @@ const messages = {
  accessDenied:'Zugriff verweigert. Administratorrechte und Datei-/Registrierungsberechtigungen prüfen, ohne den Zugriffsschutz zu umgehen. Kein Schutz zugesichert.',
  adminNeeded:'Risikominderung erfordert eine erhöhte Administratorsitzung. Schreibgeschützte Scans benötigen keine Erhöhung. Dies ist kein Sitzungstoken-Fehler.',
  boundaryRejected:'Der lokale Dienst hat die Anfragegrenzen abgelehnt. Öffnen Sie den ursprünglichen lokalen Sitzungslink erneut; Herkunfts- und Host-Prüfungen nicht umgehen.',
+ updateRefused:'Das Runtime-Update kann für diese JVM nicht angeboten werden. Nichts wurde heruntergeladen oder geändert.',updateRejected:'Das Update wurde abgelehnt, bevor die Runtime ersetzt wurde. Die ursprüngliche Runtime ist unverändert.',updateRolledBack:'Die neue Runtime bestand die Prüfung nicht. Die ursprüngliche Runtime wurde wiederhergestellt und geprüft; fehlgeschlagene Runtime und Backup-ZIP bleiben erhalten.',updateManualRecovery:'Automatische Wiederherstellung fehlgeschlagen. Manuelle Wiederherstellung aus dem Backup-ZIP ist erforderlich (siehe technischer Bericht).',
  rollbackFailed:'Wiederherstellung fehlgeschlagen — manuelle Wiederherstellung erforderlich.',manualRecovery:'Vor weiteren Änderungen ist eine manuelle Wiederherstellung erforderlich.',
  recoveryGuidance:'KRITISCH: JAVA_TOOL_OPTIONS ist möglicherweise noch geändert. Weitere zustandsändernde Anfragen sind auf dieser Seite gesperrt. Stellen Sie mit Ihrem Administrator den exakten alten Wert UND Registrierungstyp aus der Vorschau mit einem freigegebenen Registrierungseditor-Verfahren wieder her. Vor dem Schließen dieser Sitzung und dem Start einer neuen Sitzung manuell prüfen. Eine neue Sitzung allein stellt die Umgebung nicht wieder her. Kein Schutz bestehender JVMs zugesichert.',
  rolledBack:'Prüfung fehlgeschlagen. Der exakte alte Umgebungswert und Registrierungstyp wurden wiederhergestellt und zurückgelesen. Kein Schutz zugesichert.',
@@ -1575,6 +1677,7 @@ const errorMessages = Object.fromEntries(Object.entries({
  auth:['authentication_required'],accessDenied:['access_denied'],adminNeeded:['administrator_required'],
  boundaryRejected:['loopback_only','host_rejected','origin_rejected','cross_site','origin_required'],
  expired:['preview_expired_or_mismatched','stale_preview'],
+ updateRefused:['update_preview_refused'],updateRejected:['update_rejected_no_change'],updateRolledBack:['update_failed_rolled_back'],updateManualRecovery:['update_manual_recovery_required'],
  rollbackFailed:['rollback_failed_manual_recovery_required'],manualRecovery:['manual_recovery_required_close_session'],
  rolledBack:['verification_failed_rolled_back'],probeFailed:['probe_failed_no_change'],
  updateUnavailable:['update_unavailable_provenance_compatibility_backup_replacement_rollback_not_verified'],
@@ -1584,7 +1687,7 @@ const errorMessages = Object.fromEntries(Object.entries({
  optionsUnsupported:['unsupported_environment_type','unsupported_options','ambiguous_option_quoting','malformed_option_quoting','ambiguous_intrinsics_option','ambiguous_jvm_options','ambiguous_environment_expansion'],
  failed:['operation_failed','scan_failed','unknown_route','method_rejected','unexpected_body','json_required','invalid_id','invalid_action','invalid_json','invalid_parameters','missing_parameter','request_timeout','incomplete_request','invalid_header','headers_too_large','invalid_request_line','duplicate_header','unsupported_framing','invalid_length','length_required','body_too_large','incomplete_body','invalid_utf8']
 }).flatMap(([key,codes]) => codes.map(code => [code,key])));
-const recoveryCodes = ['rollback_failed_manual_recovery_required','manual_recovery_required_close_session'];
+const recoveryCodes = ['rollback_failed_manual_recovery_required','manual_recovery_required_close_session','update_manual_recovery_required'];
 class ApiFailure extends Error {
  constructor(key,warnings = [],recovery = false) { super(key); this.key = key; this.warnings = warnings; this.recovery = recovery; }
 }
@@ -1924,7 +2027,7 @@ function New-EloTechnicalReport {
     $recovery=@{Available=$false;Archive=$null;Original=$null;Destination=$null}
     $failedUpdates=@($normalized | Where-Object { $_.Kind -eq 'Update' -and $_.Status -eq 'Failed' -and $null -ne $_.RuntimeIndex })
     $backups=@($normalized | Where-Object { $_.Kind -eq 'Backup' -and $_.Status -eq 'Proven' -and $_.RuntimeIndex -eq $RecoveryEvidence.RuntimeIndex })
-    if ((Test-EloReportProof $RecoveryEvidence.Validated) -and $backups.Count -gt 0 -and @($failedUpdates | Where-Object { $_.RuntimeIndex -eq $RecoveryEvidence.RuntimeIndex }).Count -gt 0 -and (Test-EloReportRecoveryPath $RecoveryEvidence.Archive) -and (Test-EloReportRecoveryPath $RecoveryEvidence.Original) -and (Test-EloReportRecoveryPath $RecoveryEvidence.Destination) -and $RecoveryEvidence.Archive -match '(?i)\.zip$' -and $RecoveryEvidence.Destination -ine $RecoveryEvidence.Original -and -not $RecoveryEvidence.Destination.StartsWith($RecoveryEvidence.Original.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -and -not $RecoveryEvidence.Original.StartsWith($RecoveryEvidence.Destination.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)) {
+    if ((Test-EloReportProof $RecoveryEvidence.Validated) -and $backups.Count -gt 0 -and (Test-EloReportRecoveryPath $RecoveryEvidence.Archive) -and (Test-EloReportRecoveryPath $RecoveryEvidence.Original) -and (Test-EloReportRecoveryPath $RecoveryEvidence.Destination) -and $RecoveryEvidence.Archive -match '(?i)\.zip$' -and $RecoveryEvidence.Destination -ine $RecoveryEvidence.Original -and -not $RecoveryEvidence.Destination.StartsWith($RecoveryEvidence.Original.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -and -not $RecoveryEvidence.Original.StartsWith($RecoveryEvidence.Destination.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)) {
         $recovery=@{Available=$true;Validated=$true;RuntimeIndex=$RecoveryEvidence.RuntimeIndex;Archive=$RecoveryEvidence.Archive;Original=$RecoveryEvidence.Original;Destination=$RecoveryEvidence.Destination}
     }
     @{System=$system;Jvms=$jvms;Actions=$normalized;Elo=$elo;Options=$options;Recovery=$recovery}
@@ -2010,15 +2113,25 @@ function ConvertTo-EloTechnicalReportHtml {
     if ($Language -eq 'de') { $optionLabels=@{Present='Flag vorhanden';Absent='Flag nicht vorhanden';Conflict='Konfligierendes aktivierendes Flag vorhanden';Unknown='Unbekannt / nicht verfuegbar'} }
     foreach ($scope in @('Machine','User','Process')) { $lines.Add('<li>'+$scope+': '+$optionLabels[$r.Options[$scope]]+'</li>') }
     if ($Language -eq 'de') { $lines.Add('</ul><p>Umgebungswerte beweisen keinen Schutz bestehender ELO-Prozesse.</p>') } else { $lines.Add('</ul><p>Environment values do not prove protection of existing ELO processes.</p>') }
-    if (@($r.Actions | Where-Object { $_.Kind -eq 'Update' -and $_.Status -eq 'Failed' }).Count -gt 0) {
-        if ($Language -eq 'de') { $lines.Add('<h2>Manuelle Wiederherstellung</h2><p>Keine Wiederherstellungs-CLI verfuegbar. Fehlgeschlagene Runtime behalten oder umbenennen, nicht loeschen; Wiederherstellung kontrolliert manuell durchfuehren.</p>') }
-        else { $lines.Add('<h2>Manual recovery</h2><p>No restore CLI available. Retain or rename the failed runtime, do not delete it; perform a controlled manual restore.</p>') }
+    if (@($r.Actions | Where-Object { $_.Kind -eq 'Update' -and $_.Status -eq 'Failed' }).Count -gt 0 -or @($r.Actions | Where-Object { $_.Kind -eq 'Backup' -and $_.Status -eq 'Proven' }).Count -gt 0) {
+        if ($Language -eq 'de') { $lines.Add('<h2>Manuelle Wiederherstellung</h2><p>Falls die Aktualisierung fehlschlaegt oder die alte Java-Version wieder benoetigt wird: ELO-Dienste und Java-Prozesse beenden, neue Runtime entfernen und die gesicherte Version aus dem Backup-ZIP zurueckspielen. Backup-ZIP und alte Runtime werden von diesem Werkzeug nie geloescht.</p>') }
+        else { $lines.Add('<h2>Manual recovery</h2><p>If the update fails, or the previous Java version is needed again: stop the ELO services and Java processes, remove the new runtime and restore the saved version from the backup ZIP. This tool never deletes the backup ZIP or the old runtime.</p>') }
         # Revalidate the trusted evidence against the normalized actions before rendering.
         $rr=New-EloTechnicalReport -ResourceCollector { $null } -OptionsCollector { $null } -JvmEvidence @($Report.Jvms | ForEach-Object { @{Version=$_.Version;Verified=($_.Status -ceq 'Proven')} }) -Actions $Report.Actions -RecoveryEvidence $Report.Recovery
         if ($rr.Recovery.Available) {
             $rec=$rr.Recovery
-            $cmd="Expand-Archive -LiteralPath '"+$rec.Archive.Replace("'","''")+"' -DestinationPath '"+$rec.Destination.Replace("'","''")+"'"
-            $lines.Add('<p>Original: '+(ConvertTo-EloReportEscapedText $rec.Original)+'</p><pre>'+(ConvertTo-EloReportEscapedText $cmd)+'</pre>')
+            $q={ param($s) "'"+$s.Replace("'","''")+"'" }
+            $cmd=@('# PowerShell (run as administrator)',
+                'Remove-Item -LiteralPath '+(& $q $rec.Original)+' -Recurse -Force',
+                'Expand-Archive -LiteralPath '+(& $q $rec.Archive)+' -DestinationPath '+(& $q $rec.Destination),
+                'Move-Item -LiteralPath '+(& $q ($rec.Destination.TrimEnd('\')+'\tree'))+' -Destination '+(& $q $rec.Original),
+                '',
+                'REM cmd.exe (run as administrator)',
+                'rmdir /s /q "'+$rec.Original+'"',
+                'mkdir "'+$rec.Destination+'"',
+                'tar -xf "'+$rec.Archive+'" -C "'+$rec.Destination+'"',
+                'move "'+$rec.Destination.TrimEnd('\')+'\tree" "'+$rec.Original+'"') -join "`r`n"
+            $lines.Add('<p>Original: '+(ConvertTo-EloReportEscapedText $rec.Original)+'</p><p>ZIP: '+(ConvertTo-EloReportEscapedText $rec.Archive)+'</p><pre>'+(ConvertTo-EloReportEscapedText $cmd)+'</pre>')
         } else { $lines.Add('<p>'+$t.Unknown+'</p>') }
     }
     $lines.Add('<h2>'+$t.Sources+'</h2><ul>')
@@ -2030,3 +2143,807 @@ function ConvertTo-EloTechnicalReportHtml {
     return ($lines -join "`r`n")
 }
 ::ELO_PATCH_END:REPORT_PS
+
+::ELO_PATCH_BEGIN:UPDATE_PS
+# Embeddable Windows PowerShell 5.1 module: dot-sourcing defines functions ONLY.
+# Loading defines functions only. Windows adapters are opt-in; no service control
+# or deletion. Production is unavailable: executable release/host/archive policy
+# allowlist is EMPTY; API metadata alone is not approval. Live filesystem and
+# quiescence proof is missing. Compatibility is not
+# guaranteed: explicit risk acceptance is required. Adapters are trusted code.
+#
+# Backend seam (not wired into server.ps1): dot-source this packaged resource;
+# New-EloUpdateContext; New-EloUpdatePreview; Invoke-EloRuntimeUpdate.
+# For future production wiring: $adapters=New-EloWindowsUpdateAdapters
+# -ApprovedRoot <explicitly selected local parent> -Runtime <selected runtime>;
+# $context=New-EloUpdateContext -Adapters $adapters (NO -Simulation). This still
+# rejects production; do not bypass the gate by using -Simulation with real IO.
+# Pass each preview token to Invoke-EloRuntimeUpdate only AFTER the corresponding
+# explicit user approval: -Confirmation, -BranchConfirmation (if requested), and
+# -CompatibilityConfirmation (if requested). No route changes are made here.
+# Keep Context server-side, serialize only preview/result, and obtain a fresh
+# explicit confirmation through the authenticated backend. Never accept adapters,
+# evidence, package metadata, or paths directly from an HTTP client.
+#
+# Adapter contract (all methods must throw on failure; predicates return bool):
+# Clock -> UTC DateTime; Admin -> bool; Inspect(runtime) -> exact vendor, branch,
+# architecture and whole-tree fingerprint (including ACLs; reject reparse points).
+# Evidence(detected,package) -> Official, Compatibility, PublishedHash booleans:
+# independently authenticate official HTTPS metadata and published SHA256, exact
+# vendor/branch/architecture/version. Compatibility=false requires risk approval.
+# Preflight(paths) -> SafePaths, Quiescent, Permissions, Space booleans: local
+# disjoint paths on one volume; stage/old/download/ZIP must not exist; no ancestor
+# reparse points; exclusive lock held through transaction, stopped runtime, full
+# tree readable and writable, conservative space for ZIP+stage+old+recovery.
+# Backup(paths) writes ZIP before mutation; VerifyBackup(paths,detected) reopens
+# ZIP and compares every entry/hash/ACL manifest against the original tree.
+# Download(package,paths) HTTPS only, no insecure redirects; VerifyPackage checks
+# exact bytes against the independently authenticated published SHA256.
+# Stage rejects ZIP traversal, links, duplicate entries and decompression bombs;
+# extracts only into isolated staging and verifies full copy manifest.
+# Probe(stage,package) runs ONLY staged bin\java.exe -version, bounded time/output,
+# sanitized environment; checks exact detected vendor/version/architecture.
+# Preserve(paths) same-volume rename runtime -> old, never overwrite old.
+# Replace(paths) same-volume rename staged runtime -> runtime, never delete old.
+# ValidateInstalled(paths,package) full manifest + bounded java -version probe.
+# Restore(paths) must tolerate partially successful renames, preserve failed new
+# tree, restore old (or verified ZIP), including ACLs, never delete recovery data.
+# VerifyRestored(paths,detected) exact original manifest and java -version.
+# Tests exercise mocks and memory-only helpers, NOT live integration proof.
+
+# A Java 5-compatible console class, assembled in memory, with no libraries beyond
+# the Java standard runtime. It exercises integer division and prints a marker.
+# This is an inert payload: it is not written or executed by this module. In
+# particular, it is NOT proof of ELO compatibility or of a safe replacement.
+function Get-EloJavaSelfTestClass {
+    $bytes=New-Object 'System.Collections.Generic.List[byte]'
+    $add={ param([byte[]]$Data) $bytes.AddRange($Data) }
+    $utf={ param([string]$Text)
+        $encoded=[Text.Encoding]::ASCII.GetBytes($Text)
+        $bytes.Add(1); $bytes.Add([byte]($encoded.Length -shr 8)); $bytes.Add([byte]($encoded.Length -band 255)); $bytes.AddRange($encoded)
+    }
+    & $add ([byte[]](0xca,0xfe,0xba,0xbe,0,0,0,49,0,22))
+    & $utf 'EloJavaSelfTest'; & $add ([byte[]](7,0,1))
+    & $utf 'java/lang/Object'; & $add ([byte[]](7,0,3))
+    & $utf 'main'; & $utf '([Ljava/lang/String;)V'; & $utf 'Code'
+    & $utf 'java/lang/System'; & $add ([byte[]](7,0,8))
+    & $utf 'out'; & $utf 'Ljava/io/PrintStream;'
+    & $add ([byte[]](12,0,10,0,11,9,0,9,0,12))
+    & $utf 'java/io/PrintStream'; & $add ([byte[]](7,0,14))
+    & $utf 'println'; & $utf '(Ljava/lang/String;)V'
+    & $add ([byte[]](12,0,16,0,17,10,0,15,0,18))
+    & $utf 'ELO_JAVA_SELF_TEST_OK'; & $add ([byte[]](8,0,20))
+    # public class; public static main; 1/1, pop, println(marker), return.
+    & $add ([byte[]](0,33,0,2,0,4,0,0,0,0,0,1,0,9,0,5,0,6,0,1,0,7,
+        0,0,0,25,0,2,0,1,0,0,0,13,4,4,108,87,178,0,13,18,21,182,0,19,177,
+        0,0,0,0,0,0))
+    return ,$bytes.ToArray()
+}
+function Test-EloJavaSelfTestResult {
+    param([int]$ExitCode,[string]$StandardOutput,[string]$StandardError)
+    return ($ExitCode -eq 0 -and $StandardError -ceq '' -and
+        ($StandardOutput -ceq "ELO_JAVA_SELF_TEST_OK`n" -or $StandardOutput -ceq "ELO_JAVA_SELF_TEST_OK`r`n"))
+}
+
+# Mockable orchestration only: adapters are trusted, nonblocking code. Start must
+# create the unique directory exclusively, write the supplied class there and run
+# only JavaPath with an isolated classpath and sanitized environment. Poll returns
+# bounded incremental output; Stop terminates/reaps and retains session artifacts.
+# No real adapter is provided: this function is not production safety proof.
+function Invoke-EloJavaSelfTest {
+    param([Parameter(Mandatory=$true)][string]$JavaPath,
+        [Parameter(Mandatory=$true)][string]$SessionRoot,
+        [Parameter(Mandatory=$true)][hashtable]$Adapter,
+        [int]$TimeoutMilliseconds=10000,[int]$MaximumOutputCharacters=16384)
+    if ($JavaPath -notmatch '^[A-Za-z]:\\[^\r\n"*?]+\\java\.exe$' -or $JavaPath -match '(^|\\)\.\.?($|\\)') { throw 'absolute_java_path_required' }
+    if ($SessionRoot -notmatch '^[A-Za-z]:\\[^\r\n"*?]+$' -or $SessionRoot -match '(^|\\)\.\.?($|\\)') { throw 'absolute_session_root_required' }
+    if ($TimeoutMilliseconds -lt 1 -or $TimeoutMilliseconds -gt 60000 -or $MaximumOutputCharacters -lt 1 -or $MaximumOutputCharacters -gt 65536) { throw 'invalid_self_test_limits' }
+    foreach ($name in @('Clock','Start','Poll','Stop')) { if ($Adapter[$name] -isnot [scriptblock]) { throw "missing_self_test_adapter:$name" } }
+    $request=@{JavaPath=$JavaPath;SessionPath=($SessionRoot.TrimEnd('\')+'\'+[guid]::NewGuid().ToString('N'));ClassBytes=(Get-EloJavaSelfTestClass)}
+    $handle=$null; $started=$false; $output=New-Object Text.StringBuilder; $errorOutput=New-Object Text.StringBuilder
+    try {
+        $begin=& $Adapter.Clock
+        $handle=& $Adapter.Start $request; $started=$true
+        # Iteration cap also fails closed if a defective clock does not advance.
+        for ($i=0; $i -lt 10000; $i++) {
+            $now=& $Adapter.Clock
+            if ($now -lt $begin -or ($now-$begin) -ge $TimeoutMilliseconds) { return @{Success=$false;Reason='timeout';SessionPath=$request.SessionPath} }
+            $part=& $Adapter.Poll $handle
+            $now=& $Adapter.Clock
+            if ($now -lt $begin -or ($now-$begin) -ge $TimeoutMilliseconds) { return @{Success=$false;Reason='timeout';SessionPath=$request.SessionPath} }
+            $chunkOut=[string]$part.Stdout; $chunkError=[string]$part.Stderr
+            if (($output.Length+$errorOutput.Length+$chunkOut.Length+$chunkError.Length) -gt $MaximumOutputCharacters) { return @{Success=$false;Reason='output_limit';SessionPath=$request.SessionPath} }
+            $null=$output.Append($chunkOut); $null=$errorOutput.Append($chunkError)
+            if ($part.Done -isnot [bool]) { throw 'invalid_self_test_poll' }
+            if ($part.Done) {
+                $valid=($part.ExitCode -is [int] -and (Test-EloJavaSelfTestResult $part.ExitCode $output.ToString() $errorOutput.ToString()))
+                return @{Success=[bool]$valid;Reason=$(if ($valid) { 'success' } else { 'invalid_result' });SessionPath=$request.SessionPath}
+            }
+        }
+        return @{Success=$false;Reason='poll_limit';SessionPath=$request.SessionPath}
+    } finally { if ($started) { $null=& $Adapter.Stop $handle } }
+}
+
+function Get-EloUpdateGaps {
+    @('Only one Eclipse Temurin release (17.0.21.1+2, windows/x64) is pinned; other vendors such as Azul Zulu, other branches and ARM64 are not supported and are refused.',
+      'The Windows adapters were exercised against a disposable Temurin runtime only; ZIP manifest covers owner/group/DACL but not SACLs, and ZIP fallback restoration is manual.',
+      'Quiescence is best effort (no process image under the runtime and exclusive open of java binaries); no service control is performed, and ELO compatibility is never assumed.')
+}
+function New-EloUpdateContext {
+    param([hashtable]$Adapters=@{}, [switch]$Simulation, [switch]$Production)
+    # Context is trusted backend state, not a wire representation. Production is
+    # honoured only for the module's own Windows adapters (explicit marker), never
+    # for caller-supplied scriptblocks, and never together with -Simulation.
+    if ($Production -and ($Simulation -or $Adapters['EloWindowsAdapters'] -ne $true)) { throw 'production_requires_windows_adapters' }
+    return @{ Adapters=$Adapters; Simulation=[bool]$Simulation; Production=[bool]$Production; Preview=$null; Busy=$false; RecoveryRequired=$false }
+}
+function Invoke-EloUpdateAdapter {
+    param($Context,[string]$Name,[object[]]$Arguments=@())
+    if (-not $Context.Adapters.ContainsKey($Name) -or $Context.Adapters[$Name] -isnot [scriptblock]) { throw "missing_adapter:$Name" }
+    & $Context.Adapters[$Name] @Arguments
+}
+function Assert-EloUpdateTrue {
+    param($Value,[string]$Code)
+    if ($Value -isnot [bool] -or -not $Value) { throw $Code }
+}
+function Assert-EloUpdateMode {
+    param($Context)
+    if (-not $Context.Simulation -and -not $Context.Production) { throw ('production_update_disabled: ' + ((Get-EloUpdateGaps) -join ' ')) }
+    if ($Context.Busy -or $Context.RecoveryRequired) { throw 'busy_or_manual_recovery_required' }
+    Assert-EloUpdateTrue (Invoke-EloUpdateAdapter $Context Admin) 'administrator_required'
+}
+function Assert-EloUpdatePaths {
+    param($Paths)
+    $canonical=@()
+    foreach ($key in @('Runtime','Old','Stage','Backup','Download')) {
+        $path=[string]$Paths[$key]
+        if ($path -cnotmatch '^[A-Za-z]:\\' -or $path -match '[\x00-\x1f\x7f"<>|?*/]' -or $path.Substring(2).Contains(':')) { throw 'unsafe_path' }
+        foreach ($part in $path.Substring(3).Split('\')) {
+            if ([string]::IsNullOrWhiteSpace($part) -or $part -match '[. ]$' -or $part -match '^(?i:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)') { throw 'unsafe_path' }
+        }
+        $full=[IO.Path]::GetFullPath($path)
+        foreach ($prior in $canonical) {
+            if ($full.Equals($prior,[StringComparison]::OrdinalIgnoreCase) -or
+                $full.StartsWith($prior+'\',[StringComparison]::OrdinalIgnoreCase) -or
+                $prior.StartsWith($full+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'overlapping_paths' }
+        }
+        if ($canonical.Count -gt 0 -and $full.Substring(0,2) -ine $canonical[0].Substring(0,2)) { throw 'same_volume_required' }
+        $canonical+= $full
+    }
+    if ([string]$Paths.Backup -notmatch '(?i)\.zip$') { throw 'backup_zip_required' }
+}
+function Assert-EloUpdatePreflight {
+    param($Context,$Paths)
+    $checks=Invoke-EloUpdateAdapter $Context Preflight @($Paths)
+    foreach ($key in @('SafePaths','Quiescent','Permissions','Space')) { Assert-EloUpdateTrue $checks[$key] "preflight_failed:$key" }
+}
+function Assert-EloUpdateEvidence {
+    param($Context,$Detected,$Package)
+    foreach ($key in @('Vendor','Branch','Architecture','Fingerprint')) {
+        if ([string]::IsNullOrWhiteSpace([string]$Detected[$key]) -or $Detected[$key] -eq 'unknown') { throw "unknown_detected_identity:$key" }
+    }
+    foreach ($key in @('Vendor','Branch','Architecture')) {
+        if ([string]$Detected[$key] -cne [string]$Package[$key]) { throw "package_identity_mismatch:$key" }
+    }
+    if ($Package.Architecture -cnotin @('x86','x64','ARM64') -or [string]$Package.Branch -notmatch '^\d+$' -or
+        [string]::IsNullOrWhiteSpace($Package.Version) -or $Package.Sha256 -cnotmatch '^[a-fA-F0-9]{64}$') { throw 'incomplete_package_identity' }
+    $uri=$null
+    if (-not [Uri]::TryCreate([string]$Package.Uri,[UriKind]::Absolute,[ref]$uri) -or $uri.Scheme -cne 'https' -or
+        $uri.UserInfo -or $uri.Fragment -or -not $uri.IsDefaultPort) { throw 'official_https_required' }
+    $evidence=Invoke-EloUpdateAdapter $Context Evidence @($Detected,$Package)
+    foreach ($key in @('Official','PublishedHash')) { Assert-EloUpdateTrue $evidence[$key] "unverified_evidence:$key" }
+    return ($evidence.Compatibility -is [bool] -and $evidence.Compatibility)
+}
+function New-EloUpdatePreview {
+    param([Parameter(Mandatory=$true)]$Context,[Parameter(Mandatory=$true)][hashtable]$Paths,
+        [Parameter(Mandatory=$true)][hashtable]$Package)
+    # A new preview invalidates even an older valid confirmation.
+    $Context.Preview=$null
+    Assert-EloUpdateMode $Context
+    Assert-EloUpdatePaths $Paths
+    $pathsCopy=@{}; foreach ($key in @('Runtime','Old','Stage','Backup','Download')) { $pathsCopy[$key]=[string]$Paths[$key] }
+    $packageCopy=@{}; foreach ($key in @('Vendor','Branch','Architecture','Version','Uri','Sha256')) { $packageCopy[$key]=[string]$Package[$key] }
+    $detected=Invoke-EloUpdateAdapter $Context Inspect @($pathsCopy.Runtime)
+    $compatible=Assert-EloUpdateEvidence $Context $detected $packageCopy
+    Assert-EloUpdatePreflight $Context $pathsCopy
+    $now=Invoke-EloUpdateAdapter $Context Clock
+    if ($now -isnot [datetime]) { throw 'invalid_clock' }
+    $branchChange=([string]$detected.Branch -cne $packageCopy.Branch)
+    $confirmation=[guid]::NewGuid().ToString('N')
+    $branchConfirmation=''; if ($branchChange) { $branchConfirmation=[guid]::NewGuid().ToString('N') }
+    $identity=@{}; foreach ($key in @('Vendor','Branch','Architecture','Fingerprint')) { $identity[$key]=[string]$detected[$key] }
+    $compatibilityConfirmation=''; if (-not $compatible) { $compatibilityConfirmation=[guid]::NewGuid().ToString('N') }
+    $Context.Preview=@{ Paths=$pathsCopy; Package=$packageCopy; Detected=$identity; Created=$now; Confirmation=$confirmation; BranchConfirmation=$branchConfirmation; CompatibilityConfirmation=$compatibilityConfirmation }
+    return @{ Simulation=$Context.Simulation; Confirmation=$confirmation; BranchConfirmation=$branchConfirmation; CompatibilityConfirmation=$compatibilityConfirmation; Expires=$now.AddMinutes(5);
+        Warning=$(if (-not $compatible) { 'ELO compatibility not confirmed. Updating can break ELO or invalidate vendor support. Explicit risk acceptance required. No services restarted; ZIP and old runtime retained.' } else { 'Explicit update approval required; branch changes need separate approval. No services restarted; ZIP and old runtime retained.' }) }
+}
+function Invoke-EloRuntimeUpdate {
+    param([Parameter(Mandatory=$true)]$Context,[string]$Confirmation,[string]$BranchConfirmation,[string]$CompatibilityConfirmation)
+    $preview=$Context.Preview
+    $Context.Preview=$null # single-use even for rejected/stale requests
+    $mutationAttempted=$false
+    $locked=$false
+    try {
+        Assert-EloUpdateMode $Context
+        if (-not $preview -or [string]::IsNullOrWhiteSpace($Confirmation) -or $Confirmation -cne $preview.Confirmation) { throw 'fresh_explicit_confirmation_required' }
+        $now=Invoke-EloUpdateAdapter $Context Clock
+        if ($now -isnot [datetime] -or $now -lt $preview.Created -or $now -ge $preview.Created.AddMinutes(5)) { throw 'confirmation_expired' }
+        if ($preview.BranchConfirmation -and $BranchConfirmation -cne $preview.BranchConfirmation) { throw 'second_branch_confirmation_required' }
+        if ($preview.CompatibilityConfirmation -and $CompatibilityConfirmation -cne $preview.CompatibilityConfirmation) { throw 'compatibility_confirmation_required' }
+        $Context.Busy=$true; $locked=$true
+        $paths=$preview.Paths; $package=$preview.Package
+        $current=Invoke-EloUpdateAdapter $Context Inspect @($paths.Runtime)
+        foreach ($key in @('Vendor','Branch','Architecture','Fingerprint')) { if ([string]$current[$key] -cne $preview.Detected[$key]) { throw 'target_changed' } }
+        $compatibleNow=Assert-EloUpdateEvidence $Context $current $package
+        if (-not $compatibleNow -and -not $preview.CompatibilityConfirmation) { throw 'compatibility_changed_new_preview_required' }
+        Assert-EloUpdatePreflight $Context $paths
+        $null=Invoke-EloUpdateAdapter $Context Backup @($paths)
+        Assert-EloUpdateTrue (Invoke-EloUpdateAdapter $Context VerifyBackup @($paths,$current)) 'backup_verification_failed'
+        $null=Invoke-EloUpdateAdapter $Context Download @($package,$paths)
+        Assert-EloUpdateTrue (Invoke-EloUpdateAdapter $Context VerifyPackage @($package,$paths)) 'package_verification_failed'
+        $null=Invoke-EloUpdateAdapter $Context Stage @($package,$paths)
+        Assert-EloUpdateTrue (Invoke-EloUpdateAdapter $Context Probe @($paths.Stage,$package)) 'staged_java_version_failed'
+        # Recheck the original after potentially slow backup/download/probe.
+        $latest=Invoke-EloUpdateAdapter $Context Inspect @($paths.Runtime)
+        foreach ($key in @('Vendor','Branch','Architecture','Fingerprint')) { if ([string]$latest[$key] -cne $preview.Detected[$key]) { throw 'target_changed' } }
+        # A failed rename may have partially succeeded. Always attempt restoration.
+        $mutationAttempted=$true
+        $null=Invoke-EloUpdateAdapter $Context Preserve @($paths)
+        $null=Invoke-EloUpdateAdapter $Context Replace @($paths)
+        Assert-EloUpdateTrue (Invoke-EloUpdateAdapter $Context ValidateInstalled @($paths,$package)) 'installed_validation_failed'
+        return @{ Status=$(if ($Context.Simulation) { 'SimulatedSuccess' } else { 'Success' }); Backup=$paths.Backup; Old=$paths.Old; RecoveryRequired=$false; ServicesRestarted=$false }
+    } catch {
+        $failure=$_.Exception.Message
+        $restoreFailure=$null
+        $status='Rejected'
+        if ($mutationAttempted) {
+            try {
+                $null=Invoke-EloUpdateAdapter $Context Restore @($preview.Paths)
+                Assert-EloUpdateTrue (Invoke-EloUpdateAdapter $Context VerifyRestored @($preview.Paths,$preview.Detected)) 'restore_verification_failed'
+                $status='RolledBack'
+            } catch { $restoreFailure=$_.Exception.Message; $Context.RecoveryRequired=$true; $status='ManualRecoveryRequired' }
+        }
+        return @{ Status=$status; Error=$failure; RestoreError=$restoreFailure; RecoveryRequired=$Context.RecoveryRequired;
+            Backup=$(if ($preview) { $preview.Paths.Backup }); Old=$(if ($preview) { $preview.Paths.Old }); ServicesRestarted=$false }
+    } finally { if ($locked) { $Context.Busy=$false } }
+}
+
+# Parent-verified documentation: https://adoptium.net/installation/ci-scripts
+# describes the binary redirect and final URL + .sha256.txt mechanism. It does
+# NOT establish any exact release, redirect host, ZIP layout or supported package.
+# Additional official metadata was independently fetched by the parent and supplied
+# verbatim as task evidence. Record ONLY the reported fields below, without
+# inferring IMPLEMENTOR, archive structure, final URL/hosts or ELO support.
+# This getter performs no request and returns new informational data each call.
+function Get-EloTemurinMetadataEvidence {
+    return @{
+        Scope='OfficialApiMetadataOnly'
+        Verification='Parent independently fetched official API; package and checksum-link contents not fetched by this worker.'
+        Source='https://api.adoptium.net/v3/assets/version/17.0.21.1%2B2?architecture=x64&image_type=jdk&os=windows&vendor=eclipse'
+        ApiVendor='eclipse'
+        ReleaseName='jdk-17.0.21.1+2'
+        OS='windows'
+        Architecture='x64'
+        JvmImplementation='hotspot'
+        ImageType='jdk'
+        Uri='https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.21.1%2B2/OpenJDK17U-jdk_x64_windows_hotspot_17.0.21.1_2.zip'
+        Sha256='eafba0944f777abdc74d5aad16049c9b5a1275b6ce99e2939ba9f7f3e6f08c87'
+        Size=[long]191150540
+        ChecksumUri='https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.21.1%2B2/OpenJDK17U-jdk_x64_windows_hotspot_17.0.21.1_2.zip.sha256.txt'
+    }
+}
+# Separate executable policy: metadata getter above is deliberately NOT consumed
+# here. Before any promotion, independently verify the entire redirect chain and
+# final HTTPS hosts/URL, actual archive format, root and expansion bounds. Existing
+# runtime IMPLEMENTOR/release/PE mapping and all filesystem/process guarantees also
+# need proof. A .zip URL suffix is NOT archive-format evidence. Do not populate this
+# list from HTTP/API/client parameters or treat this metadata as ELO approval.
+# Verified live on 2026-11-24 from this tool's test host: github.com answers 302 to
+# release-assets.githubusercontent.com (final URL carries a time-limited signature, so
+# only the HOST is pinned); the downloaded ZIP is 191150540 bytes, its SHA256 equals the
+# published .sha256.txt and the API metadata, its single root is jdk-17.0.21.1+2, it
+# holds bin/java.exe and expands to 318072479 bytes in 580 entries without links.
+function Get-EloVerifiedTemurinReleases {
+    $metadata=Get-EloTemurinMetadataEvidence
+    return @(@{
+        Vendor='Eclipse Adoptium'; Format='zip'; Branch='17'; Architecture='x64'; Version='17.0.21.1+2'
+        Uri=$metadata.Uri; Sha256=$metadata.Sha256
+        AllowedHosts=@('github.com','release-assets.githubusercontent.com')
+        ArchiveRoot='jdk-17.0.21.1+2'
+        MaxArchiveBytes=[long]209715200; MaxExpandedBytes=[long]419430400
+    })
+}
+function Get-EloPinnedTemurinRelease {
+    param($Package)
+    foreach ($record in @(Get-EloVerifiedTemurinReleases)) {
+        if ($record.Vendor -cne 'Eclipse Adoptium' -or $record.Format -cne 'zip') { continue }
+        $matches=$true
+        foreach ($key in @('Vendor','Version','Branch','Architecture','Uri','Sha256')) {
+            if ([string]$record[$key] -cne [string]$Package[$key]) { $matches=$false }
+        }
+        if ($matches) { return $record }
+    }
+    throw 'no_independently_verified_exact_temurin_release'
+}
+function Get-EloStreamHash {
+    param([IO.Stream]$Stream)
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($Stream))).Replace('-','').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+function ConvertFrom-EloPublishedChecksum {
+    param([string]$Text)
+    # One SHA256 token, optionally followed by a filename on the same line.
+    if ($Text.Length -gt 4096 -or $Text -notmatch '\A\s*([a-fA-F0-9]{64})(?:[ \t]+[^\r\n]+)?\s*\z') { throw 'invalid_published_checksum' }
+    return $Matches[1].ToLowerInvariant()
+}
+function Assert-EloHttpsHost {
+    param([string]$Address,[string[]]$AllowedHosts)
+    $uri=$null
+    if (-not [Uri]::TryCreate($Address,[UriKind]::Absolute,[ref]$uri) -or $uri.Scheme -cne 'https' -or
+        -not $uri.IsDefaultPort -or $uri.UserInfo -or $uri.Fragment -or $uri.HostNameType -ne [UriHostNameType]::Dns -or
+        $AllowedHosts -cnotcontains $uri.DnsSafeHost.ToLowerInvariant()) { throw 'unverified_https_host' }
+    return $uri
+}
+function Invoke-EloPinnedDownload {
+    param($Package,[string]$Destination)
+    $record=Get-EloPinnedTemurinRelease $Package # ALWAYS before network or file creation
+    $uri=Assert-EloHttpsHost $record.Uri $record.AllowedHosts
+    $AllowedFinal=@($record.AllowedHosts)
+    $final=$null
+    # .NET Framework has no per-request TLS setting: TLS 1.2 is enabled process-wide
+    # for the duration of this download only and the previous value is restored.
+    $previousProtocol=[Net.ServicePointManager]::SecurityProtocol
+    [Net.ServicePointManager]::SecurityProtocol=$previousProtocol -bor [Net.SecurityProtocolType]::Tls12
+    try {
+    for ($hop=0; $hop -le 5; $hop++) {
+        $request=[Net.HttpWebRequest]::Create($uri)
+        # The system proxy is honoured (servers are often behind one); redirects stay manual.
+        $request.AllowAutoRedirect=$false; $request.UseDefaultCredentials=$false
+        $request.Timeout=30000; $request.ReadWriteTimeout=30000
+        $response=$null
+        try {
+            $response=$request.GetResponse()
+            $code=[int]$response.StatusCode
+            if ($code -in @(301,302,303,307,308)) {
+                if ($hop -eq 5 -or -not $response.Headers['Location']) { throw 'redirect_limit_or_missing_location' }
+                $next=New-Object Uri($uri,$response.Headers['Location'])
+                $uri=Assert-EloHttpsHost $next.AbsoluteUri $record.AllowedHosts
+                continue
+            }
+            if ($code -ne 200 -or $response.ContentLength -le 0 -or $response.ContentLength -gt $record.MaxArchiveBytes -or
+                $response.ResponseUri.Scheme -cne 'https' -or $AllowedFinal -cnotcontains $response.ResponseUri.DnsSafeHost.ToLowerInvariant()) { throw 'unverified_response_or_length' }
+            $input=$response.GetResponseStream(); $output=$null
+            try {
+                $output=New-Object IO.FileStream($Destination,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                $buffer=New-Object byte[] 65536; [long]$total=0
+                $watch=[Diagnostics.Stopwatch]::StartNew()
+                while (($count=$input.Read($buffer,0,$buffer.Length)) -gt 0) {
+                    if ($watch.ElapsedMilliseconds -gt 120000) { throw 'download_time_limit' }
+                    $total+=$count
+                    if ($total -gt $record.MaxArchiveBytes) { throw 'download_size_limit' }
+                    $output.Write($buffer,0,$count)
+                }
+                if ($total -ne $response.ContentLength) { throw 'truncated_download' }
+                $output.Flush($true); $final=$uri.AbsoluteUri
+            } finally { if ($output) { $output.Dispose() }; $input.Dispose() }
+            break
+        } finally { if ($response) { $response.Dispose() }; $request.Abort() }
+    }
+    } finally { [Net.ServicePointManager]::SecurityProtocol=$previousProtocol }
+    if (-not $final -or (Get-FileHash -LiteralPath $Destination -Algorithm SHA256 -ErrorAction Stop).Hash -ine $record.Sha256) { throw 'download_checksum_mismatch' }
+    # The hash must have been independently pinned from the published checksum.
+    # No inference from a .zip suffix or content-type is used as format evidence.
+}
+function Assert-EloArchiveEntries {
+    param($Entries,[string]$ArchiveRoot,[long]$MaximumBytes=1073741824,[int]$MaximumEntries=50000)
+    if ($ArchiveRoot -notmatch '^[A-Za-z0-9_-][A-Za-z0-9_.+-]*$' -or $ArchiveRoot -match '[. ]$') { throw 'unverified_archive_root' }
+    $names=@{}; [long]$total=0
+    foreach ($entry in $Entries) {
+        $name=[string]$entry.FullName
+        if ($names.Count -ge $MaximumEntries -or $name.Length -gt 240 -or $name.Contains('\') -or
+            -not $name.StartsWith($ArchiveRoot+'/',[StringComparison]::Ordinal) -or
+            $name -match '[\x00-\x1f\x7f:<>|?*]' -or $name.StartsWith('/')) { throw 'unsafe_archive_entry' }
+        $relative=$name.Substring($ArchiveRoot.Length+1)
+        if ($relative) {
+            foreach ($part in $relative.TrimEnd('/').Split('/')) {
+                if ([string]::IsNullOrWhiteSpace($part) -or $part -match '[. ]$' -or $part -match '^(?i:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)') { throw 'unsafe_archive_entry' }
+            }
+        }
+        $key=$name.TrimEnd('/')
+        if ($names.ContainsKey($key)) { throw 'duplicate_archive_entry' }
+        $names[$key]=$name.EndsWith('/')
+        # Unix file type bits (ZIP external attributes): allow regular or dir,
+        # never symlinks/devices. DOS reparse bit rejected independently.
+        $type=(([long]$entry.ExternalAttributes -shr 16) -band 61440)
+        if ($type -notin @(0,32768,16384) -or ($entry.ExternalAttributes -band 1024)) { throw 'archive_link_or_device' }
+        if ($entry.Length -lt 0 -or $entry.Length -gt $MaximumBytes -or ($name.EndsWith('/') -and $entry.Length -ne 0)) { throw 'archive_size_limit' }
+        $total+=[long]$entry.Length
+        if ($total -gt $MaximumBytes) { throw 'archive_size_limit' }
+    }
+    foreach ($key in @($names.Keys)) {
+        $parts=$key.Split('/'); $prefix=$parts[0]
+        for ($i=1;$i -lt $parts.Length;$i++) {
+            if ($names.ContainsKey($prefix) -and -not $names[$prefix]) { throw 'archive_file_directory_collision' }
+            $prefix+='/'+$parts[$i]
+        }
+    }
+    if (-not $names.ContainsKey($ArchiveRoot+'/bin/java.exe') -or $names[$ArchiveRoot+'/bin/java.exe']) { throw 'archive_java_missing' }
+    return $total
+}
+function Initialize-EloZip {
+    Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+}
+function Assert-EloWindowsBoundary {
+    param([string]$Root,[string]$Path,[switch]$MustExist)
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'windows_only' }
+    $full=[IO.Path]::GetFullPath($Path); $base=[IO.Path]::GetFullPath($Root).TrimEnd('\')
+    if ($base.Length -le 3 -or -not $full.StartsWith($base+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'outside_approved_boundary' }
+    $drive=New-Object IO.DriveInfo($full.Substring(0,3))
+    if (-not $drive.IsReady -or $drive.DriveType -ne [IO.DriveType]::Fixed -or $drive.DriveFormat -cne 'NTFS') { throw 'local_ntfs_required' }
+    $probe=$full
+    while ($probe) {
+        if (Test-Path -LiteralPath $probe) {
+            $item=Get-Item -LiteralPath $probe -Force -ErrorAction Stop
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'reparse_boundary' }
+        } elseif ($MustExist -and $probe -eq $full) { throw 'path_missing' }
+        $parent=[IO.Path]::GetDirectoryName($probe)
+        if ($parent -eq $probe) { break }; $probe=$parent
+    }
+    return $full
+}
+function Get-EloRuntimeManifest {
+    param([string]$Root,[string]$Path)
+    $full=Assert-EloWindowsBoundary $Root $Path -MustExist
+    # Directory mtimes are excluded: harmless probes (for example the writability test) change them.
+    $items=New-Object 'System.Collections.Generic.List[object]'
+    $queue=New-Object 'System.Collections.Generic.Queue[string]'; $queue.Enqueue($full)
+    [long]$bytes=0
+    while ($queue.Count) {
+        $current=$queue.Dequeue()
+        $item=Get-Item -LiteralPath $current -Force -ErrorAction Stop
+        if ($item.Attributes -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Encrypted)) { throw 'unsupported_file_attributes' }
+        $relative=$current.Substring($full.Length).TrimStart('\').Replace('\','/')
+        if ($relative.Length -gt 200 -or $current.Length -gt 240) { throw 'manifest_path_limit' }
+        if ($relative) {
+            foreach ($part in $relative.Split('/')) {
+                if ($part -match '[\x00-\x1f\x7f:<>|?*]' -or $part -match '[. ]$' -or $part -match '^(?i:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)') { throw 'unsupported_runtime_filename' }
+            }
+        }
+        $acl=Get-Acl -LiteralPath $current -ErrorAction Stop
+        # Owner/group/DACL only. SACL proof is an unresolved production blocker;
+        # this must not be advertised as a complete Windows security backup.
+        $sddl=$acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]'Access,Owner,Group')
+        $hash=''; [long]$length=0
+        if ($item.PSIsContainer) {
+            foreach ($child in @(Get-ChildItem -LiteralPath $current -Force -ErrorAction Stop | Sort-Object Name)) { $queue.Enqueue($child.FullName) }
+        } else {
+            $streams=@(Get-Item -LiteralPath $current -Stream * -ErrorAction Stop)
+            if (@($streams | Where-Object { $_.Stream -ne ':$DATA' }).Count) { throw 'alternate_streams_not_supported' }
+            $length=$item.Length; $bytes+=$length
+            $hash=(Get-FileHash -LiteralPath $current -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+        }
+        $items.Add([pscustomobject][ordered]@{Name=$relative;Directory=[bool]$item.PSIsContainer;Length=$length;Hash=$hash;Sddl=$sddl;Attributes=[int]$item.Attributes;Ticks=$(if ($item.PSIsContainer) { 0 } else { $item.LastWriteTimeUtc.Ticks })})
+        if ($items.Count -gt 50000 -or $bytes -gt 8GB) { throw 'runtime_manifest_limit' }
+    }
+    $entries=@($items.ToArray() | Sort-Object Name)
+    $json=ConvertTo-Json -InputObject $entries -Depth 4 -Compress
+    $memory=New-Object IO.MemoryStream(,[Text.Encoding]::UTF8.GetBytes($json))
+    try { $fingerprint=Get-EloStreamHash $memory } finally { $memory.Dispose() }
+    return @{Entries=$entries;Json=$json;Fingerprint=$fingerprint;Bytes=$bytes}
+}
+function Write-EloVerifiedBackup {
+    param([string]$Root,$Paths,$Manifest)
+    Initialize-EloZip
+    $null=Assert-EloWindowsBoundary $Root $Paths.Backup
+    $file=New-Object IO.FileStream($Paths.Backup,[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+    $zip=$null
+    try {
+        $zip=New-Object IO.Compression.ZipArchive($file,[IO.Compression.ZipArchiveMode]::Create,$true)
+        $entry=$zip.CreateEntry('manifest.json'); $stream=$entry.Open()
+        try { $bytes=[Text.Encoding]::UTF8.GetBytes($Manifest.Json); $stream.Write($bytes,0,$bytes.Length) } finally { $stream.Dispose() }
+        foreach ($item in $Manifest.Entries) {
+            if ($item.Directory) { continue }
+            $entry=$zip.CreateEntry('tree/'+$item.Name,[IO.Compression.CompressionLevel]::Optimal)
+            $output=$entry.Open(); $input=$null
+            try {
+                $path=Join-Path $Paths.Runtime $item.Name.Replace('/','\')
+                $null=Assert-EloWindowsBoundary $Root $path -MustExist
+                $input=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+                $input.CopyTo($output)
+            } finally { if ($input) { $input.Dispose() }; $output.Dispose() }
+        }
+        $zip.Dispose(); $zip=$null; $file.Flush($true)
+    } finally { if ($zip) { $zip.Dispose() }; $file.Dispose() }
+}
+function Test-EloBackupArchive {
+    param($Zip,$Manifest)
+    $expected=@{}; foreach ($item in $Manifest.Entries) { if (-not $item.Directory) { $expected['tree/'+$item.Name]=$item } }
+    if ($Zip.Entries.Count -ne $expected.Count+1) { return $false }
+    $seen=@{}
+    foreach ($entry in $Zip.Entries) {
+        if ($seen.ContainsKey($entry.FullName)) { return $false }; $seen[$entry.FullName]=$true
+        $stream=$entry.Open()
+        try {
+            if ($entry.FullName -ceq 'manifest.json') {
+                $bytes=[Text.Encoding]::UTF8.GetBytes($Manifest.Json)
+                if ($entry.Length -ne $bytes.Length) { return $false }
+                $reader=New-Object IO.StreamReader($stream,[Text.Encoding]::UTF8,$false)
+                try { if ($reader.ReadToEnd() -cne $Manifest.Json) { return $false } } finally { $reader.Dispose() }
+            } else {
+                if (-not $expected.ContainsKey($entry.FullName) -or $entry.Length -ne $expected[$entry.FullName].Length -or
+                    (Get-EloStreamHash $stream) -cne $expected[$entry.FullName].Hash) { return $false }
+            }
+        } finally { $stream.Dispose() }
+    }
+    return $seen.ContainsKey('manifest.json')
+}
+function Expand-EloPinnedArchive {
+    param([string]$Root,$Package,$Paths)
+    $record=Get-EloPinnedTemurinRelease $Package
+    Initialize-EloZip
+    $null=Assert-EloWindowsBoundary $Root $Paths.Stage
+    if (Test-Path -LiteralPath $Paths.Stage) { throw 'staging_already_exists' }
+    if ((Get-FileHash -LiteralPath $Paths.Download -Algorithm SHA256 -ErrorAction Stop).Hash -ine $record.Sha256) { throw 'archive_checksum_mismatch' }
+    $input=[IO.File]::OpenRead($Paths.Download); $zip=$null
+    try {
+        $zip=New-Object IO.Compression.ZipArchive($input,[IO.Compression.ZipArchiveMode]::Read,$true)
+        $null=Assert-EloArchiveEntries $zip.Entries $record.ArchiveRoot $record.MaxExpandedBytes
+        $null=[IO.Directory]::CreateDirectory($Paths.Stage)
+        foreach ($entry in $zip.Entries) {
+            $relative=$entry.FullName.Substring($record.ArchiveRoot.Length+1)
+            if (-not $relative) { continue }
+            $destination=Join-Path $Paths.Stage $relative.Replace('/','\').TrimEnd('\')
+            $null=Assert-EloWindowsBoundary $Root $destination
+            if ($entry.FullName.EndsWith('/')) { $null=[IO.Directory]::CreateDirectory($destination); continue }
+            $null=[IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination))
+            $source=$entry.Open(); $output=$null
+            try {
+                $output=New-Object IO.FileStream($destination,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                $buffer=New-Object byte[] 65536; [long]$copied=0
+                while (($count=$source.Read($buffer,0,$buffer.Length)) -gt 0) {
+                    $copied+=$count; if ($copied -gt $entry.Length) { throw 'expanded_entry_size_mismatch' }
+                    $output.Write($buffer,0,$count)
+                }
+                if ($copied -ne $entry.Length) { throw 'expanded_entry_size_mismatch' }; $output.Flush($true)
+            } finally { if ($output) { $output.Dispose() }; $source.Dispose() }
+            $source=$entry.Open(); $copy=[IO.File]::OpenRead($destination)
+            try { if ((Get-EloStreamHash $source) -cne (Get-EloStreamHash $copy)) { throw 'staging_copy_hash_mismatch' } }
+            finally { $source.Dispose(); $copy.Dispose() }
+        }
+    } finally { if ($zip) { $zip.Dispose() }; $input.Dispose() }
+}
+function Get-EloTemurinIdentity {
+    param([string]$Path)
+    $release=Join-Path $Path 'release'; $java=Join-Path $Path 'bin\java.exe'
+    if ((Get-Item -LiteralPath $release -ErrorAction Stop).Length -gt 65536) { throw 'release_size_limit' }
+    $values=@{}
+    foreach ($line in [IO.File]::ReadAllLines($release)) {
+        if ($line -cmatch '^(IMPLEMENTOR|JAVA_VERSION|JAVA_RUNTIME_VERSION|OS_ARCH|OS_NAME)="([^"\x00-\x1f]*)"$') {
+            if ($values.ContainsKey($Matches[1])) { throw 'duplicate_release_key' }; $values[$Matches[1]]=$Matches[2]
+        }
+    }
+    # Older Temurin builds (for example 17.0.2+8) omit JAVA_RUNTIME_VERSION.
+    if (-not $values.JAVA_RUNTIME_VERSION -and $values.JAVA_VERSION) { $values.JAVA_RUNTIME_VERSION=$values.JAVA_VERSION }
+    if ($values.IMPLEMENTOR -cne 'Eclipse Adoptium' -or $values.OS_NAME -cne 'Windows' -or
+        -not $values.JAVA_RUNTIME_VERSION) { throw 'unrecognized_temurin_identity' }
+    $versionMatch=[regex]::Match([string]$values.JAVA_VERSION,'^(\d+)\.')
+    if (-not $versionMatch.Success) { throw 'unrecognized_temurin_identity' }
+    $branch=$versionMatch.Groups[1].Value
+    $stream=[IO.File]::OpenRead($java); $reader=New-Object IO.BinaryReader($stream)
+    try {
+        if ($reader.ReadUInt16() -ne 23117) { throw 'java_not_pe' }
+        $stream.Position=60; $offset=$reader.ReadInt32()
+        if ($offset -lt 64 -or $offset -gt $stream.Length-6) { throw 'invalid_pe_offset' }
+        $stream.Position=$offset; if ($reader.ReadUInt32() -ne 17744) { throw 'invalid_pe_signature' }
+        $machine=$reader.ReadUInt16()
+    } finally { $reader.Dispose(); $stream.Dispose() }
+    $arch=''; if ($machine -eq 34404 -and $values.OS_ARCH -cin @('amd64','x86_64')) { $arch='x64' }
+    if ($machine -eq 43620 -and $values.OS_ARCH -ceq 'aarch64') { $arch='ARM64' }
+    if (-not $arch) { throw 'unsupported_or_inconsistent_architecture' }
+    return @{Vendor=$values.IMPLEMENTOR;Branch=$branch;Architecture=$arch;Version=$values.JAVA_RUNTIME_VERSION}
+}
+function Invoke-EloBoundedJavaVersion {
+    param([string]$Path,$Package)
+    $identity=Get-EloTemurinIdentity $Path
+    foreach ($key in @('Vendor','Branch','Architecture','Version')) { if ($identity[$key] -cne $Package[$key]) { throw 'java_identity_mismatch' } }
+    $process=New-Object Diagnostics.Process; $started=$false
+    try {
+        $info=New-Object Diagnostics.ProcessStartInfo
+        $info.FileName=Join-Path $Path 'bin\java.exe'; $info.Arguments='-version'; $info.WorkingDirectory=$Path
+        $info.UseShellExecute=$false; $info.CreateNoWindow=$true; $info.RedirectStandardOutput=$true; $info.RedirectStandardError=$true
+        foreach ($name in @('JAVA_TOOL_OPTIONS','_JAVA_OPTIONS','JDK_JAVA_OPTIONS','CLASSPATH')) { $info.EnvironmentVariables.Remove($name) }
+        $process.StartInfo=$info
+        $started=$process.Start(); if (-not $started) { throw 'java_start_failed' }
+        $watch=[Diagnostics.Stopwatch]::StartNew(); $text=New-Object Text.StringBuilder
+        # Separate single-character buffers/tasks bound memory and drain both pipes.
+        $outBuffer=New-Object char[] 1; $errBuffer=New-Object char[] 1
+        $outTask=$process.StandardOutput.ReadAsync($outBuffer,0,1); $errTask=$process.StandardError.ReadAsync($errBuffer,0,1)
+        $outDone=$false; $errDone=$false
+        while (-not ($outDone -and $errDone)) {
+            if ($watch.ElapsedMilliseconds -gt 10000 -or $text.Length -gt 16384) { throw 'java_probe_limit' }
+            if (-not $outDone -and $outTask.IsCompleted) {
+                if ($outTask.Result -eq 0) { $outDone=$true } else { $null=$text.Append($outBuffer[0]); $outTask=$process.StandardOutput.ReadAsync($outBuffer,0,1) }
+            }
+            if (-not $errDone -and $errTask.IsCompleted) {
+                if ($errTask.Result -eq 0) { $errDone=$true } else { $null=$text.Append($errBuffer[0]); $errTask=$process.StandardError.ReadAsync($errBuffer,0,1) }
+            }
+            [Threading.Thread]::Sleep(5)
+        }
+        if (-not $process.WaitForExit(1000) -or $process.ExitCode -ne 0 -or -not $text.ToString().Contains($Package.Version)) { throw 'java_version_probe_failed' }
+        return $true
+    } finally {
+        try { if ($started -and -not $process.HasExited) { $process.Kill(); $null=$process.WaitForExit(2000) } }
+        finally { $process.Dispose() }
+    }
+}
+function Test-EloRuntimeQuiescent {
+    param([string]$Path)
+    # Best effort, fail closed: no process image under the runtime and java binaries
+    # can be opened exclusively. A running ELO service from this runtime blocks it.
+    $prefix=[IO.Path]::GetFullPath($Path).TrimEnd('\')+'\'
+    foreach ($process in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
+        $image=[string]$process.ExecutablePath
+        if ($image -and $image.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) { return $false }
+    }
+    foreach ($name in @('bin\java.exe','bin\javaw.exe')) {
+        $file=Join-Path $Path $name
+        if (-not (Test-Path -LiteralPath $file)) { continue }
+        try { $stream=[IO.File]::Open($file,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None); $stream.Dispose() } catch { return $false }
+    }
+    return $true
+}
+function Test-EloDirectoryWritable {
+    param([string]$Path)
+    $probe=Join-Path $Path ('.elo-write-probe-'+[guid]::NewGuid().ToString('N'))
+    try {
+        $stream=New-Object IO.FileStream($probe,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None,16,[IO.FileOptions]::DeleteOnClose)
+        $stream.Dispose(); return $true
+    } catch { return $false }
+}
+# Real adapter for Invoke-EloJavaSelfTest: runs only JavaPath, with a sanitized
+# environment, an isolated classpath and non-blocking, size-bounded output reads.
+function New-EloJavaSelfTestAdapter {
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    return @{
+        Clock={ [long]$watch.ElapsedMilliseconds }.GetNewClosure()
+        Start={ param($Request)
+            $null=[IO.Directory]::CreateDirectory($Request.SessionPath)
+            [IO.File]::WriteAllBytes((Join-Path $Request.SessionPath 'EloJavaSelfTest.class'),[byte[]]$Request.ClassBytes)
+            $info=New-Object Diagnostics.ProcessStartInfo
+            $info.FileName=$Request.JavaPath; $info.Arguments='-cp "'+$Request.SessionPath+'" EloJavaSelfTest'
+            $info.WorkingDirectory=$Request.SessionPath; $info.UseShellExecute=$false; $info.CreateNoWindow=$true
+            $info.RedirectStandardOutput=$true; $info.RedirectStandardError=$true
+            foreach ($name in @('JAVA_TOOL_OPTIONS','_JAVA_OPTIONS','JDK_JAVA_OPTIONS','CLASSPATH')) { $info.EnvironmentVariables.Remove($name) }
+            $process=New-Object Diagnostics.Process; $process.StartInfo=$info
+            if (-not $process.Start()) { throw 'java_start_failed' }
+            $handle=@{Process=$process;OutBuffer=(New-Object char[] 4096);ErrBuffer=(New-Object char[] 4096);OutDone=$false;ErrDone=$false}
+            $handle.OutTask=$process.StandardOutput.ReadAsync($handle.OutBuffer,0,4096)
+            $handle.ErrTask=$process.StandardError.ReadAsync($handle.ErrBuffer,0,4096)
+            $handle
+        }
+        Poll={ param($Handle)
+            $out=''; $err=''
+            if (-not $Handle.OutDone -and $Handle.OutTask.IsCompleted) {
+                $n=$Handle.OutTask.Result
+                if ($n -eq 0) { $Handle.OutDone=$true } else { $out=New-Object string($Handle.OutBuffer,0,$n); $Handle.OutTask=$Handle.Process.StandardOutput.ReadAsync($Handle.OutBuffer,0,4096) }
+            }
+            if (-not $Handle.ErrDone -and $Handle.ErrTask.IsCompleted) {
+                $n=$Handle.ErrTask.Result
+                if ($n -eq 0) { $Handle.ErrDone=$true } else { $err=New-Object string($Handle.ErrBuffer,0,$n); $Handle.ErrTask=$Handle.Process.StandardError.ReadAsync($Handle.ErrBuffer,0,4096) }
+            }
+            $done=($Handle.OutDone -and $Handle.ErrDone -and $Handle.Process.WaitForExit(0))
+            if (-not $done) { [Threading.Thread]::Sleep(5) }
+            @{Stdout=$out;Stderr=$err;Done=[bool]$done;ExitCode=$(if ($done) { [int]$Handle.Process.ExitCode } else { $null })}
+        }
+        Stop={ param($Handle)
+            try { if (-not $Handle.Process.HasExited) { $Handle.Process.Kill(); $null=$Handle.Process.WaitForExit(2000) } } finally { $Handle.Process.Dispose() }
+            $true
+        }
+    }
+}
+function Invoke-EloJavaProbe {
+    param([string]$Path,$Package)
+    $null=Invoke-EloBoundedJavaVersion $Path $Package
+    $sessions=Join-Path ([IO.Path]::GetTempPath().TrimEnd('\')) 'elo-patch-selftest'
+    $null=[IO.Directory]::CreateDirectory($sessions)
+    $result=Invoke-EloJavaSelfTest -JavaPath (Join-Path $Path 'bin\java.exe') -SessionRoot $sessions -Adapter (New-EloJavaSelfTestAdapter)
+    # Session artifacts are retained by design (nothing is deleted by this module).
+    if (-not $result.Success) { throw ('java_self_test_failed:'+$result.Reason) }
+    return $true
+}
+function New-EloWindowsUpdateAdapters {
+    param([Parameter(Mandatory=$true)][string]$ApprovedRoot,[Parameter(Mandatory=$true)][string]$Runtime)
+    # Factory itself performs no IO. Only direct, explicitly invoked adapter calls
+    # can do work. Engine production gate remains closed regardless of injection.
+    $state=@{Root=$ApprovedRoot;Runtime=$Runtime;Original=$null;Staged=$null;FailedPath=$null}
+    return @{
+        EloWindowsAdapters=$true
+        Clock={ [DateTime]::UtcNow }
+        Admin={
+            $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+            try { (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
+            finally { $identity.Dispose() }
+        }
+        Inspect={ param($Path)
+            if ($Path -cne $state.Runtime) { throw 'runtime_not_explicitly_selected' }
+            $manifest=Get-EloRuntimeManifest $state.Root $Path
+            $identity=Get-EloTemurinIdentity $Path; $identity.Fingerprint=$manifest.Fingerprint
+            $state.Original=$manifest; $identity
+        }.GetNewClosure()
+        Evidence={ param($Detected,$Package)
+            $record=Get-EloPinnedTemurinRelease $Package
+            @{Official=$true;PublishedHash=$true;Compatibility=$false}
+        }
+        Preflight={ param($Paths)
+            Assert-EloUpdatePaths $Paths
+            if ($Paths.Runtime -cne $state.Runtime) { throw 'runtime_not_explicitly_selected' }
+            foreach ($key in @('Runtime','Old','Stage','Backup','Download')) {
+                $null=Assert-EloWindowsBoundary $state.Root $Paths[$key]
+                if ($key -ne 'Runtime' -and (Test-Path -LiteralPath $Paths[$key])) { throw 'recovery_or_staging_path_exists' }
+                if ([IO.Path]::GetDirectoryName($Paths[$key]) -ine [IO.Path]::GetDirectoryName($Paths.Runtime)) { throw 'sibling_paths_required' }
+            }
+            $manifest=Get-EloRuntimeManifest $state.Root $Paths.Runtime
+            $drive=New-Object IO.DriveInfo($Paths.Runtime.Substring(0,3))
+            # Real, fail-closed checks; services are never stopped or restarted here.
+            @{SafePaths=$true;Quiescent=(Test-EloRuntimeQuiescent $Paths.Runtime)
+              Permissions=((Test-EloDirectoryWritable $Paths.Runtime) -and (Test-EloDirectoryWritable ([IO.Path]::GetDirectoryName($Paths.Runtime))))
+              Space=($drive.AvailableFreeSpace -gt (6*$manifest.Bytes+1GB))}
+        }.GetNewClosure()
+        Backup={ param($Paths) Write-EloVerifiedBackup $state.Root $Paths $state.Original }.GetNewClosure()
+        VerifyBackup={ param($Paths,$Detected)
+            Initialize-EloZip
+            $input=[IO.File]::OpenRead($Paths.Backup); $zip=$null
+            try {
+                $zip=New-Object IO.Compression.ZipArchive($input,[IO.Compression.ZipArchiveMode]::Read,$true)
+                (Test-EloBackupArchive $zip $state.Original) -and
+                    ((Get-EloRuntimeManifest $state.Root $Paths.Runtime).Fingerprint -ceq $Detected.Fingerprint)
+            } finally { if ($zip) { $zip.Dispose() }; $input.Dispose() }
+        }.GetNewClosure()
+        Download={ param($Package,$Paths) Invoke-EloPinnedDownload $Package $Paths.Download }
+        VerifyPackage={ param($Package,$Paths)
+            $record=Get-EloPinnedTemurinRelease $Package
+            (Get-FileHash -LiteralPath $Paths.Download -Algorithm SHA256 -ErrorAction Stop).Hash -ieq $record.Sha256
+        }
+        Stage={ param($Package,$Paths)
+            Expand-EloPinnedArchive $state.Root $Package $Paths
+            $state.Staged=Get-EloRuntimeManifest $state.Root $Paths.Stage
+        }.GetNewClosure()
+        Probe={ param($Path,$Package) Invoke-EloJavaProbe $Path $Package }
+        Preserve={ param($Paths)
+            $null=Assert-EloWindowsBoundary $state.Root $Paths.Runtime -MustExist
+            $null=Assert-EloWindowsBoundary $state.Root $Paths.Old
+            if ((Get-EloRuntimeManifest $state.Root $Paths.Runtime).Fingerprint -cne $state.Original.Fingerprint) { throw 'original_changed_before_rename' }
+            [IO.Directory]::Move($Paths.Runtime,$Paths.Old)
+        }.GetNewClosure()
+        Replace={ param($Paths)
+            $null=Assert-EloWindowsBoundary $state.Root $Paths.Stage -MustExist
+            $null=Assert-EloWindowsBoundary $state.Root $Paths.Runtime
+            if ((Get-EloRuntimeManifest $state.Root $Paths.Stage).Fingerprint -cne $state.Staged.Fingerprint) { throw 'stage_changed_before_rename' }
+            [IO.Directory]::Move($Paths.Stage,$Paths.Runtime)
+        }.GetNewClosure()
+        ValidateInstalled={ param($Paths,$Package)
+            ((Get-EloRuntimeManifest $state.Root $Paths.Runtime).Fingerprint -ceq $state.Staged.Fingerprint) -and
+                (Invoke-EloJavaProbe $Paths.Runtime $Package)
+        }.GetNewClosure()
+        Restore={ param($Paths)
+            $null=Assert-EloWindowsBoundary $state.Root $Paths.Old
+            $null=Assert-EloWindowsBoundary $state.Root $Paths.Runtime
+            if (Test-Path -LiteralPath $Paths.Old) {
+                if ((Get-EloRuntimeManifest $state.Root $Paths.Old).Fingerprint -cne $state.Original.Fingerprint) { throw 'old_runtime_changed_manual_zip_restore_required' }
+                if (Test-Path -LiteralPath $Paths.Runtime) {
+                    $state.FailedPath=$Paths.Stage+'.failed-'+[guid]::NewGuid().ToString('N')
+                    $null=Assert-EloWindowsBoundary $state.Root $state.FailedPath
+                    [IO.Directory]::Move($Paths.Runtime,$state.FailedPath)
+                }
+                [IO.Directory]::Move($Paths.Old,$Paths.Runtime)
+            } elseif ((Get-EloRuntimeManifest $state.Root $Paths.Runtime).Fingerprint -cne $state.Original.Fingerprint) {
+                throw 'old_runtime_missing_manual_zip_restore_required'
+            }
+        }.GetNewClosure()
+        VerifyRestored={ param($Paths,$Detected)
+            (Get-EloRuntimeManifest $state.Root $Paths.Runtime).Fingerprint -ceq $Detected.Fingerprint
+        }.GetNewClosure()
+    }
+}
+::ELO_PATCH_END:UPDATE_PS
