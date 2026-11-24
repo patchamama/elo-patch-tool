@@ -89,6 +89,39 @@ Manual mitigation and recovery (performed by an authorized administrator):
    compatibility and architecture, back up the runtime/configuration, and plan and
    test replacement and restoration. Runtime update: use the web interface or --update-runtime (verified backup, rollback and a typed confirmation).
 
+PowerShell commands for the manual route (administrator; adjust paths and service names):
+   # Run in an ADMINISTRATOR PowerShell. Adjust the paths and service names to your scan result.
+   
+   # 1) Find the runtime, its version and the services that use it
+   & 'C:\ELO\java\bin\java.exe' -version
+   Get-Content 'C:\ELO\java\release' | Select-String 'IMPLEMENTOR|JAVA_RUNTIME_VERSION|OS_ARCH'
+   Get-CimInstance Win32_Service | Where-Object { $_.PathName -match 'ELO' } | Select-Object Name, State, PathName
+   [Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS', 'Machine')
+   
+   # 2) Back up the runtime (ZIP) before changing anything
+   Compress-Archive -LiteralPath 'C:\ELO\java' -DestinationPath 'C:\ELO\java-backup.zip'
+   
+   # 3) Temporary mitigation (machine-wide): KEEP the old value and append, never overwrite
+   $old = [Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS', 'Machine'); $old
+   [Environment]::SetEnvironmentVariable('JAVA_TOOL_OPTIONS', (($old + ' -XX:-UseBASE64Intrinsics').Trim()), 'Machine')
+   # Undo: [Environment]::SetEnvironmentVariable('JAVA_TOOL_OPTIONS', $old, 'Machine')   (use $null if it was empty)
+   # Services only see the change after they are restarted.
+   
+   # 4) Update the runtime by hand (download the newest release of the SAME vendor and branch first)
+   (Get-FileHash 'C:\Downloads\new-java.zip' -Algorithm SHA256).Hash        # compare with the vendor's published SHA256
+   Stop-Service 'ELO-SRV01-1' -Force                                        # every service that uses this Java
+   Rename-Item 'C:\ELO\java' 'java.old'
+   Expand-Archive -LiteralPath 'C:\Downloads\new-java.zip' -DestinationPath 'C:\ELO\java-new'
+   Move-Item (Get-ChildItem 'C:\ELO\java-new' -Directory | Select-Object -First 1).FullName 'C:\ELO\java'
+   & 'C:\ELO\java\bin\java.exe' -version
+   Start-Service 'ELO-SRV01-1'
+   
+   # 5) If something fails: stop the services, put the old runtime back, start the services
+   Stop-Service 'ELO-SRV01-1' -Force
+   Rename-Item 'C:\ELO\java' 'java.failed'; Rename-Item 'C:\ELO\java.old' 'java'
+   Start-Service 'ELO-SRV01-1'
+   # Or restore from the ZIP: Expand-Archive 'C:\ELO\java-backup.zip' -DestinationPath 'C:\ELO\restore'; then move the java folder back
+
 Trusted embedding contract:
 Dot-source this module without side effects. Invoke-EloCli accepts string[] Arguments,
 Scanner scriptblock (ManualPath -> Invoke-EloJavaScan-shaped result), and optional

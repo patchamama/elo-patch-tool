@@ -155,6 +155,8 @@ function boot(hash = '#token=test-session-token') {
  assert(ui.el('preview').textContent.includes('Kompatibilität prüfen'));
  assert(ui.el('activity').textContent.includes('Abbruch angefordert'),'log translated on language change');
  assert.equal(ui.el('manual').children.length,6);
+ for (const needle of ['Compress-Archive','Expand-Archive','Stop-Service','Start-Service','Get-FileHash','JAVA_TOOL_OPTIONS','-XX:-UseBASE64Intrinsics','Rename-Item']) assert(ui.translated.find(el => el.dataset.i18n === 'manualCommands').textContent.includes(needle),'German manual commands include '+needle);
+ assert(ui.translated.find(el => el.dataset.i18n === 'manualCommands').textContent.includes('ADMINISTRATOR-PowerShell'),'comments are localized');
  assert(ui.el('manual').children.some(el => el.textContent.includes('-XX:-UseBASE64Intrinsics')));
  for (const el of ui.translated) assert(el.textContent && el.textContent !== 'Unbekannt','translation exists: '+el.dataset.i18n);
  ui.failure(403,{error:'access_denied',warnings:[both('Check permissions','Berechtigungen prüfen')]}); await ui.poll(); assert(ui.el('error').textContent.includes('Zugriff verweigert'));

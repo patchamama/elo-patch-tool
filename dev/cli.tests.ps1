@@ -42,6 +42,7 @@ Assert ($r.ExitCode -eq 0 -and $r.Output -match 'README' -and $r.Output -match '
 Assert ($r.Output.Contains('ready fixed or removable drives C: through Z:') -and $r.Output.Contains('\java\bin\java.exe') -and $r.Output.Contains('\ELO\java\bin\java.exe')) 'help specifies drive scope and exact root layouts'
 Assert ($r.Output.Contains('after root checks') -and $r.Output.Contains('depth 5') -and $r.Output.Contains('10,000 entries') -and $r.Output -notmatch 'searched before drive roots') 'help specifies optional bounded manual search order'
 Assert ($script:scanCalls -eq 0) 'help performs no scan'
+foreach ($needle in @('Compress-Archive','Expand-Archive','Stop-Service','Start-Service','Get-FileHash','Rename-Item')) { Assert ($r.Output.Contains($needle)) ('help lists the PowerShell command '+$needle) }
 $r = Invoke-EloCli -Arguments @('--cli','--scan','--json','--no-browser','--keep-temp','--manual-path','D:\ELO Test') -Scanner $scanner
 $j = $r.Output | ConvertFrom-Json
 Assert ($r.ExitCode -eq 0 -and $script:seenPath -ceq 'D:\ELO Test') 'literal spaced path forwarding'
