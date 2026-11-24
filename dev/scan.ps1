@@ -206,16 +206,17 @@ function Get-EloJavaCandidates {
         if (-not $PSBoundParameters.ContainsKey('DriveRoots')) {
             $DriveRoots = @(67..90 | ForEach-Object { '{0}:\' -f [char]$_ })
         }
-        foreach ($root in $DriveRoots) {
-            if ($root -notmatch '^[C-Z]:\\$') { continue }
-            foreach ($relative in @('java\bin\java.exe', 'ELO\java\bin\java.exe')) {
-                if (& $ShouldCancel) { $state.Cancelled = $true; break }
-                $path = $root + $relative
+        # One layout check: <base><relative> must be a real java.exe below non-reparse folders.
+        $checkLayout = {
+            param($base, $relative, $rationale)
+            do {
+                if (& $ShouldCancel) { $state.Cancelled = $true; return }
+                $path = $base + $relative
                 $attempt = [pscustomobject]@{ Location = $path; Outcome = 'Inspecting'; EntriesSeen = 0 }
                 $attempts.Add($attempt)
                 try {
                     $parts = $relative -split '\\'
-                    $ancestor = $root
+                    $ancestor = $base
                     $skip = $false
                     if (& $IsReparsePoint $ancestor) {
                         $issues.Add("Skipped reparse point: $ancestor")
@@ -231,12 +232,12 @@ function Get-EloJavaCandidates {
                         }
                         $ancestor += '\'
                     }
-                    if ($skip) { continue }
+                    if ($skip) { return }
                     foreach ($entry in @(& $GetChildren $path)) {
                         if (& $ShouldCancel) { $state.Cancelled = $true; $attempt.Outcome = 'Cancelled'; break }
                         if (-not $entry.PSIsContainer -and $entry.FullName -ieq $path -and -not ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $seenLocations.Add($entry.FullName)) {
                             $locations.Add($entry.FullName)
-                            $candidates.Add([pscustomobject]@{ Location = $entry.FullName; EloCandidateRoot = $root; EloPathRationale = 'Exact drive-root Java layout; ELO ownership is not verified.' })
+                            $candidates.Add([pscustomobject]@{ Location = $entry.FullName; EloCandidateRoot = $base; EloPathRationale = $rationale })
                             $attempt.EntriesSeen++
                         }
                     }
@@ -249,8 +250,29 @@ function Get-EloJavaCandidates {
                         $issues.Add("Cannot inspect ${path}: $($_.Exception.Message)")
                     }
                 }
+            } while ($false)
+        }
+        foreach ($root in $DriveRoots) {
+            if ($root -notmatch '^[C-Z]:\\$') { continue }
+            foreach ($relative in @('java\bin\java.exe', 'ELO\java\bin\java.exe')) {
+                if (& $ShouldCancel) { $state.Cancelled = $true; break }
+                & $checkLayout $root $relative 'Exact drive-root Java layout; ELO ownership is not verified.'
             }
-            if ($state.Cancelled) { break }
+            # Generalized layout: X:\java\bin (first level) and X:\<any folder>\java\bin (second level).
+            if (-not $state.Cancelled) {
+                $folders = @()
+                try {
+                    if (-not (& $IsReparsePoint $root)) {
+                        $folders = @(& $GetChildren $root | Where-Object { $_.PSIsContainer -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | Select-Object -First 1000)
+                    }
+                } catch { $folders = @() }
+                foreach ($folder in $folders) {
+                    if (& $ShouldCancel) { $state.Cancelled = $true; break }
+                    $name = [string]$folder.Name
+                    if ($name -ieq 'ELO' -or $name -ieq 'java' -or $name -in @('Windows', '$Recycle.Bin', 'System Volume Information', 'Recovery', 'PerfLogs')) { continue }
+                    & $checkLayout ($root + $name + '\') 'java\bin\java.exe' 'Second-level Java layout (X:\<folder>\java\bin); ELO ownership is not verified.'
+                }
+            }            if ($state.Cancelled) { break }
         }
     }
     if (-not $state.Cancelled -and $ManualPath) {

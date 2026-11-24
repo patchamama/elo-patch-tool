@@ -28,7 +28,7 @@ The runnable application is the single, self-contained **`ELO-Patch-Tools.bat`**
 
 | Step | What happens |
 | --- | --- |
-| **1 · Scan** | Read-only search for Java in `X:\java\bin` and `X:\ELO\java\bin` on every drive C: to Z: (plus an optional folder). |
+| **1 · Scan** | Read-only search on every drive C: to Z: for `X:\java\bin` (first level) and `X:\<any folder>\java\bin` (second level, e.g. `C:\ELO\java\bin` or `C:\OtherFolder\java\bin`; system and linked folders are skipped), plus an optional folder you provide. Existing backups are listed first. |
 | **2 · Runtime** | Pick one of the runtimes found (vendor, version, architecture, assessment). |
 | **3 · Action** | **Update Java** to the newest release of the *same vendor and branch*, apply the **temporary mitigation** (`-XX:-UseBASE64Intrinsics`), or read the **manual instructions** (steps plus ready-to-run PowerShell commands: inspect, back up, mitigate, update, roll back; also in `--help`). |
 | **4 · Confirm** | The preview names exact versions, backup ZIP, services to stop and risks. Nothing happens before you confirm. |

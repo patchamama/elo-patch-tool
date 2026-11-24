@@ -75,7 +75,7 @@ function New-Entry([string]$Path, [bool]$Directory, [bool]$Link = $false) {
     if ($Link) { $attributes = [IO.FileAttributes]::ReparsePoint }
     [pscustomobject]@{ FullName = $Path; Name = ($Path -split '\\')[-1]; PSIsContainer = $Directory; Attributes = $attributes }
 }
-# Automatic discovery must inspect only the two specified root layouts.
+# Automatic discovery inspects X:\java\bin, X:\ELO\java\bin and X:\<folder>\java\bin only.
 $exactTree = @{
     'Q:\java\bin\java.exe' = @((New-Entry 'Q:\java\bin\java.exe' $false))
     'Q:\ELO\java\bin\java.exe' = @((New-Entry 'Q:\ELO\java\bin\java.exe' $false))
@@ -84,15 +84,32 @@ $exactScan = Get-EloJavaCandidates -DriveRoots @('Q:\') -GetChildren { param($Pa
 Assert-Equal $exactScan.Locations.Count 2 'Both exact root layouts discovered without traversal'
 $calls = New-Object 'System.Collections.Generic.List[string]'
 $allDrives = Get-EloJavaCandidates -IsReparsePoint { $false } -GetChildren { param($Path) $calls.Add($Path) }
-Assert-Equal $calls.Count 48 'C through Z both exact executables checked'
+Assert-Equal $calls.Count 72 'C through Z: two exact executables plus one first-level folder listing per drive'
+# Generalized layout: X:\java\bin (level 1) and X:\<any folder>\java\bin (level 2), never deeper.
+$levelTree = @{
+    'Q:\' = @((New-Entry 'Q:\OtraCarpeta' $true), (New-Entry 'Q:\ELO' $true), (New-Entry 'Q:\Windows' $true), (New-Entry 'Q:\Linked' $true $true), (New-Entry 'Q:\Datos' $true), (New-Entry 'Q:\file.txt' $false))
+    'Q:\java\bin\java.exe' = @((New-Entry 'Q:\java\bin\java.exe' $false))
+    'Q:\ELO\java\bin\java.exe' = @((New-Entry 'Q:\ELO\java\bin\java.exe' $false))
+    'Q:\OtraCarpeta\java\bin\java.exe' = @((New-Entry 'Q:\OtraCarpeta\java\bin\java.exe' $false))
+    'Q:\Datos\sub\java\bin\java.exe' = @((New-Entry 'Q:\Datos\sub\java\bin\java.exe' $false))
+}
+$levelCalls = New-Object 'System.Collections.Generic.List[string]'
+$levelScan = Get-EloJavaCandidates -DriveRoots @('Q:\') -GetChildren { param($Path) $levelCalls.Add($Path); $levelTree[$Path] } -IsReparsePoint { $false }
+Assert-Equal ((@($levelScan.Locations) | Sort-Object) -join '|') 'Q:\ELO\java\bin\java.exe|Q:\java\bin\java.exe|Q:\OtraCarpeta\java\bin\java.exe' 'levels 1 and 2 are found in every drive'
+Assert-Equal (@($levelCalls | Where-Object { $_ -like 'Q:\Windows*' -or $_ -like 'Q:\Linked*' }).Count) 0 'system and linked folders are not searched'
+Assert-Equal (@($levelCalls | Where-Object { $_ -eq 'Q:\ELO\java\bin\java.exe' }).Count) 1 'ELO layout is checked once, not again as a generic folder'
+Assert-Equal ($levelScan.Locations -contains 'Q:\Datos\sub\java\bin\java.exe') $false 'third level is never searched automatically'
+Assert-Equal (@($levelScan.Candidates | Where-Object { $_.EloCandidateRoot -eq 'Q:\OtraCarpeta\' -and $_.EloPathRationale -like 'Second-level*' }).Count) 1 'second-level hits explain their layout and make no ELO claim'
 Assert-Equal $calls[0] 'C:\java\bin\java.exe' 'First drive exact path'
-Assert-Equal $calls[-1] 'Z:\ELO\java\bin\java.exe' 'Last drive exact path'
+Assert-Equal $calls[-2] 'Z:\ELO\java\bin\java.exe' 'Last drive exact path (followed by the first-level folder listing)'
+Assert-Equal $calls[-1] 'Z:\' 'Last call lists the first-level folders of the last drive'
 $invalidCalls = New-Object 'System.Collections.Generic.List[string]'
 $null = Get-EloJavaCandidates -DriveRoots @('B:\', 'Q:\nested\', 'Z:\') -IsReparsePoint { $false } -GetChildren { param($Path) $invalidCalls.Add($Path) }
-Assert-Equal $invalidCalls.Count 2 'Only C-Z drive roots accepted'
+Assert-Equal $invalidCalls.Count 3 'Only C-Z drive roots accepted (two layouts plus the folder listing, for Z: only)'
 $linkedCalls = New-Object 'System.Collections.Generic.List[string]'
 $linked = Get-EloJavaCandidates -DriveRoots @('Q:\') -IsReparsePoint { param($Path) $Path -eq 'Q:\ELO' } -GetChildren { param($Path) $linkedCalls.Add($Path) }
-Assert-Equal $linkedCalls.Count 1 'Reparse ancestor prevents exact file access'
+Assert-Equal (@($linkedCalls | Where-Object { $_ -like '*ELO*' }).Count) 0 'Reparse ancestor prevents exact file access'
+Assert-Equal $linkedCalls.Count 2 'only java\bin and the first-level listing are read'
 Assert-Equal $linked.CoverageRecords[1].Outcome 'SkippedReparsePoint' 'Reparse ancestor tracked'
 $missing = Get-EloJavaCandidates -DriveRoots @('Q:\') -IsReparsePoint { throw [System.Management.Automation.ItemNotFoundException]::new('missing') } -GetChildren { throw 'Unexpected access' }
 Assert-Equal $missing.Issues.Count 0 'Missing roots are normal'

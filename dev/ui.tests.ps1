@@ -39,7 +39,7 @@ function boot(hash = '#token=test-session-token') {
  const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(m => [m[1],new Element(m[1])]));
  const translated = [...html.matchAll(/data-i18n="([^"]+)"/g)].map(m => { const el=new Element(); el.dataset.i18n=m[1]; return el; });
  const calls=[],downloads=[],timers=[];
- let status={state:'completed',progress:100,checked:4}, results=[row()], security=securityFixture();
+ let status={state:'completed',progress:100,checked:4}, results=[row()], security=securityFixture(), backups=null;
  let preview={previewId:'preview_1',summary:both('Backup then change <script>unsafe()</script>','Sichern, dann ändern'),warnings:[both('Check compatibility','Kompatibilität prüfen')]};
  let failure=null, errorBody={error:'operation_failed',warnings:[]}, raw=null, ack={ok:true};
  const history={replaceState(...args) { history.args=args; }};
@@ -61,13 +61,13 @@ function boot(hash = '#token=test-session-token') {
  assert.deepEqual(Object.keys(JSON.parse(options.body)),['language'],'no client-provided evidence');
  return new Response(JSON.stringify({html:'<!doctype html><html lang="'+language+'"><body>safe report</body></html>'}));
  }
- const body=path.endsWith('/status') ? status : path.endsWith('/results') ? {results,security} : path.endsWith('/preview') ? preview : ack;
+ const body=path.endsWith('/status') ? status : path.endsWith('/results') ? (backups === null ? {results,security} : {results,security,backups}) : path.endsWith('/preview') ? preview : ack;
  return new Response(JSON.stringify(body));
  }};
  vm.runInNewContext(scripts[0][1],context,{timeout:2000});
  return {el:id => elements.get(id),calls,downloads,history,translated,document,
  poll:async () => { await timers[0](); await tick(); },
- status:value => { status=value; },results:value => { results=value; },security:value => { security=value; },preview:value => { preview=value; },failure:(value,body={error:'operation_failed',warnings:[]}) => { failure=value; errorBody=body; },raw:value => { raw=value; },ack:value => { ack=value; }};
+ status:value => { status=value; },backups:value => { backups=value; },results:value => { results=value; },security:value => { security=value; },preview:value => { preview=value; },failure:(value,body={error:'operation_failed',warnings:[]}) => { failure=value; errorBody=body; },raw:value => { raw=value; },ack:value => { ack=value; }};
 }
 (async () => {
  const technical=boot(); await tick();
@@ -465,7 +465,24 @@ function boot(hash = '#token=test-session-token') {
    outcomes.failure(null);
  }
  outcomes.failure(500,{error:'update_manual_recovery_required',warnings:[both('ZIP restore needed','ZIP noetig')]}); await outcomes.el('update').click();
- assert(outcomes.el('recoveryNotice').textContent.includes('CRITICAL')); assert.equal(outcomes.el('apply').disabled,true); assert.equal(outcomes.el('nav2').disabled,true); console.log('PASS: JVM evidence/export, exact advisory allowlist, bounded errors/warnings, admin/access denial, rollback/recovery lock, unavailable update, locales and token security');
+ assert(outcomes.el('recoveryNotice').textContent.includes('CRITICAL')); assert.equal(outcomes.el('apply').disabled,true); assert.equal(outcomes.el('nav2').disabled,true); // ---- existing backups are shown first and restorable by server-side id.
+ const bk=(over={}) => ({id:'bk_1',path:'C:\\ELO\\java.backup-20260101120000.zip',runtime:'C:\\ELO\\java',version:'17.0.2+8',created:'2026-01-01 12:00',size:205911747,...over});
+ const backupsUi=boot(); await tick();
+ assert.equal(backupsUi.el('backupsBox').attrs.hidden,'', 'no backups, no box');
+ backupsUi.backups([bk(),bk({id:'bk_2',version:'21.0.1'})]); await backupsUi.poll();
+ assert.equal(backupsUi.el('backupsBox').attrs.hidden,undefined,'existing backups are shown on the first step'); assert.equal(backupsUi.el('backups').children.length,2);
+ const bcard=backupsUi.el('backups').children[0];
+ assert(bcard.children[0].textContent.includes('C:\\ELO\\java — 17.0.2+8') && bcard.children[2].textContent.includes('2026-01-01 12:00 UTC · 196 MB'));
+ await bcard.onclick();
+ assert.deepEqual(JSON.parse(backupsUi.calls.at(-1).options.body),{actionId:'restore-backup',resultId:'bk_1'}); assert.equal(visibleSteps(backupsUi),'4');
+ assert.equal(backupsUi.el('previewKind').textContent,'Restore from backup');
+ backupsUi.el('confirm').checked=true; backupsUi.el('confirm').onchange(); await backupsUi.el('apply').click();
+ assert.deepEqual(JSON.parse(backupsUi.calls.at(-1).options.body),{actionId:'restore-backup',resultId:'bk_1',previewId:'preview_1'}); assert.equal(visibleSteps(backupsUi),'5');
+ changeLocale(backupsUi,'de'); assert(backupsUi.translated.find(el => el.dataset.i18n === 'backupsTitle').textContent === 'Vorhandene Backups'); changeLocale(backupsUi,'en');
+ for (const bad of [[bk({id:'bad;id'})],[bk({size:-1})],[bk({path:''})],[bk({extra:1})],[bk(),bk()],Array.from({length:51},(_,n) => bk({id:'bk_'+n})),'nope']) {
+   backupsUi.backups(bad); await backupsUi.poll(); assert(backupsUi.el('error').textContent.includes('invalid response'),'invalid backup list rejected');
+ }
+ backupsUi.backups([bk()]); await backupsUi.poll(); assert.equal(backupsUi.el('error').textContent,''); console.log('PASS: JVM evidence/export, exact advisory allowlist, bounded errors/warnings, admin/access denial, rollback/recovery lock, unavailable update, locales and token security');
 })().catch(error => { console.error(error); process.exitCode=1; });
 '@
 $tests | & node - $htmlPath

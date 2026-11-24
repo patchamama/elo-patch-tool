@@ -52,7 +52,8 @@ Security/evidence:
 Scanning does not write ELO files or machine configuration. It may execute trusted
 local java.exe -version, which is code execution: scan trusted installations only.
 The packaged launcher checks ready fixed or removable drives C: through Z: for
-\java\bin\java.exe and \ELO\java\bin\java.exe at each drive root. An optional
+\java\bin\java.exe, \ELO\java\bin\java.exe and \<folder>\java\bin\java.exe (any first-level folder)
+at each drive root. An optional
 manual directory is searched after root checks, with depth 5 and 10,000 entries.
 Discovery is not exhaustive; errors, limits or cancellation can reduce coverage.
 A missing match is not proof of absence or safety; ELO ownership is not verified.

@@ -359,16 +359,17 @@ function Get-EloJavaCandidates {
         if (-not $PSBoundParameters.ContainsKey('DriveRoots')) {
             $DriveRoots = @(67..90 | ForEach-Object { '{0}:\' -f [char]$_ })
         }
-        foreach ($root in $DriveRoots) {
-            if ($root -notmatch '^[C-Z]:\\$') { continue }
-            foreach ($relative in @('java\bin\java.exe', 'ELO\java\bin\java.exe')) {
-                if (& $ShouldCancel) { $state.Cancelled = $true; break }
-                $path = $root + $relative
+        # One layout check: <base><relative> must be a real java.exe below non-reparse folders.
+        $checkLayout = {
+            param($base, $relative, $rationale)
+            do {
+                if (& $ShouldCancel) { $state.Cancelled = $true; return }
+                $path = $base + $relative
                 $attempt = [pscustomobject]@{ Location = $path; Outcome = 'Inspecting'; EntriesSeen = 0 }
                 $attempts.Add($attempt)
                 try {
                     $parts = $relative -split '\\'
-                    $ancestor = $root
+                    $ancestor = $base
                     $skip = $false
                     if (& $IsReparsePoint $ancestor) {
                         $issues.Add("Skipped reparse point: $ancestor")
@@ -384,12 +385,12 @@ function Get-EloJavaCandidates {
                         }
                         $ancestor += '\'
                     }
-                    if ($skip) { continue }
+                    if ($skip) { return }
                     foreach ($entry in @(& $GetChildren $path)) {
                         if (& $ShouldCancel) { $state.Cancelled = $true; $attempt.Outcome = 'Cancelled'; break }
                         if (-not $entry.PSIsContainer -and $entry.FullName -ieq $path -and -not ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $seenLocations.Add($entry.FullName)) {
                             $locations.Add($entry.FullName)
-                            $candidates.Add([pscustomobject]@{ Location = $entry.FullName; EloCandidateRoot = $root; EloPathRationale = 'Exact drive-root Java layout; ELO ownership is not verified.' })
+                            $candidates.Add([pscustomobject]@{ Location = $entry.FullName; EloCandidateRoot = $base; EloPathRationale = $rationale })
                             $attempt.EntriesSeen++
                         }
                     }
@@ -402,8 +403,29 @@ function Get-EloJavaCandidates {
                         $issues.Add("Cannot inspect ${path}: $($_.Exception.Message)")
                     }
                 }
+            } while ($false)
+        }
+        foreach ($root in $DriveRoots) {
+            if ($root -notmatch '^[C-Z]:\\$') { continue }
+            foreach ($relative in @('java\bin\java.exe', 'ELO\java\bin\java.exe')) {
+                if (& $ShouldCancel) { $state.Cancelled = $true; break }
+                & $checkLayout $root $relative 'Exact drive-root Java layout; ELO ownership is not verified.'
             }
-            if ($state.Cancelled) { break }
+            # Generalized layout: X:\java\bin (first level) and X:\<any folder>\java\bin (second level).
+            if (-not $state.Cancelled) {
+                $folders = @()
+                try {
+                    if (-not (& $IsReparsePoint $root)) {
+                        $folders = @(& $GetChildren $root | Where-Object { $_.PSIsContainer -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | Select-Object -First 1000)
+                    }
+                } catch { $folders = @() }
+                foreach ($folder in $folders) {
+                    if (& $ShouldCancel) { $state.Cancelled = $true; break }
+                    $name = [string]$folder.Name
+                    if ($name -ieq 'ELO' -or $name -ieq 'java' -or $name -in @('Windows', '$Recycle.Bin', 'System Volume Information', 'Recovery', 'PerfLogs')) { continue }
+                    & $checkLayout ($root + $name + '\') 'java\bin\java.exe' 'Second-level Java layout (X:\<folder>\java\bin); ELO ownership is not verified.'
+                }
+            }            if ($state.Cancelled) { break }
         }
     }
     if (-not $state.Cancelled -and $ManualPath) {
@@ -515,7 +537,8 @@ Security/evidence:
 Scanning does not write ELO files or machine configuration. It may execute trusted
 local java.exe -version, which is code execution: scan trusted installations only.
 The packaged launcher checks ready fixed or removable drives C: through Z: for
-\java\bin\java.exe and \ELO\java\bin\java.exe at each drive root. An optional
+\java\bin\java.exe, \ELO\java\bin\java.exe and \<folder>\java\bin\java.exe (any first-level folder)
+at each drive root. An optional
 manual directory is searched after root checks, with depth 5 and 10,000 entries.
 Discovery is not exhaustive; errors, limits or cancellation can reduce coverage.
 A missing match is not proof of absence or safety; ELO ownership is not verified.
@@ -843,9 +866,10 @@ function New-EloServerSession {
     @{
         Port=$Port; Origin="http://127.0.0.1:$Port"; Token=(New-EloSecret); UiHtml=$UiHtml; ScanSource=$ScanSource
         State='idle'; Results=@(); Targets=@{}; Preview=$null; Worker=$null; Backup=$null; RecoveryRequired=$false; LastError=$null
-        ReportJvms=@(); ReportActions=@(); ReportIndexes=@{}; UpdateContext=$null; ReportRecovery=$null; LastUpdate=$null
+        ReportJvms=@(); ReportActions=@(); ReportIndexes=@{}; UpdateContext=$null; ReportRecovery=$null; LastUpdate=$null; Backups=@{}; BackupsCache=$null
         Adapters=@{
             NewUpdateContext={ param($Root,$Runtime,$StopServices) New-EloUpdateContext -Adapters (New-EloWindowsUpdateAdapters -ApprovedRoot $Root -Runtime $Runtime -AllowServiceStop:([bool]$StopServices)) -Production }
+            BackupRoots={ @([IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -in @([IO.DriveType]::Fixed,[IO.DriveType]::Removable) -and $_.Name -cmatch '^[C-Z]:\\$' } | ForEach-Object { $_.RootDirectory.FullName }) }
             Identity={ param($Path) Get-EloRuntimeIdentity $Path }
             EloVersion={ param($Roots) Get-EloInstalledIndexserverVersion $Roots }
             ResolveRelease={ param($Identity) Resolve-EloLatestRelease -Vendor $Identity.Vendor -Branch $Identity.Branch -Architecture $Identity.Architecture -ImageType $Identity.ImageType }
@@ -1223,6 +1247,56 @@ function ConvertTo-EloUpdateCode {
     if ($code -cmatch '^[a-z0-9_]{1,64}(:[A-Za-z0-9_+.\-]{1,32})?') { return $Matches[0] }
     return 'update_failed'
 }
+function Get-EloBackupList {
+    # Backup ZIPs written by this tool (<runtime>.backup-<yyyyMMddHHmmss>.zip) next to a runtime, on every
+    # drive at level 1 (X:\) and level 2 (X:\<folder>\). Read-only, bounded, cached for 30 s. The ids are
+    # server-side capabilities: the UI never sends a path.
+    param($Session)
+    $now=& $Session.Adapters.Clock
+    if ($Session.BackupsCache -and $Session.BackupsCache.Expires -gt $now) { return $Session.BackupsCache.Items }
+    $found=New-Object 'System.Collections.Generic.List[object]'
+    $skip=@('Windows','$Recycle.Bin','System Volume Information','Recovery','PerfLogs')
+    try {
+        foreach ($root in @(& $Session.Adapters.BackupRoots)) {
+            $dirs=New-Object 'System.Collections.Generic.List[string]'; $dirs.Add($root)
+            try { foreach ($d in @([IO.Directory]::GetDirectories($root) | Select-Object -First 1000)) { if ($skip -cnotcontains (Split-Path -Leaf $d) -and -not ((Get-Item -LiteralPath $d -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { $dirs.Add($d) } } } catch { }
+            foreach ($dir in $dirs) {
+                try { $files=@([IO.Directory]::GetFiles($dir,'*.backup-*.zip')) } catch { continue }
+                foreach ($file in $files) {
+                    if ($found.Count -ge 50) { break }
+                    $leaf=Split-Path -Leaf $file
+                    if ($leaf -cnotmatch '^([A-Za-z0-9_.-]{1,64})\.backup-(\d{14})\.zip$') { continue }
+                    $runtimeName=$Matches[1]; $stamp=$Matches[2]
+                    $created=[datetime]::MinValue
+                    if (-not [datetime]::TryParseExact($stamp,'yyyyMMddHHmmss',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal,[ref]$created)) { continue }
+                    $info=New-Object IO.FileInfo($file)
+                    if ($info.Length -lt 1024 -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
+                    $version='unknown'
+                    try {
+                        Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+                        $stream=[IO.File]::OpenRead($file); $zip=New-Object IO.Compression.ZipArchive($stream,[IO.Compression.ZipArchiveMode]::Read,$true)
+                        try {
+                            $entry=$zip.GetEntry('tree/release')
+                            if ($entry -and $entry.Length -le 65536) {
+                                $reader=New-Object IO.StreamReader($entry.Open())
+                                try { $text=$reader.ReadToEnd() } finally { $reader.Dispose() }
+                                if ($text -cmatch '(?m)^JAVA_RUNTIME_VERSION="([^"\r\n]{1,64})"') { $version=$Matches[1] } elseif ($text -cmatch '(?m)^JAVA_VERSION="([^"\r\n]{1,64})"') { $version=$Matches[1] }
+                            }
+                        } finally { $zip.Dispose(); $stream.Dispose() }
+                    } catch { }
+                    $found.Add(@{Path=$file;Runtime=(Join-Path $dir $runtimeName);Root=$dir.TrimEnd('\');Stamp=$stamp;Version=$version;Created=$created.ToString('yyyy-MM-dd HH:mm');Size=[long]$info.Length})
+                }
+            }
+        }
+    } catch { }
+    $Session.Backups=@{}; $items=@()
+    foreach ($entry in @($found | Sort-Object { $_.Stamp } -Descending)) {
+        $id=New-EloSecret; $Session.Backups[$id]=$entry
+        $items+=@{id=$id;path=[string]$entry.Path;runtime=[string]$entry.Runtime;version=[string]$entry.Version;created=[string]$entry.Created;size=[long]$entry.Size}
+    }
+    $Session.BackupsCache=@{Expires=$now.AddSeconds(30);Items=$items}
+    return $items
+}
 function Get-EloUpdateTarget {
     # Shared eligibility for update and restore: a scanned java.exe below a directory.
     param($Session,[string]$ResultId)
@@ -1286,6 +1360,7 @@ function Add-EloUpdateReportActions {
     if ($Outcome -in @('Success','SimulatedSuccess','RolledBack','ManualRecoveryRequired')) {
         $Session.ReportActions+=@{Kind='Backup';Status='Proven';Verified=$true;BackupVerified=$true;RuntimeIndex=$RuntimeIndex;EvidenceCode='BackupManifestMatched';EvidenceVerified=$true;FromVersion=$from;BackupVersion=$from}
         $Session.ReportRecovery=@{Validated=$true;RuntimeIndex=$RuntimeIndex;Archive=$Preview.Paths.Backup;Original=$Preview.Paths.Runtime;Destination=($Preview.Paths.Runtime+'.restore')}
+        $Session.BackupsCache=$null
         $Session.LastUpdate=@{Runtime=$Preview.Paths.Runtime;Root=$Preview.Root;Backup=$Preview.Paths.Backup;FromVersion=$from;ToVersion=$to;RuntimeIndex=$RuntimeIndex;Services=$Preview.Services}
     }
     switch ($Outcome) {
@@ -1330,20 +1405,36 @@ function Invoke-EloRuntimeUpdateAction {
         default { Stop-EloRequestDetail 422 'update_rejected_no_change' $failure }
     }
 }
+function Get-EloRestoreSource {
+    # A restore source is either a scanned runtime with a backup made in this session, or a backup
+    # discovered on disk (including backups from earlier sessions), selected by server-side id.
+    param($Session,[string]$ResultId)
+    if ($Session.Backups.ContainsKey($ResultId)) {
+        $b=$Session.Backups[$ResultId]
+        if (-not (Test-Path -LiteralPath $b.Path)) { Stop-EloRequest 409 'no_backup_for_target' }
+        $current=''; $location=$null
+        try { $current=[string](& $Session.Adapters.Identity $b.Runtime).Version } catch { $current='' }
+        $match=$Session.Targets.GetEnumerator() | Where-Object { [string]$_.Value.Location -ieq (Join-Path $b.Runtime 'bin\java.exe') } | Select-Object -First 1
+        if ($match) { $location=[string]$match.Value.Location }
+        return @{Runtime=$b.Runtime;Root=$b.Root;Backup=$b.Path;ToVersion=[string]$b.Version;FromVersion=$current;JavaPath=$location;Index=$(if ($match) { [int]$Session.ReportIndexes[$match.Key] } else { 0 });FromDisk=$true}
+    }
+    $info=Get-EloUpdateTarget $Session $ResultId
+    $last=$Session.LastUpdate
+    if (-not $last -or [string]$last.Runtime -cne [string]$info.Runtime -or -not (Test-Path -LiteralPath $last.Backup)) { Stop-EloRequest 409 'no_backup_for_target' }
+    return @{Runtime=$info.Runtime;Root=$info.Root;Backup=$last.Backup;ToVersion=[string]$last.FromVersion;FromVersion=[string]$last.ToVersion;JavaPath=[string]$info.Target.Location;Index=[int]$Session.ReportIndexes[$ResultId];FromDisk=$false}
+}
 function New-EloRestorePreview {
     param($Session,[string]$ResultId)
     $Session.Preview=$null
     if (-not (& $Session.Adapters.Admin)) { Stop-EloRequest 403 'administrator_required' }
-    $info=Get-EloUpdateTarget $Session $ResultId
-    $last=$Session.LastUpdate
-    if (-not $last -or [string]$last.Runtime -cne [string]$info.Runtime -or -not (Test-Path -LiteralPath $last.Backup)) { Stop-EloRequest 409 'no_backup_for_target' }
-    $services=Get-EloUpdateUsers $Session $info.Runtime
+    $source=Get-EloRestoreSource $Session $ResultId
+    $services=@(); if (Test-Path -LiteralPath $source.Runtime) { $services=Get-EloUpdateUsers $Session $source.Runtime }
     $now=& $Session.Adapters.Clock
-    $preview=@{Id=(New-EloSecret);ResultId=$ResultId;ActionId='restore-backup';Runtime=$info.Runtime;Root=$info.Root;Backup=$last.Backup;Services=$services
-        Stamp=$now.ToString('yyyyMMddHHmmss');FromVersion=[string]$last.ToVersion;ToVersion=[string]$last.FromVersion;JavaPath=[string]$info.Target.Location;Expires=$now.AddMinutes(2)}
+    $preview=@{Id=(New-EloSecret);ResultId=$ResultId;ActionId='restore-backup';Runtime=$source.Runtime;Root=$source.Root;Backup=$source.Backup;Services=$services
+        Stamp=$now.ToString('yyyyMMddHHmmss');FromVersion=$source.FromVersion;ToVersion=$source.ToVersion;JavaPath=$source.JavaPath;Index=$source.Index;Expires=$now.AddMinutes(2)}
     $Session.Preview=$preview
-    $summaryEn="Restore the previous runtime ($($preview.ToVersion)) of $($info.Runtime) from the verified backup ZIP $($last.Backup). Every file is hash-checked before the swap; the current runtime is renamed to $($info.Runtime).replaced-$($preview.Stamp) and kept; nothing is deleted."
-    $summaryDe="Die vorherige Runtime ($($preview.ToVersion)) von $($info.Runtime) aus dem geprueften Backup-ZIP $($last.Backup) wiederherstellen. Jede Datei wird vor dem Austausch per Hash geprueft; die aktuelle Runtime wird nach $($info.Runtime).replaced-$($preview.Stamp) umbenannt und bleibt erhalten; es wird nichts geloescht."
+    $summaryEn="Restore the runtime ($($preview.ToVersion)) of $($source.Runtime) from the backup ZIP $($source.Backup). Every file is hash-checked before the swap; the current runtime (if any) is renamed to $($source.Runtime).replaced-$($preview.Stamp) and kept; nothing is deleted."
+    $summaryDe="Die Runtime ($($preview.ToVersion)) von $($source.Runtime) aus dem Backup-ZIP $($source.Backup) wiederherstellen. Jede Datei wird vor dem Austausch per Hash geprueft; die aktuelle Runtime (falls vorhanden) wird nach $($source.Runtime).replaced-$($preview.Stamp) umbenannt und bleibt erhalten; es wird nichts geloescht."
     $warnings=@(@{en='Restoring reverts the security update: the older runtime may again be vulnerable.';de='Die Wiederherstellung macht das Sicherheitsupdate rueckgaengig: die aeltere Runtime kann wieder verwundbar sein.'})
     if ($services.Count -gt 0) {
         $list=Format-EloServiceList $services
@@ -1357,19 +1448,21 @@ function Invoke-EloRestoreAction {
     if (-not $preview -or $preview.ActionId -cne 'restore-backup' -or $preview.Id -cne $Body.previewId -or $preview.ResultId -cne $Body.resultId -or
         $Body.actionId -cne 'restore-backup' -or (& $Session.Adapters.Clock) -ge $preview.Expires) { Stop-EloRequest 409 'preview_expired_or_mismatched' }
     if (-not (& $Session.Adapters.Admin)) { Stop-EloRequest 403 'administrator_required' }
-    $target=$Session.Targets[$Body.resultId]
-    if (-not $target -or $target.Location -cne $preview.JavaPath) { Stop-EloRequest 409 'stale_preview' }
-    $index=[int]$Session.ReportIndexes[$Body.resultId]
+    if ($preview.JavaPath) {
+        $target=$Session.Targets[$Body.resultId]
+        if (-not $Session.Backups.ContainsKey([string]$Body.resultId) -and (-not $target -or $target.Location -cne $preview.JavaPath)) { Stop-EloRequest 409 'stale_preview' }
+    }
+    $index=[int]$preview.Index
     try {
         $null=& $Session.Adapters.RestoreBackup $preview.Root $preview.Runtime $preview.Backup ($preview.Services.Count -gt 0) $preview.Stamp
         $restored=& $Session.Adapters.Identity $preview.Runtime
-        if (-not (Test-EloSameJavaRelease ([string]$restored.Version) ([string]$preview.ToVersion))) { throw 'restored_version_mismatch' }
+        if ([string]$preview.ToVersion -and [string]$preview.ToVersion -cne 'unknown' -and -not (Test-EloSameJavaRelease ([string]$restored.Version) ([string]$preview.ToVersion))) { throw 'restored_version_mismatch' }
     } catch {
-        $Session.ReportActions+=@{Kind='Restore';Status='Failed';RuntimeIndex=$index;EvidenceCode='RestoreFailed';EvidenceVerified=$true}
+        if ($index -gt 0) { $Session.ReportActions+=@{Kind='Restore';Status='Failed';RuntimeIndex=$index;EvidenceCode='RestoreFailed';EvidenceVerified=$true} }
         Stop-EloRequestDetail 422 'restore_failed_no_change' (ConvertTo-EloUpdateCode $_.Exception.Message)
     }
-    $Session.ReportActions+=@{Kind='Restore';Status='Proven';Verified=$true;RuntimeIndex=$index;EvidenceCode='OriginalRuntimeRestored';EvidenceVerified=$true;FromVersion=$preview.FromVersion;ToVersion=$preview.ToVersion}
-    $Session.LastUpdate=$null
+    if ($index -gt 0) { $Session.ReportActions+=@{Kind='Restore';Status='Proven';Verified=$true;RuntimeIndex=$index;EvidenceCode='OriginalRuntimeRestored';EvidenceVerified=$true;FromVersion=$preview.FromVersion;ToVersion=$preview.ToVersion} }
+    $Session.LastUpdate=$null; $Session.BackupsCache=$null
     return @{ok=$true}
 }function Get-EloSessionReportHtml {
     param($Session,[ValidateSet('en','de')][string]$Language)
@@ -1404,7 +1497,7 @@ function Invoke-EloApi {
         if ($Request.Target -ceq '/api/status') { return @{state=$Session.State} }
         if ($Session.RecoveryRequired) { Stop-EloRequest 500 'rollback_failed_manual_recovery_required' }
         if ($Session.LastError) { Stop-EloRequest $Session.LastError.Status $Session.LastError.Code }
-        return @{results=@($Session.Results);security=(Get-EloSecurityMetadata)}
+        return @{results=@($Session.Results);security=(Get-EloSecurityMetadata);backups=@(Get-EloBackupList $Session)}
     }
     if ($Request.Headers['Content-Type'] -cnotin @('application/json','application/json; charset=utf-8')) { Stop-EloRequest 415 'json_required' }
     switch -CaseSensitive ($Request.Target) {
@@ -1769,6 +1862,10 @@ a{color:var(--accent)}
 ol.manual{padding-left:1.25rem;margin:.5rem 0}
 ol.manual li{margin:.35rem 0}
 .sec{margin-top:8px}
+.backups{border:1.5px solid var(--accent);border-radius:13px;background:var(--accent-soft);padding:14px;margin:0 0 16px}
+.backups h3{display:flex;align-items:center;gap:8px;margin:0 0 4px;font-size:1rem}
+.backups .rt{background:var(--surface)}
+.badge.act{color:var(--accent);background:var(--accent-soft)}
 </style>
 </head>
 <body>
@@ -1809,6 +1906,7 @@ ol.manual li{margin:.35rem 0}
 
 <section class="panel" id="step1" aria-labelledby="h1s">
 <h2 id="h1s"><span class="ico"><svg class="i"><use href="#i-search"/></svg></span><span data-i18n="step1Title"></span></h2>
+<div id="backupsBox" class="backups" hidden><h3><svg class="i"><use href="#i-undo"/></svg><span data-i18n="backupsTitle"></span></h3><p class="muted" data-i18n="backupsText"></p><div class="cards" id="backups"></div></div>
 <p class="lead" data-i18n="step1Text"></p>
 <div class="status-line"><span class="spin" id="spinner" hidden></span><span id="status" role="status" aria-live="polite"></span></div>
 <progress id="progress" max="100" aria-label="Progress" hidden></progress><p id="progressText" class="muted"></p>
@@ -1889,7 +1987,7 @@ const messages = {
  en: {
  working:'Working… preparing or applying the change can take a minute (verified download, tests, backup). Please keep this page open.',language:'Language',tagline:'Java runtime check, update and recovery for ELO servers',intro:'Local, read-only discovery. No change is made by scanning or previewing. Keep this session open while work is running.',
  step1:'Scan',step2:'Runtime',step3:'Action',step4:'Confirm',step5:'Report',
- step1Title:'Find Java runtimes',step1Text:'A read-only scan looks for Java in X:\\java and X:\\ELO\\java on every drive (C: to Z:). Nothing is changed.',
+ step1Title:'Find Java runtimes',step1Text:'A read-only scan looks for Java in X:\\java\\bin and X:\\<folder>\\java\\bin (for example ELO\\java\\bin) on every drive (C: to Z:). Nothing is changed.',
  step2Title:'Choose a runtime',step2Text:'Select the Java runtime you want to work on.',step3Title:'Choose an action',step4Title:'Review and confirm',step5Title:'Report and next steps',
  continue:'Continue',back:'Back',startOver:'Scan again',advanced:'Advanced: search another folder',evidence:'Technical evidence',
  scanningNow:'Scanning drives',foundN:'Java runtimes found: {n}.',foundNone:'No Java runtime found. Open “Advanced” to search another folder, then scan again.',
@@ -1915,6 +2013,7 @@ const messages = {
  'Stop only the affected service during the approved window, apply the chosen change using the vendor procedure, then restart. Check service health and effective JVM options/version. If checks fail, stop and restore the saved configuration/runtime.',
  'Rescan and document the outcome. Keep the backup until validated. Contact ELO support if paths, service ownership or compatibility are uncertain.'],
  manualCommandsTitle:'PowerShell commands (administrator)',manualCommands:'# Run in an ADMINISTRATOR PowerShell. Adjust the paths and service names to your scan result.\n\n# 1) Find the runtime, its version and the services that use it\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nGet-Content \'C:\\ELO\\java\\release\' | Select-String \'IMPLEMENTOR|JAVA_RUNTIME_VERSION|OS_ARCH\'\nGet-CimInstance Win32_Service | Where-Object { $_.PathName -match \'ELO\' } | Select-Object Name, State, PathName\n[Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\')\n\n# 2) Back up the runtime (ZIP) before changing anything\nCompress-Archive -LiteralPath \'C:\\ELO\\java\' -DestinationPath \'C:\\ELO\\java-backup.zip\'\n\n# 3) Temporary mitigation (machine-wide): KEEP the old value and append, never overwrite\n$old = [Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\'); $old\n[Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', (($old + \' -XX:-UseBASE64Intrinsics\').Trim()), \'Machine\')\n# Undo: [Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', $old, \'Machine\')   (use $null if it was empty)\n# Services only see the change after they are restarted.\n\n# 4) Update the runtime by hand (download the newest release of the SAME vendor and branch first)\n(Get-FileHash \'C:\\Downloads\\new-java.zip\' -Algorithm SHA256).Hash        # compare with the vendor\'s published SHA256\nStop-Service \'ELO-SRV01-1\' -Force                                        # every service that uses this Java\nRename-Item \'C:\\ELO\\java\' \'java.old\'\nExpand-Archive -LiteralPath \'C:\\Downloads\\new-java.zip\' -DestinationPath \'C:\\ELO\\java-new\'\nMove-Item (Get-ChildItem \'C:\\ELO\\java-new\' -Directory | Select-Object -First 1).FullName \'C:\\ELO\\java\'\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nStart-Service \'ELO-SRV01-1\'\n\n# 5) If something fails: stop the services, put the old runtime back, start the services\nStop-Service \'ELO-SRV01-1\' -Force\nRename-Item \'C:\\ELO\\java\' \'java.failed\'; Rename-Item \'C:\\ELO\\java.old\' \'java\'\nStart-Service \'ELO-SRV01-1\'\n# Or restore from the ZIP: Expand-Archive \'C:\\ELO\\java-backup.zip\' -DestinationPath \'C:\\ELO\\restore\'; then move the java folder back',
+ backupsTitle:'Existing backups',backupsText:'Backups made by this tool were found on this server. Pick one to bring that Java version back; the runtime that is installed now is kept next to it.',restoreShort:'Restore this backup',
  exportHeading:'Activity log',exportJson:'Export JSON results',exportLog:'Export activity log',
  idle:'Ready',scanning:'Scanning',cancelling:'Cancellation requested; waiting for the scanner',completed:'Scan completed',cancelled:'Scan cancelled; results may be incomplete',error:'Operation failed',unknown:'Unknown',
  vulnerable:'Potentially vulnerable',safe:'No vulnerability detected by current rules',mitigated:'Mitigation detected',unsupported:'Unsupported runtime',
@@ -1936,7 +2035,7 @@ const messages = {
  targetIneligible:'The selected JVM is not eligible for this change. Review the scan evidence.',optionsUnsupported:'Existing JVM/environment settings are ambiguous or unsupported. Review them with your administrator before making changes.',
  scanSent:'Scan requested',cancelSent:'Cancellation requested',previewReady:'Preview received',actionSent:'Confirmed action completed',connected:'Session connected',report:'Report exported',log:'Activity log exported',
  units:'items checked',previewKind:'Selected change',mitigation:'Temporary mitigation',runtimeUpdate:'Runtime update',
- searchPath:'Optional local search directory',searchHelp:'On ready fixed or removable drives C: through Z:, the scan checks only X:\\java\\bin\\java.exe and X:\\ELO\\java\\bin\\java.exe at each drive root. Optionally enter an absolute local directory to search after the root checks, e.g. C:\\ELO data. It is read-only search data, never a command. Network/device paths and wildcards are not accepted.',
+ searchPath:'Optional local search directory',searchHelp:'On ready fixed or removable drives C: through Z:, the scan checks X:\\java\\bin\\java.exe, X:\\ELO\\java\\bin\\java.exe and X:\\<folder>\\java\\bin\\java.exe (any first-level folder, e.g. X:\\OtherFolder\\java\\bin) at each drive root. Optionally enter an absolute local directory to search after the root checks, e.g. C:\\ELO data. It is read-only search data, never a command. Network/device paths and wildcards are not accepted.',
  invalidPath:'Enter an absolute local Windows directory of at most 1024 characters, without controls, wildcards or relative segments.',
  jvmTable:'Discovered JVMs and evidence',runtimeRoot:'Runtime root',vendor:'Vendor',architecture:'Architecture',eloRationale:'ELO association rationale',classificationEvidence:'Classification evidence',
  patched:'Patched', 'not-affected':'Not affected',inconclusive:'Inconclusive',
@@ -1947,7 +2046,7 @@ const messages = {
  de: {
  working:'In Arbeit … Vorbereitung oder Anwendung der Änderung kann eine Minute dauern (geprüfter Download, Tests, Backup). Bitte lassen Sie diese Seite geöffnet.',language:'Sprache',tagline:'Java-Runtime prüfen, aktualisieren und wiederherstellen für ELO-Server',intro:'Lokale, schreibgeschützte Suche. Scan und Vorschau ändern nichts. Lassen Sie diese Sitzung während laufender Vorgänge geöffnet.',
  step1:'Scan',step2:'Runtime',step3:'Aktion',step4:'Bestätigen',step5:'Bericht',
- step1Title:'Java-Runtimes finden',step1Text:'Ein schreibgeschützter Scan sucht Java in X:\\java und X:\\ELO\\java auf allen Laufwerken (C: bis Z:). Es wird nichts geändert.',
+ step1Title:'Java-Runtimes finden',step1Text:'Ein schreibgeschützter Scan sucht Java in X:\\java\\bin und X:\\<Ordner>\\java\\bin (zum Beispiel ELO\\java\\bin) auf allen Laufwerken (C: bis Z:). Es wird nichts geändert.',
  step2Title:'Runtime auswählen',step2Text:'Wählen Sie die Java-Runtime, die Sie bearbeiten möchten.',step3Title:'Aktion wählen',step4Title:'Prüfen und bestätigen',step5Title:'Bericht und nächste Schritte',
  continue:'Weiter',back:'Zurück',startOver:'Erneut scannen',advanced:'Erweitert: anderen Ordner durchsuchen',evidence:'Technische Nachweise',
  scanningNow:'Laufwerke werden durchsucht',foundN:'Gefundene Java-Runtimes: {n}.',foundNone:'Keine Java-Runtime gefunden. Öffnen Sie „Erweitert“, um einen anderen Ordner zu durchsuchen, und scannen Sie erneut.',
@@ -1973,6 +2072,7 @@ const messages = {
  'Stoppen Sie nur den betroffenen Dienst im genehmigten Wartungsfenster, führen Sie die gewählte Änderung nach Herstellerverfahren aus und starten Sie ihn erneut. Prüfen Sie Dienstzustand und wirksame JVM-Optionen beziehungsweise Version. Bei Fehlern stoppen und gesicherte Konfiguration oder Laufzeit wiederherstellen.',
  'Scannen Sie erneut und dokumentieren Sie das Ergebnis. Bewahren Sie die Sicherung bis zur erfolgreichen Prüfung auf. Bei unklaren Pfaden, Dienstzuordnung oder Kompatibilität wenden Sie sich an den ELO-Support.'],
  manualCommandsTitle:'PowerShell-Befehle (Administrator)',manualCommands:'# In einer ADMINISTRATOR-PowerShell ausfuehren. Pfade und Dienstnamen an das Scan-Ergebnis anpassen.\n\n# 1) Runtime, Version und die Dienste finden, die sie verwenden\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nGet-Content \'C:\\ELO\\java\\release\' | Select-String \'IMPLEMENTOR|JAVA_RUNTIME_VERSION|OS_ARCH\'\nGet-CimInstance Win32_Service | Where-Object { $_.PathName -match \'ELO\' } | Select-Object Name, State, PathName\n[Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\')\n\n# 2) Runtime vor jeder Aenderung als ZIP sichern\nCompress-Archive -LiteralPath \'C:\\ELO\\java\' -DestinationPath \'C:\\ELO\\java-backup.zip\'\n\n# 3) Vorlaeufige Risikominderung (systemweit): alten Wert BEHALTEN und anhaengen, nie ueberschreiben\n$old = [Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\'); $old\n[Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', (($old + \' -XX:-UseBASE64Intrinsics\').Trim()), \'Machine\')\n# Rueckgaengig: [Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', $old, \'Machine\')   ($null, falls leer)\n# Dienste sehen die Aenderung erst nach einem Neustart.\n\n# 4) Runtime manuell aktualisieren (zuerst die neueste Version DESSELBEN Herstellers und Branches laden)\n(Get-FileHash \'C:\\Downloads\\new-java.zip\' -Algorithm SHA256).Hash        # mit der veroeffentlichten SHA256 des Herstellers vergleichen\nStop-Service \'ELO-SRV01-1\' -Force                                        # jeden Dienst, der dieses Java verwendet\nRename-Item \'C:\\ELO\\java\' \'java.old\'\nExpand-Archive -LiteralPath \'C:\\Downloads\\new-java.zip\' -DestinationPath \'C:\\ELO\\java-new\'\nMove-Item (Get-ChildItem \'C:\\ELO\\java-new\' -Directory | Select-Object -First 1).FullName \'C:\\ELO\\java\'\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nStart-Service \'ELO-SRV01-1\'\n\n# 5) Bei Fehlern: Dienste stoppen, alte Runtime zurueckstellen, Dienste starten\nStop-Service \'ELO-SRV01-1\' -Force\nRename-Item \'C:\\ELO\\java\' \'java.failed\'; Rename-Item \'C:\\ELO\\java.old\' \'java\'\nStart-Service \'ELO-SRV01-1\'\n# Oder aus dem ZIP: Expand-Archive \'C:\\ELO\\java-backup.zip\' -DestinationPath \'C:\\ELO\\restore\'; dann den java-Ordner zurueckverschieben',
+ backupsTitle:'Vorhandene Backups',backupsText:'Auf diesem Server wurden Backups dieses Werkzeugs gefunden. Wählen Sie eines, um diese Java-Version zurückzuholen; die aktuell installierte Runtime bleibt daneben erhalten.',restoreShort:'Dieses Backup wiederherstellen',
  exportHeading:'Aktivitätsprotokoll',exportJson:'JSON-Ergebnisse exportieren',exportLog:'Aktivitätsprotokoll exportieren',
  idle:'Bereit',scanning:'Scan läuft',cancelling:'Abbruch angefordert; Scanner wird abgewartet',completed:'Scan abgeschlossen',cancelled:'Scan abgebrochen; Ergebnisse möglicherweise unvollständig',error:'Vorgang fehlgeschlagen',unknown:'Unbekannt',
  vulnerable:'Möglicherweise verwundbar',safe:'Nach aktuellen Regeln keine Schwachstelle erkannt',mitigated:'Risikominderung erkannt',unsupported:'Nicht unterstützte Laufzeit',
@@ -1994,7 +2094,7 @@ const messages = {
  targetIneligible:'Die gewählte JVM ist für diese Änderung nicht geeignet. Scan-Nachweise prüfen.',optionsUnsupported:'Vorhandene JVM-/Umgebungseinstellungen sind mehrdeutig oder nicht unterstützt. Vor Änderungen mit Ihrem Administrator prüfen.',
  scanSent:'Scan angefordert',cancelSent:'Abbruch angefordert',previewReady:'Vorschau empfangen',actionSent:'Bestätigte Änderung abgeschlossen',connected:'Sitzung verbunden',report:'Bericht exportiert',log:'Aktivitätsprotokoll exportiert',
  units:'Elemente geprüft',previewKind:'Gewählte Änderung',mitigation:'Vorübergehende Risikominderung',runtimeUpdate:'Laufzeit-Update',
- searchPath:'Optionales lokales Suchverzeichnis',searchHelp:'Auf bereiten festen oder Wechsellaufwerken C: bis Z: prüft der Scan nur X:\\java\\bin\\java.exe und X:\\ELO\\java\\bin\\java.exe im Laufwerksstamm. Optional ein absolutes lokales Verzeichnis eingeben, das nach den Stammprüfungen durchsucht wird, z. B. C:\\ELO data. Die Eingabe ist nur ein schreibgeschützter Suchpfad, niemals ein Befehl. Netzwerk- und Gerätepfade sowie Platzhalter sind nicht zulässig.',
+ searchPath:'Optionales lokales Suchverzeichnis',searchHelp:'Auf bereiten festen oder Wechsellaufwerken C: bis Z: prüft der Scan X:\\java\\bin\\java.exe, X:\\ELO\\java\\bin\\java.exe und X:\\<Ordner>\\java\\bin\\java.exe (jeder Ordner der ersten Ebene, z. B. X:\\AndererOrdner\\java\\bin) im Laufwerksstamm. Optional ein absolutes lokales Verzeichnis eingeben, das nach den Stammprüfungen durchsucht wird, z. B. C:\\ELO data. Die Eingabe ist nur ein schreibgeschützter Suchpfad, niemals ein Befehl. Netzwerk- und Gerätepfade sowie Platzhalter sind nicht zulässig.',
  invalidPath:'Geben Sie ein absolutes lokales Windows-Verzeichnis mit höchstens 1024 Zeichen ohne Steuerzeichen, Platzhalter oder relative Segmente ein.',
  jvmTable:'Gefundene JVMs und Nachweise',runtimeRoot:'Laufzeit-Stammverzeichnis',vendor:'Hersteller',architecture:'Architektur',eloRationale:'Begründung der ELO-Zuordnung',classificationEvidence:'Nachweis der Einstufung',
  patched:'Gepatcht','not-affected':'Nicht betroffen',inconclusive:'Nicht eindeutig',
@@ -2007,7 +2107,7 @@ const $ = id => document.getElementById(id);
 const token = new URLSearchParams(location.hash.slice(1)).get('token') || '';
 history.replaceState(null, '', location.pathname + location.search);
 let language = 'en', state = 'idle', rows = [], preview = null, pending = false, polling = false, lastError = '';
-let progress = null, checked = null, lastSuccessfulRefresh = null, security = {verifiedOn:null,advisories:[]};
+let backups = [], backupsKey = '', progress = null, checked = null, lastSuccessfulRefresh = null, security = {verifiedOn:null,advisories:[]};
 let lastWarnings = [], errorFromPoll = false, recoveryRequired = false, recoveryWarnings = [];
 let step = 1, awaitingScan = false, scanStartedAt = null, finalKind = '', canRestore = false, cardsKey = '';
 const events = [], states = ['idle','scanning','cancelling','completed','cancelled','error'];
@@ -2020,6 +2120,7 @@ const text = (value,max) => typeof value === 'string' && value.trim().length >= 
 const bilingual = (value,max) => keys(value,['en','de']) && text(value.en,max) && text(value.de,max);
 const classifications = ['vulnerable','patched','not-affected','inconclusive','mitigated','unsupported','safe'];
 const rowFields = ['id','path','runtimeRoot','version','vendor','architecture','status','eloRationale','classificationEvidence'];
+const validBackup = item => keys(item,['id','path','runtime','version','created','size']) && validId(item.id) && text(item.path,1024) && text(item.runtime,1024) && text(item.version,128) && text(item.created,32) && Number.isSafeInteger(item.size) && item.size >= 0;
 const validRow = row => keys(row,rowFields) && validId(row.id) && text(row.path,1024) && text(row.runtimeRoot,1024) && text(row.version,128) && text(row.vendor,256) && ['x86','x64','arm64','unknown'].includes(row.architecture) && classifications.includes(row.status) && bilingual(row.eloRationale,2048) && bilingual(row.classificationEvidence,4096);
 function validSearchPath(value) {
  return value.length <= 1024 && /^[A-Za-z]:\\/.test(value) && !/[\u0000-\u001f\u007f"<>|?*\/]/.test(value) && !value.slice(2).includes(':') && !value.split('\\').slice(1).some(part => /[. ]$/.test(part) || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part));
@@ -2128,6 +2229,23 @@ function renderCards() {
  $('cards').append(card);
  });
 }
+function renderBackups() {
+ const key = JSON.stringify(backups.map(item => item.id))+'|'+language+'|'+(pending || running() || recoveryRequired);
+ toggle('backupsBox',backups.length === 0);
+ if (key === backupsKey) return;
+ backupsKey = key; $('backups').replaceChildren();
+ backups.forEach(item => {
+ const card = document.createElement('button'), title = document.createElement('span'), path = document.createElement('span'), meta = document.createElement('span'), act = document.createElement('span');
+ card.className = 'rt'; card.setAttribute('type','button'); card.disabled = pending || running() || recoveryRequired;
+ title.className = 't'; title.textContent = safeText(item.runtime)+' — '+safeText(item.version);
+ path.className = 'p'; path.textContent = safeText(item.path);
+ meta.className = 'p'; meta.textContent = safeText(item.created)+' UTC · '+Math.max(1,Math.round(item.size/1048576))+' MB';
+ act.className = 'badge act'; act.textContent = t('restoreShort');
+ card.append(title); card.append(path); card.append(meta); card.append(act);
+ card.onclick = () => getPreview('restore-backup',item.id);
+ $('backups').append(card);
+ });
+}
 function render() {
  document.documentElement.lang = language;
  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
@@ -2153,7 +2271,7 @@ function render() {
  rows.forEach(item => { const tr = document.createElement('tr'); cells(item).forEach(value => { const td = document.createElement('td'); td.textContent = value; tr.append(td); }); $('jvmRows').append(tr); });
  const labels = ['path','runtimeRoot','version','vendor','architecture','classification','eloRationale','classificationEvidence'];
  $('details').textContent = row ? cells(row).map((value,index) => t(labels[index])+': '+value).join('\n') : '';
- renderCards();
+ renderCards(); renderBackups();
  $('verifiedOn').textContent = security.verifiedOn ? t('verifiedDate')+': '+security.verifiedOn : t('noAdvisories');
  $('advisories').replaceChildren();
  security.advisories.forEach(item => {
@@ -2198,11 +2316,11 @@ async function refresh() {
  const status = await api('status');
  if (!keys(status,['state'],['progress','checked']) || !states.includes(status.state) || (status.progress !== undefined && (!Number.isFinite(status.progress) || status.progress < 0 || status.progress > 100)) || (status.checked !== undefined && (!Number.isSafeInteger(status.checked) || status.checked < 0))) throw 'invalid';
  const result = await api('results');
- if (!keys(result,['results','security']) || !Array.isArray(result.results) || result.results.length > 250 || result.results.some(row => !validRow(row)) || new Set(result.results.map(row => row.id)).size !== result.results.length || !validSecurity(result.security)) throw 'invalid';
+ if (!keys(result,['results','security'],['backups']) || (result.backups !== undefined && (!Array.isArray(result.backups) || result.backups.length > 50 || result.backups.some(item => !validBackup(item)) || new Set(result.backups.map(item => item.id)).size !== result.backups.length)) || !Array.isArray(result.results) || result.results.length > 250 || result.results.some(row => !validRow(row)) || new Set(result.results.map(row => row.id)).size !== result.results.length || !validSecurity(result.security)) throw 'invalid';
  const nextRows = result.results;
  if (state !== status.state || JSON.stringify(rows) !== JSON.stringify(nextRows) || JSON.stringify(security) !== JSON.stringify(result.security)) clearPreview();
  if (status.state === 'scanning' && scanStartedAt === null) scanStartedAt = Date.now();
- state = status.state; rows = nextRows; security = result.security;
+ state = status.state; rows = nextRows; security = result.security; backups = result.backups || [];
  if (state !== 'scanning' && state !== 'cancelling') scanStartedAt = null;
  // A finished scan moves the wizard on by itself; anything else releases the wait.
  if (awaitingScan && state === 'completed') { awaitingScan = false; if (rows.length) step = 2; }
@@ -2231,12 +2349,13 @@ $('scan').onclick = () => {
  return perform(async () => { clearPreview(); await acknowledge('scan',searchPath === '' ? {} : {searchPath}); state = 'scanning'; rows = []; lastSuccessfulRefresh = null; progress = null; checked = null; canRestore = false; finalKind = ''; awaitingScan = true; scanStartedAt = Date.now(); step = 1; log('scanSent'); });
 };
 $('cancel').onclick = () => perform(async () => { clearPreview(); await acknowledge('cancel',{}); state = 'cancelling'; log('cancelSent'); });
-async function getPreview(actionId) {
- const row = selected(); if (!row || running() || recoveryRequired || (lastError && errorFromPoll)) return;
+async function getPreview(actionId, explicitId) {
+ const row = selected(); const resultId = explicitId || (row && row.id);
+ if (!resultId || running() || recoveryRequired || (lastError && errorFromPoll)) return;
  await perform(async () => {
- clearPreview(); const data = await api('preview',{actionId,resultId:row.id});
+ clearPreview(); const data = await api('preview',{actionId,resultId});
  if (!keys(data,['previewId','summary','warnings']) || !validId(data.previewId) || !bilingual(data.summary,4096) || !Array.isArray(data.warnings) || data.warnings.length > 16 || data.warnings.some(w => !bilingual(w,2048))) throw 'invalid';
- preview = {previewId:data.previewId,actionId,resultId:row.id,summary:data.summary,warnings:data.warnings}; step = 4; log('previewReady');
+ preview = {previewId:data.previewId,actionId,resultId,summary:data.summary,warnings:data.warnings}; step = 4; log('previewReady');
  });
 }
 $('mitigate').onclick = () => getPreview('mitigate');

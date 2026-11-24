@@ -10,6 +10,7 @@ function Reject([scriptblock]$Work, [int]$Status) {
     try { & $Work; throw 'Expected rejection' } catch { Assert ($_.Exception.Data['Status'] -eq $Status) "Expected HTTP $Status, got $($_.Exception.Message)" }
 }
 $s = New-EloServerSession -Port 54321 -UiHtml '<!doctype html>' -ScanSource 'function Invoke-EloJavaScan { param($DriveRoots,$ManualPath,$ShouldCancel) [pscustomobject]@{ Results=@(); Cancelled=(& $ShouldCancel) } }'
+$s.Adapters.BackupRoots = { @() }
 Assert ($s.Token -cmatch '^[a-f0-9]{64}$') '256-bit session token'
 Assert ($s.Token -cne (New-EloSecret)) 'independent random secrets'
 function Request($Method='GET', $Path='/api/status', $Body='', $Headers=$null, $Remote='127.0.0.1') {
@@ -342,6 +343,45 @@ try {
     $e=Get-ErrorCode { RestoreApply $rp.previewId }
     Assert ($e.Status -eq 422 -and $e.Body.error -ceq 'restore_failed_no_change' -and $e.Body.warnings[0].en.Contains('backup_entry_mismatch') -and @($s.ReportActions | Where-Object { $_.Kind -ceq 'Restore' -and $_.Status -ceq 'Failed' }).Count -eq 1) 'rejected restore is reported and changes nothing'
 } finally { Remove-Item -LiteralPath $fakeBackup -Force -ErrorAction SilentlyContinue }
+# Existing backups (also from earlier sessions) are listed first and can be restored by server-side id.
+$bkRoot=Join-Path ([IO.Path]::GetTempPath()) ('elo-bk-test-'+[guid]::NewGuid().ToString('N'))
+try {
+    $bkDir=Join-Path $bkRoot 'ELO'; $null=[IO.Directory]::CreateDirectory($bkDir)
+    $null=[IO.Directory]::CreateDirectory((Join-Path $bkRoot 'Windows'))
+    Add-Type -AssemblyName System.IO.Compression
+    function New-FakeBackupZip([string]$Path,[string]$Release) {
+        $fs=[IO.File]::Create($Path); $zip=New-Object IO.Compression.ZipArchive($fs,[IO.Compression.ZipArchiveMode]::Create,$true)
+        try {
+            foreach ($entry in @(@('manifest.json',('[' + ('{"Name":"x"},' * 120) + '{}]')),@('tree/release',$Release))) { $w=New-Object IO.StreamWriter($zip.CreateEntry($entry[0],[IO.Compression.CompressionLevel]::NoCompression).Open()); $w.Write($entry[1]); $w.Dispose() }
+        } finally { $zip.Dispose(); $fs.Dispose() }
+    }
+    New-FakeBackupZip (Join-Path $bkDir 'java.backup-20260101120000.zip') "IMPLEMENTOR=`"Eclipse Adoptium`"`nJAVA_RUNTIME_VERSION=`"17.0.2+8`"`n"
+    New-FakeBackupZip (Join-Path $bkDir 'java.backup-20250101120000.zip') "IMPLEMENTOR=`"Azul Systems, Inc.`"`nJAVA_VERSION=`"21.0.1`"`n"
+    New-FakeBackupZip (Join-Path (Join-Path $bkRoot 'Windows') 'java.backup-20260202020202.zip') 'JAVA_VERSION="1.0"'
+    [IO.File]::WriteAllText((Join-Path $bkDir 'notes.backup-bad.zip'),('x'*2000)); [IO.File]::WriteAllText((Join-Path $bkDir 'java.backup-20269999999999.zip'),('x'*2000))
+    $m=Reset-UpdateSession 'ok'
+    $s.Adapters.BackupRoots={ @($bkRoot) }.GetNewClosure(); $s.BackupsCache=$null
+    $list=@(Get-EloBackupList $s)
+    Assert ($list.Count -eq 2) 'only well-named, valid backups below level 2 are listed; system folders and bad names are skipped'
+    Assert ($list[0].created -ceq '2026-01-01 12:00' -and $list[0].version -ceq '17.0.2+8' -and $list[0].runtime -ceq (Join-Path $bkDir 'java') -and $list[1].version -ceq '21.0.1') 'newest first, version read from the ZIP, runtime derived from the file name'
+    $s.BackupsCache=$null; $payload=Invoke-EloApi $s (Request GET '/api/results')
+    Assert (@($payload.backups).Count -eq 2 -and -not ($payload | ConvertTo-Json -Depth 6).Contains('"Root"')) 'the results payload carries the backups (no internal fields)'
+    $id=@($payload.backups)[0].id
+    $s.Adapters.Identity={ param($Path) @{Vendor='Eclipse Adoptium';Branch='17';Architecture='x64';ImageType='jdk';Version='17.0.2+8'} }
+    $rp=Invoke-EloApi $s (Request POST /api/preview ('{"actionId":"restore-backup","resultId":"'+$id+'"}'))
+    Assert ($rp.summary.en.Contains('17.0.2+8') -and $rp.summary.en.Contains((Join-Path $bkDir 'java.backup-20260101120000.zip')) -and $m.State.Restores.Count -eq 0) 'restore preview from an earlier-session backup is read-only'
+    $r=Invoke-EloApi $s (Request POST /api/action ('{"actionId":"restore-backup","resultId":"'+$id+'","previewId":"'+$rp.previewId+'"}'))
+    Assert ($r.ok -and $m.State.Restores.Count -eq 1 -and $m.State.Restores[0].Backup -ceq (Join-Path $bkDir 'java.backup-20260101120000.zip') -and $m.State.Restores[0].Runtime -ceq (Join-Path $bkDir 'java')) 'restore of a discovered backup goes through the backend adapter'
+    Reject { Invoke-EloApi $s (Request POST /api/preview '{"actionId":"restore-backup","resultId":"0000000000000000000000000000000000000000000000000000000000000000"}') } 409
+    Remove-Item -LiteralPath (Join-Path $bkDir 'java.backup-20260101120000.zip') -Force
+    $s.Backups=@{$id=@{Path=(Join-Path $bkDir 'java.backup-20260101120000.zip');Runtime=(Join-Path $bkDir 'java');Root=$bkDir;Version='17.0.2+8'}}
+    $e=Get-ErrorCode { Invoke-EloApi $s (Request POST /api/preview ('{"actionId":"restore-backup","resultId":"'+$id+'"}')) }
+    Assert ($e.Status -eq 409 -and $e.Body.error -ceq 'no_backup_for_target') 'a backup deleted from disk is refused'
+} finally {
+    $full=[IO.Path]::GetFullPath($bkRoot)
+    if ($full.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()),[StringComparison]::OrdinalIgnoreCase) -and (Split-Path -Leaf $full) -like 'elo-bk-test-*') { Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue }
+    $s.Adapters.BackupRoots={ @() }; $s.BackupsCache=$null
+}
 Assert ($script:Fake.Writes -eq 0 -and $script:Fake.Probes -eq 0) 'update flow never writes machine options'
 Reset-Fake; $p=Preview
 $other=New-EloServerSession -Port 54321 -UiHtml '<html>' -ScanSource '# none'

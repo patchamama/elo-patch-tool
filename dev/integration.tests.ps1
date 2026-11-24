@@ -363,7 +363,7 @@ try {
     $html=$blocks.UI_HTML
     Assert ($html.Contains('ready fixed or removable drives C: through Z:') -and $html.Contains('bereiten festen oder Wechsellaufwerken C: bis Z:') -and $html.Contains('X:\\java\\bin\\java.exe') -and $html.Contains('X:\\ELO\\java\\bin\\java.exe')) 'packaged bilingual UI describes exact drive layouts'
     Assert ($html.Contains('POST scan -> {} checks ready fixed or removable drives C: through Z:') -and $html.Contains('after the root checks')) 'packaged UI contract describes root checks and manual order'
-    Assert ($html -match "X-Session-Token" -and $html -match 'history.replaceState' -and $html -match "api\('preview',\{actionId,resultId:row.id\}\)") 'UI uses existing auth and preview request contract'
+    Assert ($html -match "X-Session-Token" -and $html -match 'history.replaceState' -and $html -match "api\('preview',\{actionId,resultId\}\)") 'UI uses existing auth and preview request contract'
     # Test extractor failure paths through the real BAT, not a parallel parser.
     foreach ($case in @('duplicate','nested','missing','malformed','unmatched')) {
         $bad=$source
