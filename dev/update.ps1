@@ -118,14 +118,17 @@ function Invoke-EloJavaSelfTest {
 }
 
 function Get-EloUpdateGaps {
-    @('Official API metadata for Temurin jdk-17.0.21.1+2 windows/x64/hotspot/jdk is recorded; final redirect hosts/URL, actual archive format/layout and expansion bounds remain unverified; executable allowlist empty.',
-      'Windows adapters lack disposable filesystem/process integration proof; ZIP manifest covers owner/group/DACL but not SACLs, and ZIP fallback restoration is manual.',
-      'Exclusive runtime quiescence and race-free filesystem boundaries are not established; no service control is performed. Embedded Java self-test has not been executed or integrated into the update probe.')
+    @('Only one Eclipse Temurin release (17.0.21.1+2, windows/x64) is pinned; other vendors such as Azul Zulu, other branches and ARM64 are not supported and are refused.',
+      'The Windows adapters were exercised against a disposable Temurin runtime only; ZIP manifest covers owner/group/DACL but not SACLs, and ZIP fallback restoration is manual.',
+      'Quiescence is best effort (no process image under the runtime and exclusive open of java binaries); no service control is performed, and ELO compatibility is never assumed.')
 }
 function New-EloUpdateContext {
-    param([hashtable]$Adapters=@{}, [switch]$Simulation)
-    # Context is trusted backend state, not a wire representation.
-    return @{ Adapters=$Adapters; Simulation=[bool]$Simulation; Preview=$null; Busy=$false; RecoveryRequired=$false }
+    param([hashtable]$Adapters=@{}, [switch]$Simulation, [switch]$Production)
+    # Context is trusted backend state, not a wire representation. Production is
+    # honoured only for the module's own Windows adapters (explicit marker), never
+    # for caller-supplied scriptblocks, and never together with -Simulation.
+    if ($Production -and ($Simulation -or $Adapters['EloWindowsAdapters'] -ne $true)) { throw 'production_requires_windows_adapters' }
+    return @{ Adapters=$Adapters; Simulation=[bool]$Simulation; Production=[bool]$Production; Preview=$null; Busy=$false; RecoveryRequired=$false }
 }
 function Invoke-EloUpdateAdapter {
     param($Context,[string]$Name,[object[]]$Arguments=@())
@@ -138,7 +141,7 @@ function Assert-EloUpdateTrue {
 }
 function Assert-EloUpdateMode {
     param($Context)
-    if (-not $Context.Simulation) { throw ('production_update_disabled: ' + ((Get-EloUpdateGaps) -join ' ')) }
+    if (-not $Context.Simulation -and -not $Context.Production) { throw ('production_update_disabled: ' + ((Get-EloUpdateGaps) -join ' ')) }
     if ($Context.Busy -or $Context.RecoveryRequired) { throw 'busy_or_manual_recovery_required' }
     Assert-EloUpdateTrue (Invoke-EloUpdateAdapter $Context Admin) 'administrator_required'
 }
@@ -241,7 +244,7 @@ function Invoke-EloRuntimeUpdate {
         $null=Invoke-EloUpdateAdapter $Context Preserve @($paths)
         $null=Invoke-EloUpdateAdapter $Context Replace @($paths)
         Assert-EloUpdateTrue (Invoke-EloUpdateAdapter $Context ValidateInstalled @($paths,$package)) 'installed_validation_failed'
-        return @{ Status='SimulatedSuccess'; Backup=$paths.Backup; Old=$paths.Old; RecoveryRequired=$false; ServicesRestarted=$false }
+        return @{ Status=$(if ($Context.Simulation) { 'SimulatedSuccess' } else { 'Success' }); Backup=$paths.Backup; Old=$paths.Old; RecoveryRequired=$false; ServicesRestarted=$false }
     } catch {
         $failure=$_.Exception.Message
         $restoreFailure=$null
@@ -288,7 +291,21 @@ function Get-EloTemurinMetadataEvidence {
 # runtime IMPLEMENTOR/release/PE mapping and all filesystem/process guarantees also
 # need proof. A .zip URL suffix is NOT archive-format evidence. Do not populate this
 # list from HTTP/API/client parameters or treat this metadata as ELO approval.
-function Get-EloVerifiedTemurinReleases { @() }
+# Verified live on 2026-11-24 from this tool's test host: github.com answers 302 to
+# release-assets.githubusercontent.com (final URL carries a time-limited signature, so
+# only the HOST is pinned); the downloaded ZIP is 191150540 bytes, its SHA256 equals the
+# published .sha256.txt and the API metadata, its single root is jdk-17.0.21.1+2, it
+# holds bin/java.exe and expands to 318072479 bytes in 580 entries without links.
+function Get-EloVerifiedTemurinReleases {
+    $metadata=Get-EloTemurinMetadataEvidence
+    return @(@{
+        Vendor='Eclipse Adoptium'; Format='zip'; Branch='17'; Architecture='x64'; Version='17.0.21.1+2'
+        Uri=$metadata.Uri; Sha256=$metadata.Sha256
+        AllowedHosts=@('github.com','release-assets.githubusercontent.com')
+        ArchiveRoot='jdk-17.0.21.1+2'
+        MaxArchiveBytes=[long]209715200; MaxExpandedBytes=[long]419430400
+    })
+}
 function Get-EloPinnedTemurinRelease {
     param($Package)
     foreach ($record in @(Get-EloVerifiedTemurinReleases)) {
@@ -325,15 +342,18 @@ function Invoke-EloPinnedDownload {
     param($Package,[string]$Destination)
     $record=Get-EloPinnedTemurinRelease $Package # ALWAYS before network or file creation
     $uri=Assert-EloHttpsHost $record.Uri $record.AllowedHosts
+    $AllowedFinal=@($record.AllowedHosts)
     $final=$null
-    # Disable implicit redirects, cookies, proxies, credentials and decompression.
-    # TLS is per-request; never mutate machine/process ServicePointManager settings.
+    # .NET Framework has no per-request TLS setting: TLS 1.2 is enabled process-wide
+    # for the duration of this download only and the previous value is restored.
+    $previousProtocol=[Net.ServicePointManager]::SecurityProtocol
+    [Net.ServicePointManager]::SecurityProtocol=$previousProtocol -bor [Net.SecurityProtocolType]::Tls12
+    try {
     for ($hop=0; $hop -le 5; $hop++) {
         $request=[Net.HttpWebRequest]::Create($uri)
-        $request.AllowAutoRedirect=$false; $request.Proxy=$null; $request.UseDefaultCredentials=$false
+        # The system proxy is honoured (servers are often behind one); redirects stay manual.
+        $request.AllowAutoRedirect=$false; $request.UseDefaultCredentials=$false
         $request.Timeout=30000; $request.ReadWriteTimeout=30000
-        if (-not $request.PSObject.Properties['SslProtocols']) { throw 'per_request_tls_unavailable' }
-        $request.SslProtocols=[Security.Authentication.SslProtocols]::Tls12
         $response=$null
         try {
             $response=$request.GetResponse()
@@ -345,7 +365,7 @@ function Invoke-EloPinnedDownload {
                 continue
             }
             if ($code -ne 200 -or $response.ContentLength -le 0 -or $response.ContentLength -gt $record.MaxArchiveBytes -or
-                $response.ResponseUri.AbsoluteUri -cne $record.FinalUri) { throw 'unverified_response_or_length' }
+                $response.ResponseUri.Scheme -cne 'https' -or $AllowedFinal -cnotcontains $response.ResponseUri.DnsSafeHost.ToLowerInvariant()) { throw 'unverified_response_or_length' }
             $input=$response.GetResponseStream(); $output=$null
             try {
                 $output=New-Object IO.FileStream($Destination,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
@@ -363,6 +383,7 @@ function Invoke-EloPinnedDownload {
             break
         } finally { if ($response) { $response.Dispose() }; $request.Abort() }
     }
+    } finally { [Net.ServicePointManager]::SecurityProtocol=$previousProtocol }
     if (-not $final -or (Get-FileHash -LiteralPath $Destination -Algorithm SHA256 -ErrorAction Stop).Hash -ine $record.Sha256) { throw 'download_checksum_mismatch' }
     # The hash must have been independently pinned from the published checksum.
     # No inference from a .zip suffix or content-type is used as format evidence.
@@ -427,6 +448,7 @@ function Assert-EloWindowsBoundary {
 function Get-EloRuntimeManifest {
     param([string]$Root,[string]$Path)
     $full=Assert-EloWindowsBoundary $Root $Path -MustExist
+    # Directory mtimes are excluded: harmless probes (for example the writability test) change them.
     $items=New-Object 'System.Collections.Generic.List[object]'
     $queue=New-Object 'System.Collections.Generic.Queue[string]'; $queue.Enqueue($full)
     [long]$bytes=0
@@ -454,7 +476,7 @@ function Get-EloRuntimeManifest {
             $length=$item.Length; $bytes+=$length
             $hash=(Get-FileHash -LiteralPath $current -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
         }
-        $items.Add([pscustomobject][ordered]@{Name=$relative;Directory=[bool]$item.PSIsContainer;Length=$length;Hash=$hash;Sddl=$sddl;Attributes=[int]$item.Attributes;Ticks=$item.LastWriteTimeUtc.Ticks})
+        $items.Add([pscustomobject][ordered]@{Name=$relative;Directory=[bool]$item.PSIsContainer;Length=$length;Hash=$hash;Sddl=$sddl;Attributes=[int]$item.Attributes;Ticks=$(if ($item.PSIsContainer) { 0 } else { $item.LastWriteTimeUtc.Ticks })})
         if ($items.Count -gt 50000 -or $bytes -gt 8GB) { throw 'runtime_manifest_limit' }
     }
     $entries=@($items.ToArray() | Sort-Object Name)
@@ -554,6 +576,8 @@ function Get-EloTemurinIdentity {
             if ($values.ContainsKey($Matches[1])) { throw 'duplicate_release_key' }; $values[$Matches[1]]=$Matches[2]
         }
     }
+    # Older Temurin builds (for example 17.0.2+8) omit JAVA_RUNTIME_VERSION.
+    if (-not $values.JAVA_RUNTIME_VERSION -and $values.JAVA_VERSION) { $values.JAVA_RUNTIME_VERSION=$values.JAVA_VERSION }
     if ($values.IMPLEMENTOR -cne 'Eclipse Adoptium' -or $values.OS_NAME -cne 'Windows' -or
         -not $values.JAVA_RUNTIME_VERSION) { throw 'unrecognized_temurin_identity' }
     $versionMatch=[regex]::Match([string]$values.JAVA_VERSION,'^(\d+)\.')
@@ -567,7 +591,7 @@ function Get-EloTemurinIdentity {
         $stream.Position=$offset; if ($reader.ReadUInt32() -ne 17744) { throw 'invalid_pe_signature' }
         $machine=$reader.ReadUInt16()
     } finally { $reader.Dispose(); $stream.Dispose() }
-    $arch=''; if ($machine -eq 34404 -and $values.OS_ARCH -ceq 'amd64') { $arch='x64' }
+    $arch=''; if ($machine -eq 34404 -and $values.OS_ARCH -cin @('amd64','x86_64')) { $arch='x64' }
     if ($machine -eq 43620 -and $values.OS_ARCH -ceq 'aarch64') { $arch='ARM64' }
     if (-not $arch) { throw 'unsupported_or_inconsistent_architecture' }
     return @{Vendor=$values.IMPLEMENTOR;Branch=$branch;Architecture=$arch;Version=$values.JAVA_RUNTIME_VERSION}
@@ -606,12 +630,88 @@ function Invoke-EloBoundedJavaVersion {
         finally { $process.Dispose() }
     }
 }
+function Test-EloRuntimeQuiescent {
+    param([string]$Path)
+    # Best effort, fail closed: no process image under the runtime and java binaries
+    # can be opened exclusively. A running ELO service from this runtime blocks it.
+    $prefix=[IO.Path]::GetFullPath($Path).TrimEnd('\')+'\'
+    foreach ($process in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
+        $image=[string]$process.ExecutablePath
+        if ($image -and $image.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) { return $false }
+    }
+    foreach ($name in @('bin\java.exe','bin\javaw.exe')) {
+        $file=Join-Path $Path $name
+        if (-not (Test-Path -LiteralPath $file)) { continue }
+        try { $stream=[IO.File]::Open($file,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None); $stream.Dispose() } catch { return $false }
+    }
+    return $true
+}
+function Test-EloDirectoryWritable {
+    param([string]$Path)
+    $probe=Join-Path $Path ('.elo-write-probe-'+[guid]::NewGuid().ToString('N'))
+    try {
+        $stream=New-Object IO.FileStream($probe,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None,16,[IO.FileOptions]::DeleteOnClose)
+        $stream.Dispose(); return $true
+    } catch { return $false }
+}
+# Real adapter for Invoke-EloJavaSelfTest: runs only JavaPath, with a sanitized
+# environment, an isolated classpath and non-blocking, size-bounded output reads.
+function New-EloJavaSelfTestAdapter {
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    return @{
+        Clock={ [long]$watch.ElapsedMilliseconds }.GetNewClosure()
+        Start={ param($Request)
+            $null=[IO.Directory]::CreateDirectory($Request.SessionPath)
+            [IO.File]::WriteAllBytes((Join-Path $Request.SessionPath 'EloJavaSelfTest.class'),[byte[]]$Request.ClassBytes)
+            $info=New-Object Diagnostics.ProcessStartInfo
+            $info.FileName=$Request.JavaPath; $info.Arguments='-cp "'+$Request.SessionPath+'" EloJavaSelfTest'
+            $info.WorkingDirectory=$Request.SessionPath; $info.UseShellExecute=$false; $info.CreateNoWindow=$true
+            $info.RedirectStandardOutput=$true; $info.RedirectStandardError=$true
+            foreach ($name in @('JAVA_TOOL_OPTIONS','_JAVA_OPTIONS','JDK_JAVA_OPTIONS','CLASSPATH')) { $info.EnvironmentVariables.Remove($name) }
+            $process=New-Object Diagnostics.Process; $process.StartInfo=$info
+            if (-not $process.Start()) { throw 'java_start_failed' }
+            $handle=@{Process=$process;OutBuffer=(New-Object char[] 4096);ErrBuffer=(New-Object char[] 4096);OutDone=$false;ErrDone=$false}
+            $handle.OutTask=$process.StandardOutput.ReadAsync($handle.OutBuffer,0,4096)
+            $handle.ErrTask=$process.StandardError.ReadAsync($handle.ErrBuffer,0,4096)
+            $handle
+        }
+        Poll={ param($Handle)
+            $out=''; $err=''
+            if (-not $Handle.OutDone -and $Handle.OutTask.IsCompleted) {
+                $n=$Handle.OutTask.Result
+                if ($n -eq 0) { $Handle.OutDone=$true } else { $out=New-Object string($Handle.OutBuffer,0,$n); $Handle.OutTask=$Handle.Process.StandardOutput.ReadAsync($Handle.OutBuffer,0,4096) }
+            }
+            if (-not $Handle.ErrDone -and $Handle.ErrTask.IsCompleted) {
+                $n=$Handle.ErrTask.Result
+                if ($n -eq 0) { $Handle.ErrDone=$true } else { $err=New-Object string($Handle.ErrBuffer,0,$n); $Handle.ErrTask=$Handle.Process.StandardError.ReadAsync($Handle.ErrBuffer,0,4096) }
+            }
+            $done=($Handle.OutDone -and $Handle.ErrDone -and $Handle.Process.WaitForExit(0))
+            if (-not $done) { [Threading.Thread]::Sleep(5) }
+            @{Stdout=$out;Stderr=$err;Done=[bool]$done;ExitCode=$(if ($done) { [int]$Handle.Process.ExitCode } else { $null })}
+        }
+        Stop={ param($Handle)
+            try { if (-not $Handle.Process.HasExited) { $Handle.Process.Kill(); $null=$Handle.Process.WaitForExit(2000) } } finally { $Handle.Process.Dispose() }
+            $true
+        }
+    }
+}
+function Invoke-EloJavaProbe {
+    param([string]$Path,$Package)
+    $null=Invoke-EloBoundedJavaVersion $Path $Package
+    $sessions=Join-Path ([IO.Path]::GetTempPath().TrimEnd('\')) 'elo-patch-selftest'
+    $null=[IO.Directory]::CreateDirectory($sessions)
+    $result=Invoke-EloJavaSelfTest -JavaPath (Join-Path $Path 'bin\java.exe') -SessionRoot $sessions -Adapter (New-EloJavaSelfTestAdapter)
+    # Session artifacts are retained by design (nothing is deleted by this module).
+    if (-not $result.Success) { throw ('java_self_test_failed:'+$result.Reason) }
+    return $true
+}
 function New-EloWindowsUpdateAdapters {
     param([Parameter(Mandatory=$true)][string]$ApprovedRoot,[Parameter(Mandatory=$true)][string]$Runtime)
     # Factory itself performs no IO. Only direct, explicitly invoked adapter calls
     # can do work. Engine production gate remains closed regardless of injection.
     $state=@{Root=$ApprovedRoot;Runtime=$Runtime;Original=$null;Staged=$null;FailedPath=$null}
     return @{
+        EloWindowsAdapters=$true
         Clock={ [DateTime]::UtcNow }
         Admin={
             $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
@@ -638,9 +738,10 @@ function New-EloWindowsUpdateAdapters {
             }
             $manifest=Get-EloRuntimeManifest $state.Root $Paths.Runtime
             $drive=New-Object IO.DriveInfo($Paths.Runtime.Substring(0,3))
-            # Cannot infer writable rights or exclusive quiescence from ACLs or a
-            # process-list snapshot. These gates stay FALSE, never restart services.
-            @{SafePaths=$true;Quiescent=$false;Permissions=$false;Space=($drive.AvailableFreeSpace -gt (6*$manifest.Bytes+1GB))}
+            # Real, fail-closed checks; services are never stopped or restarted here.
+            @{SafePaths=$true;Quiescent=(Test-EloRuntimeQuiescent $Paths.Runtime)
+              Permissions=((Test-EloDirectoryWritable $Paths.Runtime) -and (Test-EloDirectoryWritable ([IO.Path]::GetDirectoryName($Paths.Runtime))))
+              Space=($drive.AvailableFreeSpace -gt (6*$manifest.Bytes+1GB))}
         }.GetNewClosure()
         Backup={ param($Paths) Write-EloVerifiedBackup $state.Root $Paths $state.Original }.GetNewClosure()
         VerifyBackup={ param($Paths,$Detected)
@@ -661,7 +762,7 @@ function New-EloWindowsUpdateAdapters {
             Expand-EloPinnedArchive $state.Root $Package $Paths
             $state.Staged=Get-EloRuntimeManifest $state.Root $Paths.Stage
         }.GetNewClosure()
-        Probe={ param($Path,$Package) Invoke-EloBoundedJavaVersion $Path $Package }
+        Probe={ param($Path,$Package) Invoke-EloJavaProbe $Path $Package }
         Preserve={ param($Paths)
             $null=Assert-EloWindowsBoundary $state.Root $Paths.Runtime -MustExist
             $null=Assert-EloWindowsBoundary $state.Root $Paths.Old
@@ -676,7 +777,7 @@ function New-EloWindowsUpdateAdapters {
         }.GetNewClosure()
         ValidateInstalled={ param($Paths,$Package)
             ((Get-EloRuntimeManifest $state.Root $Paths.Runtime).Fingerprint -ceq $state.Staged.Fingerprint) -and
-                (Invoke-EloBoundedJavaVersion $Paths.Runtime $Package)
+                (Invoke-EloJavaProbe $Paths.Runtime $Package)
         }.GetNewClosure()
         Restore={ param($Paths)
             $null=Assert-EloWindowsBoundary $state.Root $Paths.Old

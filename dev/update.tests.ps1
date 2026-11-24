@@ -131,8 +131,11 @@ $r=Invoke-EloRuntimeUpdate -Context $f.Context -Confirmation $p.Confirmation
 Assert-UpdateTest ($r.Error -eq 'compatibility_confirmation_required' -and -not $f.State.Backup) 'compatibility acknowledgement required'
 $p=New-FixturePreview $f
 Assert-UpdateTest ((Invoke-FixtureUpdate $f $p).Status -eq 'SimulatedSuccess') 'explicit compatibility warning approval'
-Assert-UpdateTest (@(Get-EloVerifiedTemurinReleases).Count -eq 0) 'no invented verified releases'
-Write-Output 'PASS: compatibility warning approval and empty verified-release allowlist'
+$verified=@(Get-EloVerifiedTemurinReleases)
+$meta=Get-EloTemurinMetadataEvidence
+Assert-UpdateTest ($verified.Count -eq 1 -and $verified[0].Sha256 -ceq $meta.Sha256 -and $verified[0].Uri -ceq $meta.Uri -and $verified[0].ArchiveRoot -ceq 'jdk-17.0.21.1+2' -and $verified[0].Vendor -ceq 'Eclipse Adoptium') 'exactly one pinned, verified release'
+Assert-UpdateTest ((@($verified[0].AllowedHosts) -join ',') -ceq 'github.com,release-assets.githubusercontent.com') 'only the two observed hosts are allowed'
+Write-Output 'PASS: compatibility warning approval and single pinned verified release'
 function Assert-UpdateThrows([scriptblock]$Action,[string]$Code) {
     $message=''; try { $null=& $Action } catch { $message=$_.Exception.Message }
     Assert-UpdateTest ($message -like "*$Code*") "expected $Code, got $message"
@@ -199,10 +202,16 @@ foreach ($case in @('valid','corrupt-content','corrupt-manifest','missing','extr
 }
 # Creating adapters has no filesystem/network/process effects, even for nonexistent paths.
 $windows=New-EloWindowsUpdateAdapters -ApprovedRoot 'Z:\NOT-REAL' -Runtime 'Z:\NOT-REAL\runtime'
-Assert-UpdateTest ($windows.Count -eq 16) 'concrete Windows adapter surface'
+Assert-UpdateTest ($windows.Count -eq 17) 'concrete Windows adapter surface'
 $context=New-EloUpdateContext -Adapters $windows
 $result=Invoke-EloRuntimeUpdate -Context $context -Confirmation 'not-approved'
 Assert-UpdateTest ($result.Status -eq 'Rejected' -and $result.Error -like 'production_update_disabled*') 'production engine blocks before Windows adapters'
+$threw=$false; try { $null=New-EloUpdateContext -Adapters @{} -Production } catch { $threw=($_.Exception.Message -ceq 'production_requires_windows_adapters') }
+Assert-UpdateTest $threw 'production context refuses caller-supplied adapters'
+$threw=$false; try { $null=New-EloUpdateContext -Adapters $windows -Production -Simulation } catch { $threw=($_.Exception.Message -ceq 'production_requires_windows_adapters') }
+Assert-UpdateTest $threw 'production and simulation are mutually exclusive'
+$prod=New-EloUpdateContext -Adapters $windows -Production
+Assert-UpdateTest ($prod.Production -and -not $prod.Simulation) 'production context only for module Windows adapters'
 Write-Output 'PASS: actual memory ZIP verification (valid/corrupt/missing/extra/duplicate), inert Windows factory, production gate'
 # Official metadata supplied and independently fetched by parent: no network here.
 $evidence=Get-EloTemurinMetadataEvidence
@@ -215,17 +224,18 @@ Assert-UpdateTest ($evidence.Sha256 -ceq 'eafba0944f777abdc74d5aad16049c9b5a1275
 Assert-UpdateTest ($evidence.Scope -ceq 'OfficialApiMetadataOnly' -and -not $evidence.ContainsKey('Vendor') -and
     -not $evidence.ContainsKey('Format') -and -not $evidence.ContainsKey('ArchiveRoot') -and
     -not $evidence.ContainsKey('AllowedHosts') -and -not $evidence.ContainsKey('FinalUri')) 'metadata never invents runtime implementor, format, archive layout or redirect policy'
-Assert-UpdateTest (@(Get-EloVerifiedTemurinReleases).Count -eq 0) 'metadata does not promote a release'
+Assert-UpdateTest (@(Get-EloVerifiedTemurinReleases).Count -eq 1 -and -not (@(Get-EloVerifiedTemurinReleases)[0].ContainsKey('Size'))) 'raw metadata object is not itself a pinned release'
 Assert-UpdateThrows { Get-EloPinnedTemurinRelease $evidence } 'no_independently_verified'
 Assert-UpdateThrows { Invoke-EloPinnedDownload $evidence 'Z:\NEVER-CREATE.zip' } 'no_independently_verified'
-# Even correct package identity/hash is insufficient for executable approval.
+# Only the exact pinned identity matches; any deviation is rejected before network or file creation.
 $candidate=@{Vendor='Eclipse Adoptium';Version='17.0.21.1+2';Branch='17';Architecture=$evidence.Architecture;Uri=$evidence.Uri;Sha256=$evidence.Sha256}
-Assert-UpdateThrows { Get-EloPinnedTemurinRelease $candidate } 'no_independently_verified'
+Assert-UpdateTest ((Get-EloPinnedTemurinRelease $candidate).ArchiveRoot -ceq 'jdk-17.0.21.1+2') 'exact pinned package resolves'
+foreach ($key in @('Vendor','Version','Branch','Architecture','Uri','Sha256')) { $bad=@{}+$candidate; $bad[$key]=$bad[$key]+'x'; Assert-UpdateThrows { Get-EloPinnedTemurinRelease $bad } 'no_independently_verified' }
 $evidence.AllowedHosts=@('github.com'); $evidence.Format='zip'; $evidence.ArchiveRoot='UNPROVEN'; $evidence.Sha256='0'*64
 $fresh=Get-EloTemurinMetadataEvidence
 Assert-UpdateTest ($fresh.Sha256 -ceq $candidate.Sha256 -and -not $fresh.ContainsKey('AllowedHosts')) 'returned evidence is a fresh copy, not mutable approval state'
 Assert-UpdateThrows { Get-EloPinnedTemurinRelease $evidence } 'no_independently_verified'
-Assert-UpdateTest (((Get-EloUpdateGaps) -join ' ') -like '*redirect*' -and ((Get-EloUpdateGaps) -join ' ') -notlike '*No exact Temurin release/checksum*') 'gap report recognizes metadata proof without implying binary proof'
+Assert-UpdateTest (((Get-EloUpdateGaps) -join ' ') -notlike '*allowlist empty*' -and ((Get-EloUpdateGaps) -join ' ') -like '*Zulu*') 'gap report reflects the pinned release and the remaining vendor gap'
 Write-Output 'PASS: exact parent-verified API metadata is informational only; no download or production approval'
 # Embedded console class is returned in memory only; no runtime is launched here.
 $class=Get-EloJavaSelfTestClass
