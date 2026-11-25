@@ -135,12 +135,13 @@ ELO-Patch-Tools.bat --cli --catalog-restore   20261125101500123-vulndb.json --co
 
 ## AI-assisted drafts from the ELO Community (`tools/community`)
 
+**Nothing is installed by default**: the patch tool (scan, update, mitigation, restore, catalog) is one .bat and needs no extra software. Only when you choose to use the community helper does it show what it needs (Node.js, the npm package `playwright-core` ~14 MB, Chrome, your ELO Community credentials and an AI key) and ask before installing or contacting anything.
+
 An **optional** Node.js helper reads vulnerability articles from the [ELO Community board KBB103](https://community.elo.com/community/plugin/de.elo.ix.plugin.proxy/wf/apps/app/sol.knowledge.apps.KnowledgeBoard/#/?board=KBB103&page=1) with Playwright and asks an AI (OpenAI, Anthropic or a local Ollama) to rate the vulnerability (high / medium / low), report the solutions the article names and **draft** a catalog entry together with a simulation mock. It only writes drafts into the quarantine folder; nothing is installed or run automatically.
 
 ```powershell
-npm install --prefix tools/community
-$env:ELO_COMMUNITY_USER = 'you@example.org'; $env:ELO_COMMUNITY_PASSWORD = '...'   # environment only, never stored
-$env:ANTHROPIC_API_KEY = '...'                                                      # or OPENAI_API_KEY; Ollama needs none
+node tools/community/bin/elo-community.js setup     # shows what it needs and installs ONLY after you type yes
+# credentials: environment variables or the git-ignored tools/community/secrets.local.env
 node tools/community/bin/elo-community.js run --since 3m --max 20 --provider anthropic --model claude-sonnet-5-5
 node tools/community/bin/elo-community.js check      # validate + simulate the draft with the app
 ```
@@ -165,6 +166,7 @@ Limits: `--since 30d|8w|3m|1y|YYYY-MM-DD` and `--max N`. Details, safety rules a
 - Windows with Windows PowerShell 5.1 (the execution policy must allow it; the launcher never overrides it).
 - Administrator session for the update and the mitigation.
 - Network access to `api.azul.com`, `cdn.azul.com`, `api.adoptium.net`, `github.com` and `release-assets.githubusercontent.com` for the update (the system proxy is honoured).
+- Nothing else has to be installed to use the tool (the community helper in `tools/community` is optional and asks first).
 - Run discovery only on trusted installations: obtaining a version executes the discovered `java.exe`.
 
 ## Development

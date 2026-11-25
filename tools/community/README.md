@@ -6,6 +6,23 @@ Reads vulnerability articles from the ELO Community knowledge board, asks an AI 
 ![Playwright](https://img.shields.io/badge/Playwright-core-2EAD33?logo=playwright&logoColor=white)
 ![AI](https://img.shields.io/badge/AI-OpenAI%20·%20Anthropic%20·%20Ollama-6E56CF)
 
+## Nothing is installed by default
+
+The patch tool needs no installation. This helper needs, and tells you before doing anything:
+
+| Needs | Why |
+| --- | --- |
+| Your **ELO Community** user name/e-mail and password | to sign in at https://community.elo.com (typed into the official form only) |
+| An AI key (OpenAI / Anthropic) or a local Ollama | to analyse the articles; only the article text is sent |
+| npm package `playwright-core` (~14 MB) | to drive Chrome; installed by `setup` into `tools/community/node_modules` after you type `yes` |
+| Node.js 18+ and Google Chrome | already on most servers; no browser is downloaded |
+
+`fetch` and `run` print this plan first and ask for consent (`--yes` in scripts); without it nothing is contacted.
+
+### Local secrets file
+
+`tools/community/secrets.local.env` is a temporary, git-ignored file for `ELO_COMMUNITY_USER`, `ELO_COMMUNITY_PASSWORD`, `OPENAI_API_KEY` (and `ANTHROPIC_API_KEY`). Environment variables win; the file is refused if git does not ignore it; only the key names are ever printed. `config/ai.json` (also git-ignored) selects OpenAI with the model `gpt-6.0-sol` as written - the API answers with an error if your account has no such model. Delete the file when you are done.
+
 ## What it does
 
 1. **fetch** – signs in to the board with Playwright (Chrome), lists the newest articles inside your limit (`--since`, `--max`) and saves their text.
@@ -19,10 +36,8 @@ Output goes to `%ProgramData%\ELO-Patch-Tools\quarantine\drafts\<timestamp>\` (t
 ## Usage
 
 ```powershell
-npm install --prefix tools/community              # playwright-core only; use your installed Chrome
-$env:ELO_COMMUNITY_USER     = 'you@example.org'    # environment only
-$env:ELO_COMMUNITY_PASSWORD = '...'
-$env:ANTHROPIC_API_KEY      = '...'                # or OPENAI_API_KEY; Ollama needs no key
+node tools/community/bin/elo-community.js setup     # prints what is needed and installs playwright-core ONLY after you type yes
+# credentials and keys: edit tools/community/secrets.local.env (git-ignored) or set environment variables
 
 node tools/community/bin/elo-community.js run --since 3m --max 20 --provider anthropic --model claude-sonnet-5-5
 node tools/community/bin/elo-community.js run --since 30d --provider ollama --model llama3.1        # local, no key

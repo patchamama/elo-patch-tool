@@ -7,12 +7,15 @@ const { parseSince, parseMax } = require('./since');
 const { callProvider, PROVIDERS } = require('./providers');
 const { SYSTEM, userPrompt } = require('./prompt');
 const { buildDraftEntry, validateEntry, buildDraftDb } = require('./draft');
+const { loadSecrets } = require('./secrets');
+const { setup, requireCommunityConsent } = require('./setup');
 
 const HELP = `ELO Community vulnerability helper (optional, drafts only)
 
 Usage: node tools/community/bin/elo-community.js <command> [options]
 
 Commands
+  setup    Show what the community helper needs and install it ONLY after you say yes.
   fetch    Sign in to the ELO Community board, list the latest articles and save their text.
   analyze  Send saved articles to an AI provider and write DRAFT catalog entries (vulndb.json format).
   run      fetch + analyze.
@@ -28,7 +31,11 @@ AI (analyze/run)
   The API key is read from the environment variable named by apiKeyEnv (OPENAI_API_KEY,
   ANTHROPIC_API_KEY). Ollama needs no key.
 
-Credentials (fetch/run): ELO_COMMUNITY_USER and ELO_COMMUNITY_PASSWORD (environment only).
+Nothing is installed by default. The patch tool needs no installation; the community helper needs the npm package
+playwright-core and your ELO Community credentials. fetch/run print that plan first and ask for consent (--yes in scripts).
+
+Credentials / keys: environment variables ELO_COMMUNITY_USER, ELO_COMMUNITY_PASSWORD, OPENAI_API_KEY, ANTHROPIC_API_KEY,
+or the git-ignored file tools/community/secrets.local.env (KEY=value lines). Environment variables win.
 
 Output: --out DIR (default: %ProgramData%\\ELO-Patch-Tools\\quarantine\\drafts\\<timestamp>, i.e. the quarantine
 folder). Files: articles.json, analysis.json, draft-vulndb.json, report.md. Nothing is ever installed
@@ -39,7 +46,7 @@ automatically: review the draft, then  ELO-Patch-Tools.bat --cli --catalog-valid
 function parseArgs(argv) {
   const out = { command: argv[0] && !argv[0].startsWith('--') ? argv[0] : 'help', options: {} };
   const valued = ['since', 'max', 'provider', 'model', 'base-url', 'ai', 'out', 'articles', 'draft', 'channel', 'config'];
-  const flags = ['headed', 'help'];
+  const flags = ['headed', 'help', 'yes'];
   for (let i = out.command === 'help' && !argv[0] ? 0 : 1; i < argv.length; i++) {
     const a = argv[i];
     if (!a.startsWith('--')) throw new Error('unexpected_argument: ' + a);
@@ -132,6 +139,9 @@ async function main(argv, deps = {}) {
   const now = deps.now || new Date();
   const { command, options } = parseArgs(argv);
   if (command === 'help' || options.help) { process.stdout.write(HELP); return 0; }
+  if (command === 'setup') return setup(options, deps.setupDeps);
+  const secrets = (deps.loadSecrets || loadSecrets)();
+  if (secrets.loaded.length) process.stderr.write('Loaded from ' + path.basename(secrets.file) + ': ' + secrets.loaded.join(', ') + ' (names only)\n');
   const outDir = path.resolve(options.out || defaultOutDir(now));
   if (command === 'check') {
     const draft = path.resolve(options.draft || path.join(outDir, 'draft-vulndb.json'));
@@ -148,6 +158,7 @@ async function main(argv, deps = {}) {
   fs.mkdirSync(outDir, { recursive: true });
   let articlesDoc;
   if (command === 'fetch' || command === 'run') {
+    await (deps.consent || requireCommunityConsent)(options);
     articlesDoc = await fetchArticles(options, root, now, deps);
     writeJson(path.join(outDir, 'articles.json'), articlesDoc);
     process.stdout.write(`Fetched ${articlesDoc.articles.length} article(s) since ${articlesDoc.since} -> ${path.join(outDir, 'articles.json')}\n`);

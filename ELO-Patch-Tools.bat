@@ -1091,6 +1091,8 @@ function Get-EloVulnerabilityInfo {
         $list+=@{id=[string]$v.id;alias=[string](@($v.aliases) | Select-Object -First 1);severity=[string]$v.severity
             title=@{en=[string]$v.title.en;de=[string]$v.title.de};problem=@{en=[string]$v.problem.en;de=[string]$v.problem.de};solution=@{en=[string]$v.solution.en;de=[string]$v.solution.de}
             actions=@(@($v.actions) | ForEach-Object { [string]$_.id })}
+        $m=Get-EloVulnAction $v 'jvm-option'
+        if ($m) { $list[-1].mitigation=@{variable=[string]$m.variable;option=[string]$m.option;verifyArgs=@(@($m.verify.args) | ForEach-Object { [string]$_ })} }
     }
     return $list
 }
@@ -2225,6 +2227,10 @@ pre.cmd .c-str{color:#fca5a5}
 <button id="mitigate" class="card" type="button" disabled><span class="ico"><svg class="i"><use href="#i-shield"/></svg></span><span><span class="tt" data-i18n="mitigate"></span><span class="dd" data-i18n="mitigateDesc"></span></span></button>
 </div>
 <details><summary><svg class="i"><use href="#i-book"/></svg><span data-i18n="manualHeading"></span></summary><div class="body"><p class="muted" data-i18n="manualIntro"></p><ol id="manual" class="manual"></ol><h3 data-i18n="manualCommandsTitle"></h3><pre id="manualCommands" data-i18n="manualCommands" hidden></pre><pre id="cmdView" class="cmd" aria-label="PowerShell"></pre></div></details>
+<div class="cmdbox" id="behindBox" hidden><h3><svg class="i"><use href="#i-book"/></svg><span data-i18n="behindTitle"></span></h3><p class="muted" data-i18n="behindIntro"></p>
+<details open><summary><svg class="i"><use href="#i-update"/></svg><span data-i18n="behindUpdateTitle"></span></summary><div class="body"><pre id="behindUpdate" class="cmd" aria-label="PowerShell"></pre></div></details>
+<details id="behindMitigateBox" open><summary><svg class="i"><use href="#i-shield"/></svg><span data-i18n="behindMitigateTitle"></span></summary><div class="body"><pre id="behindMitigate" class="cmd" aria-label="PowerShell"></pre></div></details>
+</div>
 <div class="cmdbox"><h3><svg class="i"><use href="#i-play"/></svg><span data-i18n="terminalTitle"></span></h3><pre id="terminalCmds" class="cmd" aria-label="PowerShell"></pre></div>
 <div class="row"><button id="back3" class="btn ghost" type="button"><svg class="i"><use href="#i-back"/></svg><span data-i18n="back"></span></button></div>
 </section>
@@ -2293,7 +2299,7 @@ const messages = {
  'Stop only the affected service during the approved window, apply the chosen change using the vendor procedure, then restart. Check service health and effective JVM options/version. If checks fail, stop and restore the saved configuration/runtime.',
  'Rescan and document the outcome. Keep the backup until validated. Contact ELO support if paths, service ownership or compatibility are uncertain.'],
  manualCommandsTitle:'PowerShell commands (administrator)',manualCommands:'# Run in an ADMINISTRATOR PowerShell. Adjust the paths and service names to your scan result.\n\n# 1) Find the runtime, its version and the services that use it\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nGet-Content \'C:\\ELO\\java\\release\' | Select-String \'IMPLEMENTOR|JAVA_RUNTIME_VERSION|OS_ARCH\'\nGet-CimInstance Win32_Service | Where-Object { $_.PathName -match \'ELO\' } | Select-Object Name, State, PathName\n[Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\')\n\n# 2) Back up the runtime (ZIP) before changing anything\nCompress-Archive -LiteralPath \'C:\\ELO\\java\' -DestinationPath \'C:\\ELO\\java-backup.zip\'\n\n# 3) Temporary mitigation (machine-wide): KEEP the old value and append, never overwrite\n$old = [Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\'); $old\n[Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', (($old + \' -XX:-UseBASE64Intrinsics\').Trim()), \'Machine\')\n# Undo: [Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', $old, \'Machine\')   (use $null if it was empty)\n# Services only see the change after they are restarted.\n\n# 4) Update the runtime by hand (download the newest release of the SAME vendor and branch first)\n(Get-FileHash \'C:\\Downloads\\new-java.zip\' -Algorithm SHA256).Hash        # compare with the vendor\'s published SHA256\nStop-Service \'ELO-SRV01-1\' -Force                                        # every service that uses this Java\nRename-Item \'C:\\ELO\\java\' \'java.old\'\nExpand-Archive -LiteralPath \'C:\\Downloads\\new-java.zip\' -DestinationPath \'C:\\ELO\\java-new\'\nMove-Item (Get-ChildItem \'C:\\ELO\\java-new\' -Directory | Select-Object -First 1).FullName \'C:\\ELO\\java\'\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nStart-Service \'ELO-SRV01-1\'\n\n# 5) If something fails: stop the services, put the old runtime back, start the services\nStop-Service \'ELO-SRV01-1\' -Force\nRename-Item \'C:\\ELO\\java\' \'java.failed\'; Rename-Item \'C:\\ELO\\java.old\' \'java\'\nStart-Service \'ELO-SRV01-1\'\n# Or restore from the ZIP: Expand-Archive \'C:\\ELO\\java-backup.zip\' -DestinationPath \'C:\\ELO\\restore\'; then move the java folder back',
- backupsTitle:'Existing backups',backupsText:'Backups made by this tool were found on this server. Pick one to bring that Java version back; the runtime that is installed now is kept next to it.',severity_high:'High',severity_medium:'Medium',severity_low:'Low',vulnTitle:'Vulnerability found: CVE-2026-114938 (Java4Shell)',vulnText:'{n} runtime(s) are before the fixed release: {list}. The JIT BASE64 intrinsics flaw lets this Java produce wrong results; the vendor fixed it in a newer release.',vulnFixLabel:'Solution:',vulnFix:'update Java to the current release of the same branch (step 3, Update Java runtime). The temporary mitigation only reduces the risk until you update.',terminalTitle:'Run it from the terminal (administrator PowerShell)',terminalCmdsText:'# Update Java to the current release (recommended)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Temporary mitigation only (adds -XX:-UseBASE64Intrinsics; restart the ELO services afterwards)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Check the result (--target is the position in the scan list, starting at 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'contains a vulnerable Java',
+ backupsTitle:'Existing backups',backupsText:'Backups made by this tool were found on this server. Pick one to bring that Java version back; the runtime that is installed now is kept next to it.',behindTitle:'Without this tool: the same steps by hand',behindIntro:'These are the commands this tool runs behind the scenes, step by step, for the selected runtime. Run them in an ADMINISTRATOR PowerShell if you prefer to fix it without the tool. Replace the text in <angle brackets>.',behindUpdateTitle:'Update Java runtime (what the tool does)',behindMitigateTitle:'Temporary mitigation (what the tool does)',severity_high:'High',severity_medium:'Medium',severity_low:'Low',vulnTitle:'Vulnerability found: CVE-2026-114938 (Java4Shell)',vulnText:'{n} runtime(s) are before the fixed release: {list}. The JIT BASE64 intrinsics flaw lets this Java produce wrong results; the vendor fixed it in a newer release.',vulnFixLabel:'Solution:',vulnFix:'update Java to the current release of the same branch (step 3, Update Java runtime). The temporary mitigation only reduces the risk until you update.',terminalTitle:'Run it from the terminal (administrator PowerShell)',terminalCmdsText:'# Update Java to the current release (recommended)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Temporary mitigation only (adds -XX:-UseBASE64Intrinsics; restart the ELO services afterwards)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Check the result (--target is the position in the scan list, starting at 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'contains a vulnerable Java',
 restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: this version is before the vendor fix for a catalog vulnerability',backupRisk_patched:'Listed as fixed for every catalog vulnerability',backupRisk_unknown:'Security status unknown: treat as potentially vulnerable',backupStop:'Restoring stops the ELO Tomcat services that use this Java (ELO is unavailable meanwhile) and starts them again afterwards.',
  exportHeading:'Activity log',exportJson:'Export JSON results',exportLog:'Export activity log',
  idle:'Ready',scanning:'Scanning',cancelling:'Cancellation requested; waiting for the scanner',completed:'Scan completed',cancelled:'Scan cancelled; results may be incomplete',error:'Operation failed',unknown:'Unknown',
@@ -2353,7 +2359,7 @@ restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: this versi
  'Stoppen Sie nur den betroffenen Dienst im genehmigten Wartungsfenster, führen Sie die gewählte Änderung nach Herstellerverfahren aus und starten Sie ihn erneut. Prüfen Sie Dienstzustand und wirksame JVM-Optionen beziehungsweise Version. Bei Fehlern stoppen und gesicherte Konfiguration oder Laufzeit wiederherstellen.',
  'Scannen Sie erneut und dokumentieren Sie das Ergebnis. Bewahren Sie die Sicherung bis zur erfolgreichen Prüfung auf. Bei unklaren Pfaden, Dienstzuordnung oder Kompatibilität wenden Sie sich an den ELO-Support.'],
  manualCommandsTitle:'PowerShell-Befehle (Administrator)',manualCommands:'# In einer ADMINISTRATOR-PowerShell ausfuehren. Pfade und Dienstnamen an das Scan-Ergebnis anpassen.\n\n# 1) Runtime, Version und die Dienste finden, die sie verwenden\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nGet-Content \'C:\\ELO\\java\\release\' | Select-String \'IMPLEMENTOR|JAVA_RUNTIME_VERSION|OS_ARCH\'\nGet-CimInstance Win32_Service | Where-Object { $_.PathName -match \'ELO\' } | Select-Object Name, State, PathName\n[Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\')\n\n# 2) Runtime vor jeder Aenderung als ZIP sichern\nCompress-Archive -LiteralPath \'C:\\ELO\\java\' -DestinationPath \'C:\\ELO\\java-backup.zip\'\n\n# 3) Vorlaeufige Risikominderung (systemweit): alten Wert BEHALTEN und anhaengen, nie ueberschreiben\n$old = [Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\'); $old\n[Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', (($old + \' -XX:-UseBASE64Intrinsics\').Trim()), \'Machine\')\n# Rueckgaengig: [Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', $old, \'Machine\')   ($null, falls leer)\n# Dienste sehen die Aenderung erst nach einem Neustart.\n\n# 4) Runtime manuell aktualisieren (zuerst die neueste Version DESSELBEN Herstellers und Branches laden)\n(Get-FileHash \'C:\\Downloads\\new-java.zip\' -Algorithm SHA256).Hash        # mit der veroeffentlichten SHA256 des Herstellers vergleichen\nStop-Service \'ELO-SRV01-1\' -Force                                        # jeden Dienst, der dieses Java verwendet\nRename-Item \'C:\\ELO\\java\' \'java.old\'\nExpand-Archive -LiteralPath \'C:\\Downloads\\new-java.zip\' -DestinationPath \'C:\\ELO\\java-new\'\nMove-Item (Get-ChildItem \'C:\\ELO\\java-new\' -Directory | Select-Object -First 1).FullName \'C:\\ELO\\java\'\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nStart-Service \'ELO-SRV01-1\'\n\n# 5) Bei Fehlern: Dienste stoppen, alte Runtime zurueckstellen, Dienste starten\nStop-Service \'ELO-SRV01-1\' -Force\nRename-Item \'C:\\ELO\\java\' \'java.failed\'; Rename-Item \'C:\\ELO\\java.old\' \'java\'\nStart-Service \'ELO-SRV01-1\'\n# Oder aus dem ZIP: Expand-Archive \'C:\\ELO\\java-backup.zip\' -DestinationPath \'C:\\ELO\\restore\'; dann den java-Ordner zurueckverschieben',
- backupsTitle:'Vorhandene Backups',backupsText:'Auf diesem Server wurden Backups dieses Werkzeugs gefunden. Wählen Sie eines, um diese Java-Version zurückzuholen; die aktuell installierte Runtime bleibt daneben erhalten.',severity_high:'Hoch',severity_medium:'Mittel',severity_low:'Niedrig',vulnTitle:'Schwachstelle gefunden: CVE-2026-114938 (Java4Shell)',vulnText:'{n} Runtime(s) liegen vor der behobenen Version: {list}. Der Fehler in den JIT-BASE64-Intrinsics kann falsche Ergebnisse liefern; der Hersteller hat ihn in einer neueren Version behoben.',vulnFixLabel:'Loesung:',vulnFix:'Java auf die aktuelle Version desselben Branches aktualisieren (Schritt 3, Java-Runtime aktualisieren). Die vorlaeufige Risikominderung senkt das Risiko nur bis zum Update.',terminalTitle:'Im Terminal ausfuehren (Administrator-PowerShell)',terminalCmdsText:'# Java auf die aktuelle Version aktualisieren (empfohlen)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Nur vorlaeufige Risikominderung (haengt -XX:-UseBASE64Intrinsics an; danach die ELO-Dienste neu starten)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Ergebnis pruefen (--target ist die Position in der Scan-Liste, ab 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'enthaelt ein verwundbares Java',
+ backupsTitle:'Vorhandene Backups',backupsText:'Auf diesem Server wurden Backups dieses Werkzeugs gefunden. Wählen Sie eines, um diese Java-Version zurückzuholen; die aktuell installierte Runtime bleibt daneben erhalten.',behindTitle:'Ohne dieses Werkzeug: dieselben Schritte von Hand',behindIntro:'Das sind die Befehle, die dieses Werkzeug im Hintergrund Schritt für Schritt für die gewählte Runtime ausführt. Führen Sie sie in einer ADMINISTRATOR-PowerShell aus, wenn Sie das Problem ohne das Werkzeug beheben möchten. Text in <spitzen Klammern> ersetzen.',behindUpdateTitle:'Java-Runtime aktualisieren (was das Werkzeug tut)',behindMitigateTitle:'Vorläufige Risikominderung (was das Werkzeug tut)',severity_high:'Hoch',severity_medium:'Mittel',severity_low:'Niedrig',vulnTitle:'Schwachstelle gefunden: CVE-2026-114938 (Java4Shell)',vulnText:'{n} Runtime(s) liegen vor der behobenen Version: {list}. Der Fehler in den JIT-BASE64-Intrinsics kann falsche Ergebnisse liefern; der Hersteller hat ihn in einer neueren Version behoben.',vulnFixLabel:'Loesung:',vulnFix:'Java auf die aktuelle Version desselben Branches aktualisieren (Schritt 3, Java-Runtime aktualisieren). Die vorlaeufige Risikominderung senkt das Risiko nur bis zum Update.',terminalTitle:'Im Terminal ausfuehren (Administrator-PowerShell)',terminalCmdsText:'# Java auf die aktuelle Version aktualisieren (empfohlen)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Nur vorlaeufige Risikominderung (haengt -XX:-UseBASE64Intrinsics an; danach die ELO-Dienste neu starten)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Ergebnis pruefen (--target ist die Position in der Scan-Liste, ab 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'enthaelt ein verwundbares Java',
 restoreShort:'Dieses Backup wiederherstellen',backupRisk_vulnerable:'Verwundbar: diese Version liegt vor dem Herstellerfix einer Katalog-Schwachstelle',backupRisk_patched:'Für alle Katalog-Schwachstellen als behoben aufgeführt',backupRisk_unknown:'Sicherheitsstatus unbekannt: als potenziell verwundbar behandeln',backupStop:'Die Wiederherstellung beendet die ELO-Tomcat-Dienste, die dieses Java verwenden (ELO ist solange nicht verfügbar), und startet sie danach wieder.',
  exportHeading:'Aktivitätsprotokoll',exportJson:'JSON-Ergebnisse exportieren',exportLog:'Aktivitätsprotokoll exportieren',
  idle:'Bereit',scanning:'Scan läuft',cancelling:'Abbruch angefordert; Scanner wird abgewartet',completed:'Scan abgeschlossen',cancelled:'Scan abgebrochen; Ergebnisse möglicherweise unvollständig',error:'Vorgang fehlgeschlagen',unknown:'Unbekannt',
@@ -2411,7 +2417,8 @@ const classifications = ['vulnerable','patched','not-affected','inconclusive','m
 const rowFields = ['id','path','runtimeRoot','version','vendor','architecture','status','eloRationale','classificationEvidence'];
 const validBackup = item => keys(item,['id','path','runtime','version','vendor','risk','created','size']) && validId(item.id) && text(item.path,1024) && text(item.runtime,1024) && text(item.version,128) && text(item.vendor,32) && ['vulnerable','patched','unknown'].includes(item.risk) && text(item.created,32) && Number.isSafeInteger(item.size) && item.size >= 0;
 const severities = ['high','medium','low'];
-const validVuln = item => keys(item,['id','alias','severity','title','problem','solution','actions']) && /^[A-Za-z0-9._-]{3,64}$/.test(item.id) && typeof item.alias === 'string' && item.alias.length <= 64 && severities.includes(item.severity) && bilingual(item.title,2048) && bilingual(item.problem,2048) && bilingual(item.solution,2048) && Array.isArray(item.actions) && item.actions.length <= 16 && item.actions.every(action => typeof action === 'string' && action.length <= 32);
+const validMitigation = m => keys(m,['variable','option','verifyArgs']) && m.variable === 'JAVA_TOOL_OPTIONS' && /^-XX:[+-][A-Za-z0-9_]{1,64}$/.test(m.option) && Array.isArray(m.verifyArgs) && m.verifyArgs.length >= 1 && m.verifyArgs.length <= 6 && m.verifyArgs.every(a => /^-[A-Za-z0-9:+=_.-]{1,64}$/.test(a));
+const validVuln = item => keys(item,['id','alias','severity','title','problem','solution','actions'],['mitigation']) && (item.mitigation === undefined || validMitigation(item.mitigation)) && /^[A-Za-z0-9._-]{3,64}$/.test(item.id) && typeof item.alias === 'string' && item.alias.length <= 64 && severities.includes(item.severity) && bilingual(item.title,2048) && bilingual(item.problem,2048) && bilingual(item.solution,2048) && Array.isArray(item.actions) && item.actions.length <= 16 && item.actions.every(action => typeof action === 'string' && action.length <= 32);
 const validFinding = item => keys(item,['id','severity','status']) && /^[A-Za-z0-9._-]{3,64}$/.test(item.id) && severities.includes(item.severity) && ['vulnerable','patched','inconclusive'].includes(item.status);
 const validRow = row => keys(row,rowFields,['findings']) && (row.findings === undefined || (Array.isArray(row.findings) && row.findings.length <= 32 && row.findings.every(validFinding))) && validId(row.id) && text(row.path,1024) && text(row.runtimeRoot,1024) && text(row.version,128) && text(row.vendor,256) && ['x86','x64','arm64','unknown'].includes(row.architecture) && classifications.includes(row.status) && bilingual(row.eloRationale,2048) && bilingual(row.classificationEvidence,4096);
 function validSearchPath(value) {
@@ -2533,7 +2540,95 @@ function highlightInto(el, source) {
  el.append(row);
  });
 }
-let cmdKey = '';
+let cmdKey = '', behindKey = '';
+const psq = value => String(value).replace(/'/g,"''");
+function behindUpdateText(row) {
+ const c = (en,de) => language === 'de' ? de : en;
+ const runtime = psq(row.runtimeRoot), name = runtime.split('\\').pop() || 'java';
+ const branchMatch = /^(?:1\.)?(\d{1,3})/.exec(row.version), branch = branchMatch ? branchMatch[1] : '<branch>';
+ const zulu = /zulu/i.test(row.vendor), temurin = /temurin|adoptium/i.test(row.vendor);
+ const arch = (zulu ? {x64:'x64',x86:'x86',arm64:'arm'} : {x64:'x64',x86:'x32',arm64:'aarch64'})[row.architecture] || '<architecture>';
+ const lines = [
+ '# '+c('Run in an ADMINISTRATOR PowerShell. Nothing here is deleted; the old runtime is only renamed.','In einer ADMINISTRATOR-PowerShell ausführen. Nichts wird gelöscht; die alte Runtime wird nur umbenannt.'),
+ `$runtime = '${runtime}'; $stamp = Get-Date -Format yyyyMMddHHmmss`,
+ `$type = if (Test-Path -LiteralPath "$runtime\\bin\\javac.exe") { 'jdk' } else { 'jre' }`,
+ '',
+ '# 1) '+c('Which processes and services use this runtime? (the tool stops only these)','Welche Prozesse und Dienste verwenden diese Runtime? (nur diese beendet das Werkzeug)'),
+ `$users = Get-Process | Where-Object { try { $_.Modules.FileName -like "$runtime\\*" } catch { $false } }`,
+ `Get-CimInstance Win32_Service | Where-Object { $_.ProcessId -in $users.Id } | Select-Object Name, State`,
+ '',
+ '# 2) '+c('Back up the runtime as a ZIP next to it (the tool also writes a SHA256 manifest of every file)','Runtime als ZIP daneben sichern (das Werkzeug schreibt zusätzlich ein SHA256-Manifest jeder Datei)'),
+ `Compress-Archive -LiteralPath $runtime -DestinationPath "$runtime.backup-$stamp.zip"`,
+ `(Get-FileHash -LiteralPath "$runtime.backup-$stamp.zip" -Algorithm SHA256).Hash`,
+ '',
+ '# 3) '+c('Newest release of the SAME vendor and branch, with its download URL and SHA256','Neueste Version DESSELBEN Herstellers und Branches mit Download-URL und SHA256')
+ ];
+ if (zulu) {
+ lines.push(`$list = Invoke-RestMethod "https://api.azul.com/metadata/v1/zulu/packages/?java_version=${branch}&os=windows&arch=${arch}&archive_type=zip&java_package_type=$type&latest=true&release_status=ga&availability_types=CA&page_size=100"`,
+ '# '+c('pick the item with the highest java_version / openjdk_build_number, then:','das Element mit der höchsten java_version / openjdk_build_number wählen, dann:'),
+ `$pkg = Invoke-RestMethod "https://api.azul.com/metadata/v1/zulu/packages/<package_uuid>"`,
+ '$url = $pkg.download_url; $sha = $pkg.sha256_hash');
+ } else if (temurin) {
+ lines.push(`$list = Invoke-RestMethod "https://api.adoptium.net/v3/assets/latest/${branch}/hotspot?architecture=${arch}&image_type=$type&os=windows&vendor=eclipse"`,
+ '# '+c('pick the newest item (version.semver), then:','das neueste Element wählen (version.semver), dann:'),
+ '$url = $list[0].binary.package.link; $sha = $list[0].binary.package.checksum');
+ } else {
+ lines.push('# '+c('Ask your Java vendor for the newest release of this branch and note its HTTPS URL and SHA256:','Beim Java-Hersteller die neueste Version dieses Branches erfragen und HTTPS-URL und SHA256 notieren:'), "$url = '<download URL>'; $sha = '<published SHA256>'");
+ }
+ lines.push('',
+ '# 4) '+c('Download over HTTPS from the vendor host only and verify the hash','Nur vom Hersteller-Host per HTTPS laden und den Hash prüfen'),
+ '[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12',
+ 'Invoke-WebRequest -Uri $url -OutFile "$runtime.download-$stamp.zip"',
+ 'if ((Get-FileHash -LiteralPath "$runtime.download-$stamp.zip" -Algorithm SHA256).Hash -ne $sha.ToUpper()) { throw "SHA256 mismatch - stop here" }',
+ '',
+ '# 5) '+c('Extract next to the runtime and test the NEW Java before touching the old one','Neben der Runtime entpacken und das NEUE Java testen, bevor die alte angefasst wird'),
+ 'Expand-Archive -LiteralPath "$runtime.download-$stamp.zip" -DestinationPath "$runtime.stage-$stamp"',
+ '$new = (Get-ChildItem -LiteralPath "$runtime.stage-$stamp" -Directory | Select-Object -First 1).FullName',
+ '& "$new\\bin\\java.exe" -version',
+ '',
+ '# 6) '+c('Stop the services from step 1, swap the folders (the old one is kept), test again, start the services','Dienste aus Schritt 1 beenden, Ordner tauschen (die alte bleibt erhalten), erneut testen, Dienste starten'),
+ "Stop-Service -Name '<service name>' -Force",
+ `Rename-Item -LiteralPath $runtime -NewName "${name}.old-$stamp"`,
+ 'Move-Item -LiteralPath $new -Destination $runtime',
+ '& "$runtime\\bin\\java.exe" -version',
+ "Start-Service -Name '<service name>'",
+ '',
+ '# 7) '+c('If the test fails: put the old runtime back (the tool does this automatically)','Wenn der Test fehlschlägt: alte Runtime zurücksetzen (das Werkzeug macht das automatisch)'),
+ `# Remove the new folder, then:  Rename-Item -LiteralPath "$runtime.old-$stamp" -NewName "${name}"`);
+ return lines.join('\n');
+}
+function behindMitigateText(row, mitigation) {
+ const c = (en,de) => language === 'de' ? de : en;
+ const flag = (/^-XX:[+-]([A-Za-z0-9_]+)$/.exec(mitigation.option) || [])[1] || 'Flag';
+ const java = psq(row.path);
+ return [
+ '# '+c('Run in an ADMINISTRATOR PowerShell. This changes the MACHINE environment (all Java programs that start afterwards).','In einer ADMINISTRATOR-PowerShell ausführen. Das ändert die SYSTEM-Umgebung (alle danach startenden Java-Programme).'),
+ `$old = [Environment]::GetEnvironmentVariable('${mitigation.variable}', 'Machine'); $old`,
+ '# 1) '+c('Save the current value above. Remove any existing '+flag+' entry from it yourself.','Aktuellen Wert oben sichern. Einen vorhandenen '+flag+'-Eintrag selbst daraus entfernen.'),
+ '',
+ '# 2) '+c('Append the option once (keep every other option exactly as it is)','Option genau einmal anhängen (alle anderen Optionen unverändert lassen)'),
+ `[Environment]::SetEnvironmentVariable('${mitigation.variable}', (($old + ' ${mitigation.option}').Trim()), 'Machine')`,
+ '',
+ '# 3) '+c('Verify with a NEW java process (running JVMs and services keep the old environment until restarted)','Mit einem NEUEN Java-Prozess prüfen (laufende JVMs und Dienste behalten die alte Umgebung bis zum Neustart)'),
+ `$env:${mitigation.variable} = '${mitigation.option}'`,
+ `& '${java}' ${mitigation.verifyArgs.join(' ')} | Select-String '${flag}'`,
+ '',
+ '# 4) '+c('Restart the affected services so they pick the option up','Betroffene Dienste neu starten, damit sie die Option übernehmen'),
+ "Restart-Service -Name '<service name>'",
+ '',
+ '# 5) '+c('Undo (use $null if the variable was empty before)','Rückgängig (bei zuvor leerer Variable $null verwenden)'),
+ `[Environment]::SetEnvironmentVariable('${mitigation.variable}', $old, 'Machine')`
+ ].join('\n');
+}
+function renderBehind(row) {
+ const mitigation = (vulns.find(v => v.mitigation) || {}).mitigation;
+ toggle('behindBox',!row); toggle('behindMitigateBox',!mitigation);
+ if (!row) return;
+ const key = [row.id,row.path,row.runtimeRoot,row.version,row.vendor,row.architecture,language,mitigation ? mitigation.option+mitigation.verifyArgs.join(' ') : ''].join('|');
+ if (key === behindKey) return; behindKey = key;
+ highlightInto($('behindUpdate'),behindUpdateText(row));
+ if (mitigation) highlightInto($('behindMitigate'),behindMitigateText(row,mitigation)); else $('behindMitigate').replaceChildren();
+}
 const fill = (template, values) => template.replace(/\{(n|list)\}/g,(_, key) => values[key]);
 function adviceBlock(vuln, affected, solutionOnly) {
  const box = document.createElement('div'), head = document.createElement('h3'), sev = document.createElement('span'), title = document.createElement('span'), problem = document.createElement('p'), fix = document.createElement('p'), label = document.createElement('strong'), solution = document.createElement('span');
@@ -2618,7 +2713,7 @@ function render() {
  rows.forEach(item => { const tr = document.createElement('tr'); cells(item).forEach(value => { const td = document.createElement('td'); td.textContent = value; tr.append(td); }); $('jvmRows').append(tr); });
  const labels = ['path','runtimeRoot','version','vendor','architecture','classification','eloRationale','classificationEvidence'];
  $('details').textContent = row ? cells(row).map((value,index) => t(labels[index])+': '+value).join('\n') : '';
- renderCards(); renderBackups(); renderAdvice(row);
+ renderCards(); renderBackups(); renderAdvice(row); renderBehind(row);
  $('verifiedOn').textContent = security.verifiedOn ? t('verifiedDate')+': '+security.verifiedOn : t('noAdvisories');
  $('advisories').replaceChildren();
  security.advisories.forEach(item => {

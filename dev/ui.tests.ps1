@@ -508,7 +508,26 @@ function boot(hash = '#token=test-session-token', storage = null) {
  for (const bad of [[vuln({severity:'critical'})],[vuln({extra:1})],[vuln({problem:{en:'x'}})],[vuln({id:'a b'})],Array.from({length:33},(_,n) => vuln({id:'CVE-2027-'+String(1000+n)})),'nope']) { catUi.vulns(bad); await catUi.poll(); assert(catUi.el('error').textContent.includes('invalid response'),'invalid catalog info rejected'); }
  catUi.vulns([vuln()]); catUi.results([row({findings:[finding({severity:'urgent'})]})]); await catUi.poll(); assert(catUi.el('error').textContent.includes('invalid response'),'invalid finding rejected');
  catUi.results([row()]); catUi.security({verifiedOn:'2026-11-23',advisories:[{id:'new_advisory',title:both('New advisory','Neuer Hinweis'),url:'https://example.org/advisory/1'}]}); await catUi.poll(); assert.equal(catUi.el('error').textContent,'','a catalog advisory from any https host is shown');
- catUi.security({verifiedOn:'2026-11-23',advisories:[{id:'bad',title:both('Bad','Schlecht'),url:'http://example.org/advisory/1'}]}); await catUi.poll(); assert(catUi.el('error').textContent.includes('invalid response'),'plain http advisory rejected'); console.log('PASS: JVM evidence/export, exact advisory allowlist, bounded errors/warnings, admin/access denial, rollback/recovery lock, unavailable update, locales and token security');
+ catUi.security({verifiedOn:'2026-11-23',advisories:[{id:'bad',title:both('Bad','Schlecht'),url:'http://example.org/advisory/1'}]}); await catUi.poll(); assert(catUi.el('error').textContent.includes('invalid response'),'plain http advisory rejected'); // ---- "without this tool": the same steps by hand, for the selected runtime
+ const flat = el => el.children.map(r => r.children.length ? r.children.map(piece => piece.textContent).join('') : r.textContent).join('\n');
+ const mit = () => ({variable:'JAVA_TOOL_OPTIONS',option:'-XX:-UseBASE64Intrinsics',verifyArgs:['-XX:+PrintFlagsFinal','-version']});
+ const byHand=boot(); await tick();
+ byHand.vulns([vuln({mitigation:mit()})]);
+ byHand.results([row({vendor:'Eclipse Temurin',version:'17.0.2+8',architecture:'x64',runtimeRoot:'C:\\ELO\\java',path:'C:\\ELO\\java\\bin\\java.exe',findings:[finding()]})]); await byHand.poll();
+ assert.equal(byHand.el('behindBox').attrs.hidden,undefined,'the by-hand steps are shown on the action step');
+ const upd = flat(byHand.el('behindUpdate'));
+ assert(upd.includes("$runtime = 'C:\\ELO\\java'") && upd.includes('Compress-Archive -LiteralPath $runtime') && upd.includes('api.adoptium.net/v3/assets/latest/17/hotspot?architecture=x64&image_type=$type') && upd.includes('Get-FileHash') && upd.includes('Stop-Service') && upd.includes('Rename-Item') && upd.includes('.old-$stamp'),'update steps use the real runtime path, vendor API, backup, hash check, service stop and rename');
+ assert(byHand.el('behindUpdate').children.some(line => line.className === 'c-note') && /^# 1\)/.test(byHand.el('behindUpdate').children.find(line => line.className === 'c-note' && /1\)/.test(line.textContent)).textContent),'steps are numbered comments');
+ const mt = flat(byHand.el('behindMitigate'));
+ assert.equal(byHand.el('behindMitigateBox').attrs.hidden,undefined);
+ assert(mt.includes("SetEnvironmentVariable('JAVA_TOOL_OPTIONS', (($old + ' -XX:-UseBASE64Intrinsics').Trim()), 'Machine')") && mt.includes("& 'C:\\ELO\\java\\bin\\java.exe' -XX:+PrintFlagsFinal -version | Select-String 'UseBASE64Intrinsics'") && mt.includes('Restart-Service'),'mitigation steps come from the catalog option and verify arguments');
+ byHand.results([row({vendor:'Azul Zulu',version:'21.0.1+12-LTS',architecture:'arm64',runtimeRoot:"C:\\O'Brien\\java",path:"C:\\O'Brien\\java\\bin\\java.exe",findings:[finding()]})]); await byHand.poll();
+ const zulu = flat(byHand.el('behindUpdate'));
+ assert(zulu.includes('api.azul.com/metadata/v1/zulu/packages/?java_version=21&os=windows&arch=arm&archive_type=zip') && zulu.includes("$runtime = 'C:\\O''Brien\\java'") && zulu.includes('package_uuid'),'Zulu uses the Azul API and a quote in a path cannot break out of the PowerShell string');
+ changeLocale(byHand,'de'); assert(flat(byHand.el('behindUpdate')).includes('Nichts wird gelöscht') && !flat(byHand.el('behindUpdate')).includes('Nothing here is deleted')); changeLocale(byHand,'en');
+ byHand.vulns([vuln()]); await byHand.poll();
+ assert.equal(byHand.el('behindMitigateBox').attrs.hidden,'','no mitigation block when the catalog has no mitigation action');
+ for (const bad of [mit(), {...mit(),variable:'PATH'}, {...mit(),option:'-javaagent:x.jar'}, {...mit(),verifyArgs:['C:\\evil.exe']}, {...mit(),extra:1}]) { byHand.vulns([vuln({mitigation:bad})]); await byHand.poll(); if (bad === undefined || JSON.stringify(bad) === JSON.stringify(mit())) assert.equal(byHand.el('error').textContent,''); else assert(byHand.el('error').textContent.includes('invalid response'),'invalid mitigation info rejected: '+JSON.stringify(bad)); } console.log('PASS: JVM evidence/export, exact advisory allowlist, bounded errors/warnings, admin/access denial, rollback/recovery lock, unavailable update, locales and token security');
 })().catch(error => { console.error(error); process.exitCode=1; });
 '@
 $tests | & node - $htmlPath

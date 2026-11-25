@@ -370,7 +370,8 @@ try {
     Assert (@($payload.backups).Count -eq 2 -and -not ($payload | ConvertTo-Json -Depth 6).Contains('"Root"')) 'the results payload carries the backups (no internal fields)'
     # The catalog information for the UI is a flat array (never nested) with severity, problem, solution and action ids.
     $vulnJson = $payload | ConvertTo-Json -Depth 8 -Compress
-    Assert ($vulnJson -cnotmatch '"vulnerabilities":\[\[' -and @($payload.vulnerabilities).Count -eq 1 -and $payload.vulnerabilities[0].id -ceq 'CVE-2026-114938' -and $payload.vulnerabilities[0].severity -ceq 'high' -and $payload.vulnerabilities[0].problem.de -and @($payload.vulnerabilities[0].actions).Count -eq 3) 'results carry the catalog vulnerability info as a flat array'    $id=@($payload.backups)[0].id
+    Assert ($vulnJson -cnotmatch '"vulnerabilities":\[\[' -and @($payload.vulnerabilities).Count -eq 1 -and $payload.vulnerabilities[0].id -ceq 'CVE-2026-114938' -and $payload.vulnerabilities[0].severity -ceq 'high' -and $payload.vulnerabilities[0].problem.de -and @($payload.vulnerabilities[0].actions).Count -eq 3) 'results carry the catalog vulnerability info as a flat array'
+    Assert ($payload.vulnerabilities[0].mitigation.option -ceq '-XX:-UseBASE64Intrinsics' -and $payload.vulnerabilities[0].mitigation.variable -ceq 'JAVA_TOOL_OPTIONS' -and @($payload.vulnerabilities[0].mitigation.verifyArgs).Count -eq 2) 'the mitigation option, variable and verify arguments reach the UI for the by-hand steps'
     $id=@($payload.backups)[0].id
     $s.Adapters.Identity={ param($Path) @{Vendor='Eclipse Adoptium';Branch='17';Architecture='x64';ImageType='jdk';Version='17.0.2+8'} }
     $rp=Invoke-EloApi $s (Request POST /api/preview ('{"actionId":"restore-backup","resultId":"'+$id+'"}'))

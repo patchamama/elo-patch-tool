@@ -5,3 +5,5 @@ tools/community/node_modules/
 tools/community/package-lock.json
 tools/community/config/ai.json
 tools/community/drafts/
+tools/community/secrets.local.env
+tools/community/*.local.env

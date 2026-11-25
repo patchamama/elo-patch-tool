@@ -147,6 +147,8 @@ function Get-EloVulnerabilityInfo {
         $list+=@{id=[string]$v.id;alias=[string](@($v.aliases) | Select-Object -First 1);severity=[string]$v.severity
             title=@{en=[string]$v.title.en;de=[string]$v.title.de};problem=@{en=[string]$v.problem.en;de=[string]$v.problem.de};solution=@{en=[string]$v.solution.en;de=[string]$v.solution.de}
             actions=@(@($v.actions) | ForEach-Object { [string]$_.id })}
+        $m=Get-EloVulnAction $v 'jvm-option'
+        if ($m) { $list[-1].mitigation=@{variable=[string]$m.variable;option=[string]$m.option;verifyArgs=@(@($m.verify.args) | ForEach-Object { [string]$_ })} }
     }
     return $list
 }

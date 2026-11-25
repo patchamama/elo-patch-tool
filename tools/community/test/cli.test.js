@@ -49,7 +49,7 @@ test('run end to end with a fake browser and a fake AI writes the four files and
   const chunks = []; const realWrite = process.stdout.write.bind(process.stdout);
   process.stdout.write = s => { chunks.push(String(s)); return true; };
   try {
-    const code = await main(['run', '--since', '30d', '--max', '2', '--provider', 'ollama', '--model', 'llama3.1', '--out', out], { now, community, chromium, callProvider: async () => analysis() });
+    const code = await main(['run', '--since', '30d', '--max', '2', '--provider', 'ollama', '--model', 'llama3.1', '--out', out], { now, community, chromium, callProvider: async () => analysis(), consent: async () => true, loadSecrets: () => ({ loaded: [], file: 'x', present: false }) });
     assert.equal(code, 0);
   } finally { process.stdout.write = realWrite; }
   for (const f of ['articles.json', 'analysis.json', 'draft-vulndb.json', 'report.md']) assert.ok(fs.existsSync(path.join(out, f)), f);
