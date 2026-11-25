@@ -25,6 +25,7 @@ T4 [S1-S12] Verification and delivery; route: inline; DONE: all dev/*.tests.ps1 
 T5 [S8-S10,S12] Bilingual technical report, recovery guidance, environment observation and optional ELO version lookup; route: writer; DONE (5dc134c: PowerShell and cmd restore commands, also after a successful update). ELO API version lookup stays unavailable: no verified installation-specific contract.
 T6 [S2,S4,S7,S11] Restricted drive-root discovery and safe verified runtime updates; route: inline; DONE (0daed5d, 5dc134c, 9ffc3f5): Temurin 17.0.21.1+2 pinned, real adapters, Java self-test probe, live update + rollback verified.
 
+T11 [S1-S12] Session survives a refresh (tab-scoped token), backups collapsed and restorable without a scan, red CVE alert with the update solution, highlighted terminal commands, backend window log, restore recorded in the report; route: inline; DONE.
 T10 [S1-S12] Restore safety: existing backups show their CVE-2026-114938 status, restore preview warns that ELO Tomcat services are stopped; route: inline; DONE.
 Known limits: Temurin and Azul Zulu (latest release of each branch) can be updated; runtime must be below a dedicated directory (not a drive root); quiescence is best effort; ELO compatibility is never assumed.
 ## Log

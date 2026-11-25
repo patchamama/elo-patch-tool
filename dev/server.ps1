@@ -36,10 +36,11 @@ function New-EloServerSession {
     @{
         Port=$Port; Origin="http://127.0.0.1:$Port"; Token=(New-EloSecret); UiHtml=$UiHtml; ScanSource=$ScanSource
         State='idle'; Results=@(); Targets=@{}; Preview=$null; Worker=$null; Backup=$null; RecoveryRequired=$false; LastError=$null
-        ReportJvms=@(); ReportActions=@(); ReportIndexes=@{}; UpdateContext=$null; ReportRecovery=$null; LastUpdate=$null; Backups=@{}; BackupsCache=$null
+        ReportJvms=@(); ReportActions=@(); ReportIndexes=@{}; UpdateContext=$null; ReportRecovery=$null; LastUpdate=$null; Backups=@{}; BackupsCache=$null; BackupsLogged=-1; LastRejected=''
         Adapters=@{
             NewUpdateContext={ param($Root,$Runtime,$StopServices) New-EloUpdateContext -Adapters (New-EloWindowsUpdateAdapters -ApprovedRoot $Root -Runtime $Runtime -AllowServiceStop:([bool]$StopServices)) -Production }
             BackupRoots={ @([IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -in @([IO.DriveType]::Fixed,[IO.DriveType]::Removable) -and $_.Name -cmatch '^[C-Z]:\\$' } | ForEach-Object { $_.RootDirectory.FullName }) }
+            Log={ param($Message) Write-Host ((Get-Date).ToString('HH:mm:ss')+'  '+$Message) }
             Identity={ param($Path) Get-EloRuntimeIdentity $Path }
             EloVersion={ param($Roots) Get-EloInstalledIndexserverVersion $Roots }
             ResolveRelease={ param($Identity) Resolve-EloLatestRelease -Vendor $Identity.Vendor -Branch $Identity.Branch -Architecture $Identity.Architecture -ImageType $Identity.ImageType }
@@ -175,6 +176,7 @@ function ConvertTo-EloUiResults {
     $payload = @{results=@($rows.ToArray());security=(Get-EloSecurityMetadata)}
     if ([Text.Encoding]::UTF8.GetByteCount(($payload | ConvertTo-Json -Depth 8 -Compress)) -gt 4MB) { Stop-EloRequest 422 'narrow_scan_root' }
     $Session.Results=$rows.ToArray(); $Session.Targets=$targets
+    Write-EloLog $Session ('Scan finished: '+$rows.Count+' Java runtime(s) found, '+@($rows | Where-Object { $_.status -ceq 'vulnerable' }).Count+' vulnerable (CVE-2026-114938).')
     $Session.ReportIndexes=@{}
     foreach ($row in $Session.Results) {
         $item=$targets[$row.id]
@@ -417,6 +419,17 @@ function ConvertTo-EloUpdateCode {
     if ($code -cmatch '^[a-z0-9_]{1,64}(:[A-Za-z0-9_+.\-]{1,32})?') { return $Matches[0] }
     return 'update_failed'
 }
+function Write-EloLog {
+    # One line for the backend (PowerShell) window. Never the token, never request bodies.
+    param($Session,[string]$Message)
+    try {
+        if ($Session.Adapters.Log -is [scriptblock]) {
+            $clean=($Message -replace '[\x00-\x1f\x7f]',' ')
+            if ($Session.Token) { $clean=$clean.Replace([string]$Session.Token,'[redacted]') }
+            & $Session.Adapters.Log $clean.Substring(0,[Math]::Min(600,$clean.Length))
+        }
+    } catch { }
+}
 function Read-EloBackupRelease {
     # Vendor and version of the runtime inside a backup ZIP, read from tree/release (bounded, read-only).
     param([string]$ZipPath)
@@ -486,10 +499,17 @@ function Get-EloBackupList {
     } catch { }
     $Session.Backups=@{}; $items=@()
     foreach ($entry in @($found | Sort-Object { $_.Stamp } -Descending)) {
-        $id=New-EloSecret; $Session.Backups[$id]=$entry
+        $sha=[Security.Cryptography.SHA256]::Create()
+        try { $id=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes([string]$Session.Token+'|'+([string]$entry.Path).ToLowerInvariant()))) -replace '-','').ToLowerInvariant() } finally { $sha.Dispose() }
+        $Session.Backups[$id]=$entry
         $items+=@{id=$id;path=[string]$entry.Path;runtime=[string]$entry.Runtime;version=[string]$entry.Version;vendor=[string]$entry.Vendor;risk=[string]$entry.Risk;created=[string]$entry.Created;size=[long]$entry.Size}
     }
     $Session.BackupsCache=@{Expires=$now.AddSeconds(30);Items=$items}
+    if ($Session.BackupsLogged -ne $items.Count) {
+        $Session.BackupsLogged=$items.Count
+        $bad=@($items | Where-Object { $_.risk -cne 'patched' }).Count
+        if ($items.Count -gt 0) { Write-EloLog $Session "Existing Java backups found: $($items.Count) ($bad vulnerable or of unknown security status). They can be restored without scanning." }
+    }
     return $items
 }
 function Get-EloUpdateTarget {
@@ -627,7 +647,7 @@ function New-EloRestorePreview {
     $services=@(); if (Test-Path -LiteralPath $source.Runtime) { $services=Get-EloUpdateUsers $Session $source.Runtime }
     $now=& $Session.Adapters.Clock
     $preview=@{Id=(New-EloSecret);ResultId=$ResultId;ActionId='restore-backup';Runtime=$source.Runtime;Root=$source.Root;Backup=$source.Backup;Services=$services
-        Stamp=$now.ToString('yyyyMMddHHmmss');FromVersion=$source.FromVersion;ToVersion=$source.ToVersion;JavaPath=$source.JavaPath;Index=$source.Index;Expires=$now.AddMinutes(2)}
+        Stamp=$now.ToString('yyyyMMddHHmmss');FromVersion=$source.FromVersion;ToVersion=$source.ToVersion;Vendor=[string]$source.Vendor;Risk=[string]$source.Risk;JavaPath=$source.JavaPath;Index=$source.Index;Expires=$now.AddMinutes(2)}
     $Session.Preview=$preview
     $summaryEn="Restore the runtime ($($preview.ToVersion)) of $($source.Runtime) from the backup ZIP $($source.Backup). Every file is hash-checked before the swap; the current runtime (if any) is renamed to $($source.Runtime).replaced-$($preview.Stamp) and kept; nothing is deleted."
     $summaryDe="Die Runtime ($($preview.ToVersion)) von $($source.Runtime) aus dem Backup-ZIP $($source.Backup) wiederherstellen. Jede Datei wird vor dem Austausch per Hash geprueft; die aktuelle Runtime (falls vorhanden) wird nach $($source.Runtime).replaced-$($preview.Stamp) umbenannt und bleibt erhalten; es wird nichts geloescht."
@@ -664,7 +684,19 @@ function Invoke-EloRestoreAction {
         if ($index -gt 0) { $Session.ReportActions+=@{Kind='Restore';Status='Failed';RuntimeIndex=$index;EvidenceCode='RestoreFailed';EvidenceVerified=$true} }
         Stop-EloRequestDetail 422 'restore_failed_no_change' (ConvertTo-EloUpdateCode $_.Exception.Message)
     }
-    if ($index -gt 0) { $Session.ReportActions+=@{Kind='Restore';Status='Proven';Verified=$true;RuntimeIndex=$index;EvidenceCode='OriginalRuntimeRestored';EvidenceVerified=$true;FromVersion=$preview.FromVersion;ToVersion=$preview.ToVersion} }
+    # The restored runtime is new evidence for the report: its classification (vulnerable or fixed) is recorded
+    # even when the restore was done without a scan in this session.
+    $classification='Unknown'; $code='Unknown'
+    if ([string]$preview.Risk -ceq 'vulnerable') { $classification='PotentiallyVulnerable'; $code='AdvisoryRangeMatch' }
+    elseif ([string]$preview.Risk -ceq 'patched') { $classification='Fixed'; $code='AdvisoryFixedVersion' }
+    $restoredVendor=[string]$preview.Vendor; if ($restoredVendor -cnotin @('Temurin','Azul Zulu')) { $restoredVendor='Unknown' }
+    $Session.ReportJvms+=@{Version=[string]$restored.Version;Verified=$true;ExecutionVerified=$true;Vendor=$restoredVendor;VendorVerified=($restoredVendor -cne 'Unknown')
+        Classification=$classification;ClassificationVerified=($classification -cne 'Unknown');EvidenceCode=$code}
+    $newIndex=$Session.ReportJvms.Count
+    $Session.ReportActions+=@{Kind='Restore';Status='Proven';Verified=$true;RuntimeIndex=$newIndex;EvidenceCode='OriginalRuntimeRestored';EvidenceVerified=$true;FromVersion=$preview.FromVersion;ToVersion=$preview.ToVersion}
+    if ($classification -ceq 'PotentiallyVulnerable') { Write-EloLog $Session "SECURITY: $($preview.Runtime) was restored to $($restored.Version), which is BEFORE the CVE-2026-114938 fix. Update Java again or apply the mitigation (-XX:-UseBASE64Intrinsics)." }
+    elseif ($classification -ceq 'Unknown') { Write-EloLog $Session "SECURITY: $($preview.Runtime) was restored to $($restored.Version); its status for CVE-2026-114938 is unknown. Treat it as potentially vulnerable." }
+    else { Write-EloLog $Session "Restored $($preview.Runtime) to $($restored.Version) (listed as fixed for CVE-2026-114938)." }
     $Session.LastUpdate=$null; $Session.BackupsCache=$null
     return @{ok=$true}
 }function Get-EloSessionReportHtml {
@@ -714,12 +746,14 @@ function Invoke-EloApi {
             $path=$null
             if ($body.PSObject.Properties.Name -contains 'searchPath') { $path=Test-EloLocalPath $body.searchPath -RequireDirectory }
             Start-EloScanWorker $Session $path
+            $scope='on drives C: to Z:'; if ($path) { $scope="in $path" }
+            Write-EloLog $Session "Scan started $scope."
             return @{ok=$true}
         }
         '/api/cancel' {
             $null=ConvertFrom-EloBody $Request.Body
             $Session.Preview=$null
-            if ($Session.Worker) { $Session.Worker.Control.Cancel=$true; $Session.State='cancelling' }
+            if ($Session.Worker) { $Session.Worker.Control.Cancel=$true; $Session.State='cancelling'; Write-EloLog $Session 'Scan cancel requested.' }
             return @{ok=$true}
         }
         default {
@@ -728,17 +762,25 @@ function Invoke-EloApi {
             foreach ($key in $required) { if ($body.$key -cnotmatch '^[A-Za-z0-9_-]{1,128}$') { Stop-EloRequest 400 'invalid_id' } }
             if ($body.actionId -cnotin @('mitigate','update-runtime','restore-backup')) { Stop-EloRequest 400 'invalid_action' }
             if ($Session.RecoveryRequired) { Stop-EloRequest 409 'manual_recovery_required_close_session' }
-            if ($Session.State -cne 'completed' -or $Session.Worker) { Stop-EloRequest 409 'completed_scan_required' }
-            if ($body.actionId -ceq 'update-runtime') {
-                if ($Request.Target -ceq '/api/preview') { return New-EloRuntimeUpdatePreview $Session $body.resultId }
-                return Invoke-EloRuntimeUpdateAction $Session $body
+            $diskRestore=($body.actionId -ceq 'restore-backup' -and $Session.Backups.ContainsKey([string]$body.resultId))
+            if ($Session.Worker -or $Session.State -cin @('scanning','cancelling') -or ($Session.State -cne 'completed' -and -not $diskRestore)) { Stop-EloRequest 409 'completed_scan_required' }
+            $phase='preview'; if ($Request.Target -ceq '/api/action') { $phase='apply' }
+            $subject=''
+            if ($diskRestore) { $subject=[string]$Session.Backups[[string]$body.resultId].Path }
+            elseif ($Session.Targets.ContainsKey([string]$body.resultId)) { $subject=[string]$Session.Targets[[string]$body.resultId].Location }
+            Write-EloLog $Session "$phase '$($body.actionId)' requested for $subject"
+            try {
+            $preview=($Request.Target -ceq '/api/preview')
+            if ($body.actionId -ceq 'update-runtime') { if ($preview) { $result=New-EloRuntimeUpdatePreview $Session $body.resultId } else { $result=Invoke-EloRuntimeUpdateAction $Session $body } }
+            elseif ($body.actionId -ceq 'restore-backup') { if ($preview) { $result=New-EloRestorePreview $Session $body.resultId } else { $result=Invoke-EloRestoreAction $Session $body } }
+            else { if ($preview) { $result=New-EloMitigationPreview $Session $body.resultId } else { $result=Invoke-EloMitigation $Session $body } }
+            Write-EloLog $Session "$phase '$($body.actionId)' OK."
+            return $result
+            } catch {
+                $failure=ConvertTo-EloErrorResponse $_.Exception
+                Write-EloLog $Session "$phase '$($body.actionId)' FAILED: $($failure.Body.error) (HTTP $($failure.Status))"
+                throw
             }
-            if ($body.actionId -ceq 'restore-backup') {
-                if ($Request.Target -ceq '/api/preview') { return New-EloRestorePreview $Session $body.resultId }
-                return Invoke-EloRestoreAction $Session $body
-            }
-            if ($Request.Target -ceq '/api/preview') { return New-EloMitigationPreview $Session $body.resultId }
-            return Invoke-EloMitigation $Session $body
         }
     }
 }
@@ -862,6 +904,9 @@ function Start-EloServer {
                 } catch {
                     $failure=ConvertTo-EloErrorResponse $_.Exception
                     $status=$failure.Status; $content=$failure.Body | ConvertTo-Json -Depth 5 -Compress
+                    # Helps diagnosing a stale browser tab (old session link); logged once per distinct cause.
+                    $rejected="Rejected request: HTTP $status $($failure.Body.error)"
+                    if ($status -in @(400,401,403,404,405) -and $session.LastRejected -cne $rejected) { $session.LastRejected=$rejected; Write-EloLog $session ($rejected+'. If this is a browser tab from an earlier run, close it and use the page opened by the current run.') }
                 }
                 Write-EloHttpResponse $stream $status $content $type
             } catch { # Socket errors are intentionally not logged (request data may contain credentials).

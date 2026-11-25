@@ -75,7 +75,15 @@ Every update first writes a verified backup ZIP next to the runtime, for example
 3. re-applies the permissions (DACL, and owner when permitted);
 4. swaps it in. The updated runtime is kept as `java.replaced-<timestamp>`; nothing is deleted.
 
-If the update itself fails, the app already rolls back on its own. The in-app restore is available while that browser session is open and only for the update made in it.
+**Backups from earlier sessions need no scan.** The first step lists every `<runtime>.backup-<timestamp>.zip` found on drives C: to Z: (levels 1 and 2) in a collapsed *Existing backups* box. Each entry shows its Java version and whether that version is **vulnerable to CVE-2026-114938**, **listed as fixed** or **of unknown status** (only exact Temurin builds are classified; anything else is treated as potentially vulnerable). Restoring one:
+
+- requires **stopping the ELO Tomcat services** that use the runtime; the preview lists them and ELO is unavailable until they start again;
+- warns when the backup is a vulnerable version, because restoring brings the vulnerability back (mitigate with `-XX:-UseBASE64Intrinsics` or update again afterwards);
+- is recorded in the technical report as the runtime's new state (potentially vulnerable, fixed or unknown), even if no scan was run.
+
+The backend window (PowerShell) prints each step as it happens: scan start/end, previews, applied actions, failures, rejected requests and a security note after a restore. It never prints the session token.
+
+If the update itself fails, the app already rolls back on its own. The in-app restore of the *latest update* is available while that browser session is open; backups of earlier sessions are restored from the first step.
 
 **2. Manually, from any terminal (also after the session is gone).** The technical report prints these commands with your real paths. Stop the ELO services first:
 

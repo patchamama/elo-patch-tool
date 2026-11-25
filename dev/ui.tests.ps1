@@ -35,7 +35,7 @@ const both = (en,de=en) => ({en,de});
 const row = (overrides={}) => ({id:'installation_1',path:'C:\\ELO data\\<img onerror=alert(1)>',runtimeRoot:'C:\\ELO data\\jre',version:'17.0.1',vendor:'Example vendor <img>',architecture:'x64',status:'vulnerable',eloRationale:both('ELO service points to this JVM','ELO-Dienst verweist auf diese JVM'),classificationEvidence:both('Version and vendor matched advisory rules','Version und Hersteller entsprechen den Hinweisregeln'),...overrides});
 // Fixtures exercise validation, not live advisory verification or applicability.
 const securityFixture = () => ({verifiedOn:'2025-01-21',advisories:[{id:'oracle_fixture',title:both('Official Oracle advisory fixture','Offizieller Oracle-Testhinweis'),url:'https://www.oracle.com/security-alerts/cpujan2025.html'}]});
-function boot(hash = '#token=test-session-token') {
+function boot(hash = '#token=test-session-token', storage = null) {
  const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(m => [m[1],new Element(m[1])]));
  const translated = [...html.matchAll(/data-i18n="([^"]+)"/g)].map(m => { const el=new Element(); el.dataset.i18n=m[1]; return el; });
  const calls=[],downloads=[],timers=[];
@@ -48,7 +48,7 @@ function boot(hash = '#token=test-session-token') {
  static createObjectURL(blob) { downloads.push(blob); return 'blob:local'; }
  static revokeObjectURL() {}
  }
- const context={document,location:{hash,pathname:'/ui',search:''},history,URLSearchParams,Blob,Date,JSON,Number,Set,TextDecoder,URL:BrowserURL,
+ const context={document,location:{hash,pathname:'/ui',search:''},...(storage ? {sessionStorage:storage} : {}),history,URLSearchParams,Blob,Date,JSON,Number,Set,TextDecoder,URL:BrowserURL,
  setInterval(fn) { timers.push(fn); },setTimeout(fn) { fn(); },
  async fetch(path,options) {
  calls.push({path,options});
@@ -481,11 +481,39 @@ function boot(hash = '#token=test-session-token') {
  assert.equal(backupsUi.el('previewKind').textContent,'Restore from backup');
  backupsUi.el('confirm').checked=true; backupsUi.el('confirm').onchange(); await backupsUi.el('apply').click();
  assert.deepEqual(JSON.parse(backupsUi.calls.at(-1).options.body),{actionId:'restore-backup',resultId:'bk_1',previewId:'preview_1'}); assert.equal(visibleSteps(backupsUi),'5');
- changeLocale(backupsUi,'de'); assert(backupsUi.translated.find(el => el.dataset.i18n === 'backupsTitle').textContent === 'Vorhandene Backups'); changeLocale(backupsUi,'en');
+ backupsUi.el('language').value='de'; backupsUi.el('language').onchange(); assert(backupsUi.el('backupsSummary').textContent.startsWith('Vorhandene Backups')); changeLocale(backupsUi,'en');
  for (const bad of [[bk({id:'bad;id'})],[bk({size:-1})],[bk({path:''})],[bk({extra:1})],[bk(),bk()],Array.from({length:51},(_,n) => bk({id:'bk_'+n})),'nope']) {
    backupsUi.backups(bad); await backupsUi.poll(); assert(backupsUi.el('error').textContent.includes('invalid response'),'invalid backup list rejected');
  }
- backupsUi.backups([bk()]); await backupsUi.poll(); assert.equal(backupsUi.el('error').textContent,''); console.log('PASS: JVM evidence/export, exact advisory allowlist, bounded errors/warnings, admin/access denial, rollback/recovery lock, unavailable update, locales and token security');
+ backupsUi.backups([bk()]); await backupsUi.poll(); assert.equal(backupsUi.el('error').textContent,''); // ---- a page refresh keeps the session; a rejected token is forgotten; backups are collapsed; the red advice.
+ const store=new Map(), storage={getItem:k => store.has(k) ? store.get(k) : null,setItem:(k,v) => { store.set(k,v); },removeItem:k => { store.delete(k); }};
+ const hex64='ab12'.repeat(16);
+ const first=boot('#token='+hex64,storage); await first.poll();
+ assert.equal(first.calls[0].options.headers['X-Session-Token'],hex64);
+ const refreshed=boot('',storage); await refreshed.poll();
+ assert.equal(refreshed.calls[0].options.headers['X-Session-Token'],hex64,'refresh without the fragment reuses the tab session token');
+ assert.equal(refreshed.el('error').textContent,'','no token error after a refresh');
+ refreshed.failure(401,{error:'authentication_required',warnings:[]}); await refreshed.poll();
+ assert(refreshed.el('error').textContent.includes('Missing or rejected session token') && !store.has('eloSessionToken'),'a rejected token is forgotten');
+ const noToken=boot('',storage); await tick();
+ assert(noToken.el('error').textContent.includes('Missing or rejected session token'),'without any token the link must be reopened');
+ const throwing=boot('#token='+hex64,{getItem() { throw Error('blocked'); },setItem() { throw Error('blocked'); },removeItem() { throw Error('blocked'); }}); await throwing.poll();
+ assert.equal(throwing.calls[0].options.headers['X-Session-Token'],hex64,'blocked storage does not break the fragment token');
+ assert(/<details id="backupsBox"(?![^>]*\bopen\b)/.test(html),'existing backups are collapsed by default');
+ const adviceUi=boot(); await tick();
+ adviceUi.backups([bk(),bk({id:'bk_2',risk:'patched',version:'17.0.21.1+2'})]); await adviceUi.poll();
+ assert(adviceUi.el('backupsSummary').textContent.includes('(2)') && adviceUi.el('backupsSummary').textContent.includes('vulnerable'),'collapsed summary shows the count and the risk');
+ assert.equal(adviceUi.el('vulnAlert').attrs.hidden,undefined,'a vulnerable runtime shows the red alert on the runtime step');
+ assert(adviceUi.el('vulnText').textContent.includes('1 runtime(s)') && adviceUi.el('vulnText').textContent.includes('ELO data'));
+ assert.equal(adviceUi.el('vulnRec').attrs.hidden,undefined,'the update recommendation is repeated on the action step');
+ assert.equal(adviceUi.el('cards').children[0].dataset.status,'vulnerable','vulnerable runtime card is flagged');
+ const cmds=adviceUi.el('terminalCmds').children;
+ assert(cmds.length >= 8 && cmds[0].className === 'c-note' && cmds[1].children.some(piece => piece.className === 'c-flag' && piece.textContent === '--update-runtime'),'terminal commands are highlighted (comments and flags)');
+ assert(cmds[1].children.map(piece => piece.textContent).join('').startsWith('.\ELO-Patch-Tools.bat --cli --update-runtime'),'the launcher path keeps its backslash');
+ assert(adviceUi.el('cmdView').children.length > 10 && adviceUi.el('cmdView').children.some(line => line.className === 'c-note'),'manual PowerShell commands are highlighted');
+ adviceUi.results([row({status:'patched'})]); await adviceUi.poll();
+ assert.equal(adviceUi.el('vulnAlert').attrs.hidden,'','no red alert when nothing is vulnerable');
+ changeLocale(adviceUi,'de'); assert(adviceUi.translated.find(el => el.dataset.i18n === 'vulnTitle').textContent.includes('Schwachstelle')); changeLocale(adviceUi,'en'); console.log('PASS: JVM evidence/export, exact advisory allowlist, bounded errors/warnings, admin/access denial, rollback/recovery lock, unavailable update, locales and token security');
 })().catch(error => { console.error(error); process.exitCode=1; });
 '@
 $tests | & node - $htmlPath

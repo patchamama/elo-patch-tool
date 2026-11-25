@@ -866,10 +866,11 @@ function New-EloServerSession {
     @{
         Port=$Port; Origin="http://127.0.0.1:$Port"; Token=(New-EloSecret); UiHtml=$UiHtml; ScanSource=$ScanSource
         State='idle'; Results=@(); Targets=@{}; Preview=$null; Worker=$null; Backup=$null; RecoveryRequired=$false; LastError=$null
-        ReportJvms=@(); ReportActions=@(); ReportIndexes=@{}; UpdateContext=$null; ReportRecovery=$null; LastUpdate=$null; Backups=@{}; BackupsCache=$null
+        ReportJvms=@(); ReportActions=@(); ReportIndexes=@{}; UpdateContext=$null; ReportRecovery=$null; LastUpdate=$null; Backups=@{}; BackupsCache=$null; BackupsLogged=-1; LastRejected=''
         Adapters=@{
             NewUpdateContext={ param($Root,$Runtime,$StopServices) New-EloUpdateContext -Adapters (New-EloWindowsUpdateAdapters -ApprovedRoot $Root -Runtime $Runtime -AllowServiceStop:([bool]$StopServices)) -Production }
             BackupRoots={ @([IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -in @([IO.DriveType]::Fixed,[IO.DriveType]::Removable) -and $_.Name -cmatch '^[C-Z]:\\$' } | ForEach-Object { $_.RootDirectory.FullName }) }
+            Log={ param($Message) Write-Host ((Get-Date).ToString('HH:mm:ss')+'  '+$Message) }
             Identity={ param($Path) Get-EloRuntimeIdentity $Path }
             EloVersion={ param($Roots) Get-EloInstalledIndexserverVersion $Roots }
             ResolveRelease={ param($Identity) Resolve-EloLatestRelease -Vendor $Identity.Vendor -Branch $Identity.Branch -Architecture $Identity.Architecture -ImageType $Identity.ImageType }
@@ -1005,6 +1006,7 @@ function ConvertTo-EloUiResults {
     $payload = @{results=@($rows.ToArray());security=(Get-EloSecurityMetadata)}
     if ([Text.Encoding]::UTF8.GetByteCount(($payload | ConvertTo-Json -Depth 8 -Compress)) -gt 4MB) { Stop-EloRequest 422 'narrow_scan_root' }
     $Session.Results=$rows.ToArray(); $Session.Targets=$targets
+    Write-EloLog $Session ('Scan finished: '+$rows.Count+' Java runtime(s) found, '+@($rows | Where-Object { $_.status -ceq 'vulnerable' }).Count+' vulnerable (CVE-2026-114938).')
     $Session.ReportIndexes=@{}
     foreach ($row in $Session.Results) {
         $item=$targets[$row.id]
@@ -1247,6 +1249,17 @@ function ConvertTo-EloUpdateCode {
     if ($code -cmatch '^[a-z0-9_]{1,64}(:[A-Za-z0-9_+.\-]{1,32})?') { return $Matches[0] }
     return 'update_failed'
 }
+function Write-EloLog {
+    # One line for the backend (PowerShell) window. Never the token, never request bodies.
+    param($Session,[string]$Message)
+    try {
+        if ($Session.Adapters.Log -is [scriptblock]) {
+            $clean=($Message -replace '[\x00-\x1f\x7f]',' ')
+            if ($Session.Token) { $clean=$clean.Replace([string]$Session.Token,'[redacted]') }
+            & $Session.Adapters.Log $clean.Substring(0,[Math]::Min(600,$clean.Length))
+        }
+    } catch { }
+}
 function Read-EloBackupRelease {
     # Vendor and version of the runtime inside a backup ZIP, read from tree/release (bounded, read-only).
     param([string]$ZipPath)
@@ -1316,10 +1329,17 @@ function Get-EloBackupList {
     } catch { }
     $Session.Backups=@{}; $items=@()
     foreach ($entry in @($found | Sort-Object { $_.Stamp } -Descending)) {
-        $id=New-EloSecret; $Session.Backups[$id]=$entry
+        $sha=[Security.Cryptography.SHA256]::Create()
+        try { $id=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes([string]$Session.Token+'|'+([string]$entry.Path).ToLowerInvariant()))) -replace '-','').ToLowerInvariant() } finally { $sha.Dispose() }
+        $Session.Backups[$id]=$entry
         $items+=@{id=$id;path=[string]$entry.Path;runtime=[string]$entry.Runtime;version=[string]$entry.Version;vendor=[string]$entry.Vendor;risk=[string]$entry.Risk;created=[string]$entry.Created;size=[long]$entry.Size}
     }
     $Session.BackupsCache=@{Expires=$now.AddSeconds(30);Items=$items}
+    if ($Session.BackupsLogged -ne $items.Count) {
+        $Session.BackupsLogged=$items.Count
+        $bad=@($items | Where-Object { $_.risk -cne 'patched' }).Count
+        if ($items.Count -gt 0) { Write-EloLog $Session "Existing Java backups found: $($items.Count) ($bad vulnerable or of unknown security status). They can be restored without scanning." }
+    }
     return $items
 }
 function Get-EloUpdateTarget {
@@ -1457,7 +1477,7 @@ function New-EloRestorePreview {
     $services=@(); if (Test-Path -LiteralPath $source.Runtime) { $services=Get-EloUpdateUsers $Session $source.Runtime }
     $now=& $Session.Adapters.Clock
     $preview=@{Id=(New-EloSecret);ResultId=$ResultId;ActionId='restore-backup';Runtime=$source.Runtime;Root=$source.Root;Backup=$source.Backup;Services=$services
-        Stamp=$now.ToString('yyyyMMddHHmmss');FromVersion=$source.FromVersion;ToVersion=$source.ToVersion;JavaPath=$source.JavaPath;Index=$source.Index;Expires=$now.AddMinutes(2)}
+        Stamp=$now.ToString('yyyyMMddHHmmss');FromVersion=$source.FromVersion;ToVersion=$source.ToVersion;Vendor=[string]$source.Vendor;Risk=[string]$source.Risk;JavaPath=$source.JavaPath;Index=$source.Index;Expires=$now.AddMinutes(2)}
     $Session.Preview=$preview
     $summaryEn="Restore the runtime ($($preview.ToVersion)) of $($source.Runtime) from the backup ZIP $($source.Backup). Every file is hash-checked before the swap; the current runtime (if any) is renamed to $($source.Runtime).replaced-$($preview.Stamp) and kept; nothing is deleted."
     $summaryDe="Die Runtime ($($preview.ToVersion)) von $($source.Runtime) aus dem Backup-ZIP $($source.Backup) wiederherstellen. Jede Datei wird vor dem Austausch per Hash geprueft; die aktuelle Runtime (falls vorhanden) wird nach $($source.Runtime).replaced-$($preview.Stamp) umbenannt und bleibt erhalten; es wird nichts geloescht."
@@ -1494,7 +1514,19 @@ function Invoke-EloRestoreAction {
         if ($index -gt 0) { $Session.ReportActions+=@{Kind='Restore';Status='Failed';RuntimeIndex=$index;EvidenceCode='RestoreFailed';EvidenceVerified=$true} }
         Stop-EloRequestDetail 422 'restore_failed_no_change' (ConvertTo-EloUpdateCode $_.Exception.Message)
     }
-    if ($index -gt 0) { $Session.ReportActions+=@{Kind='Restore';Status='Proven';Verified=$true;RuntimeIndex=$index;EvidenceCode='OriginalRuntimeRestored';EvidenceVerified=$true;FromVersion=$preview.FromVersion;ToVersion=$preview.ToVersion} }
+    # The restored runtime is new evidence for the report: its classification (vulnerable or fixed) is recorded
+    # even when the restore was done without a scan in this session.
+    $classification='Unknown'; $code='Unknown'
+    if ([string]$preview.Risk -ceq 'vulnerable') { $classification='PotentiallyVulnerable'; $code='AdvisoryRangeMatch' }
+    elseif ([string]$preview.Risk -ceq 'patched') { $classification='Fixed'; $code='AdvisoryFixedVersion' }
+    $restoredVendor=[string]$preview.Vendor; if ($restoredVendor -cnotin @('Temurin','Azul Zulu')) { $restoredVendor='Unknown' }
+    $Session.ReportJvms+=@{Version=[string]$restored.Version;Verified=$true;ExecutionVerified=$true;Vendor=$restoredVendor;VendorVerified=($restoredVendor -cne 'Unknown')
+        Classification=$classification;ClassificationVerified=($classification -cne 'Unknown');EvidenceCode=$code}
+    $newIndex=$Session.ReportJvms.Count
+    $Session.ReportActions+=@{Kind='Restore';Status='Proven';Verified=$true;RuntimeIndex=$newIndex;EvidenceCode='OriginalRuntimeRestored';EvidenceVerified=$true;FromVersion=$preview.FromVersion;ToVersion=$preview.ToVersion}
+    if ($classification -ceq 'PotentiallyVulnerable') { Write-EloLog $Session "SECURITY: $($preview.Runtime) was restored to $($restored.Version), which is BEFORE the CVE-2026-114938 fix. Update Java again or apply the mitigation (-XX:-UseBASE64Intrinsics)." }
+    elseif ($classification -ceq 'Unknown') { Write-EloLog $Session "SECURITY: $($preview.Runtime) was restored to $($restored.Version); its status for CVE-2026-114938 is unknown. Treat it as potentially vulnerable." }
+    else { Write-EloLog $Session "Restored $($preview.Runtime) to $($restored.Version) (listed as fixed for CVE-2026-114938)." }
     $Session.LastUpdate=$null; $Session.BackupsCache=$null
     return @{ok=$true}
 }function Get-EloSessionReportHtml {
@@ -1544,12 +1576,14 @@ function Invoke-EloApi {
             $path=$null
             if ($body.PSObject.Properties.Name -contains 'searchPath') { $path=Test-EloLocalPath $body.searchPath -RequireDirectory }
             Start-EloScanWorker $Session $path
+            $scope='on drives C: to Z:'; if ($path) { $scope="in $path" }
+            Write-EloLog $Session "Scan started $scope."
             return @{ok=$true}
         }
         '/api/cancel' {
             $null=ConvertFrom-EloBody $Request.Body
             $Session.Preview=$null
-            if ($Session.Worker) { $Session.Worker.Control.Cancel=$true; $Session.State='cancelling' }
+            if ($Session.Worker) { $Session.Worker.Control.Cancel=$true; $Session.State='cancelling'; Write-EloLog $Session 'Scan cancel requested.' }
             return @{ok=$true}
         }
         default {
@@ -1558,17 +1592,25 @@ function Invoke-EloApi {
             foreach ($key in $required) { if ($body.$key -cnotmatch '^[A-Za-z0-9_-]{1,128}$') { Stop-EloRequest 400 'invalid_id' } }
             if ($body.actionId -cnotin @('mitigate','update-runtime','restore-backup')) { Stop-EloRequest 400 'invalid_action' }
             if ($Session.RecoveryRequired) { Stop-EloRequest 409 'manual_recovery_required_close_session' }
-            if ($Session.State -cne 'completed' -or $Session.Worker) { Stop-EloRequest 409 'completed_scan_required' }
-            if ($body.actionId -ceq 'update-runtime') {
-                if ($Request.Target -ceq '/api/preview') { return New-EloRuntimeUpdatePreview $Session $body.resultId }
-                return Invoke-EloRuntimeUpdateAction $Session $body
+            $diskRestore=($body.actionId -ceq 'restore-backup' -and $Session.Backups.ContainsKey([string]$body.resultId))
+            if ($Session.Worker -or $Session.State -cin @('scanning','cancelling') -or ($Session.State -cne 'completed' -and -not $diskRestore)) { Stop-EloRequest 409 'completed_scan_required' }
+            $phase='preview'; if ($Request.Target -ceq '/api/action') { $phase='apply' }
+            $subject=''
+            if ($diskRestore) { $subject=[string]$Session.Backups[[string]$body.resultId].Path }
+            elseif ($Session.Targets.ContainsKey([string]$body.resultId)) { $subject=[string]$Session.Targets[[string]$body.resultId].Location }
+            Write-EloLog $Session "$phase '$($body.actionId)' requested for $subject"
+            try {
+            $preview=($Request.Target -ceq '/api/preview')
+            if ($body.actionId -ceq 'update-runtime') { if ($preview) { $result=New-EloRuntimeUpdatePreview $Session $body.resultId } else { $result=Invoke-EloRuntimeUpdateAction $Session $body } }
+            elseif ($body.actionId -ceq 'restore-backup') { if ($preview) { $result=New-EloRestorePreview $Session $body.resultId } else { $result=Invoke-EloRestoreAction $Session $body } }
+            else { if ($preview) { $result=New-EloMitigationPreview $Session $body.resultId } else { $result=Invoke-EloMitigation $Session $body } }
+            Write-EloLog $Session "$phase '$($body.actionId)' OK."
+            return $result
+            } catch {
+                $failure=ConvertTo-EloErrorResponse $_.Exception
+                Write-EloLog $Session "$phase '$($body.actionId)' FAILED: $($failure.Body.error) (HTTP $($failure.Status))"
+                throw
             }
-            if ($body.actionId -ceq 'restore-backup') {
-                if ($Request.Target -ceq '/api/preview') { return New-EloRestorePreview $Session $body.resultId }
-                return Invoke-EloRestoreAction $Session $body
-            }
-            if ($Request.Target -ceq '/api/preview') { return New-EloMitigationPreview $Session $body.resultId }
-            return Invoke-EloMitigation $Session $body
         }
     }
 }
@@ -1692,6 +1734,9 @@ function Start-EloServer {
                 } catch {
                     $failure=ConvertTo-EloErrorResponse $_.Exception
                     $status=$failure.Status; $content=$failure.Body | ConvertTo-Json -Depth 5 -Compress
+                    # Helps diagnosing a stale browser tab (old session link); logged once per distinct cause.
+                    $rejected="Rejected request: HTTP $status $($failure.Body.error)"
+                    if ($status -in @(400,401,403,404,405) -and $session.LastRejected -cne $rejected) { $session.LastRejected=$rejected; Write-EloLog $session ($rejected+'. If this is a browser tab from an earlier run, close it and use the page opened by the current run.') }
                 }
                 Write-EloHttpResponse $stream $status $content $type
             } catch { # Socket errors are intentionally not logged (request data may contain credentials).
@@ -1899,6 +1944,22 @@ ol.manual li{margin:.35rem 0}
 .backups h3{display:flex;align-items:center;gap:8px;margin:0 0 4px;font-size:1rem}
 .backups .rt{background:var(--surface)}
 .badge.act{color:var(--accent);background:var(--accent-soft)}
+.backups{padding:0}
+.backups>summary{padding:12px 14px;font-weight:700}
+.backups>.body{padding:0 14px 14px}
+.alert{border:2px solid var(--bad);background:var(--bad-soft);border-radius:13px;padding:14px;margin:10px 0 14px}
+.alert h3{display:flex;align-items:center;gap:8px;margin:0 0 6px;color:var(--bad);font-size:1.05rem}
+.alert p{margin:.35rem 0}
+.alert .fix{font-weight:600}
+.rt[data-status=vulnerable]{border-color:var(--bad)}
+.cmdbox{margin:16px 0 8px}
+.cmdbox h3{display:flex;align-items:center;gap:8px;font-size:1rem;margin:0 0 6px}
+pre.cmd{background:#0f172a;color:#e2e8f0;border:1px solid #1e293b;border-radius:12px;padding:14px;font-family:Consolas,"Cascadia Mono",monospace;font-size:.8125rem;overflow-x:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+pre.cmd>span{display:block;min-height:1.2em}
+pre.cmd .c-note{color:#86efac}
+pre.cmd .c-flag{color:#fbbf24}
+pre.cmd .c-var{color:#7dd3fc}
+pre.cmd .c-str{color:#fca5a5}
 </style>
 </head>
 <body>
@@ -1939,7 +2000,7 @@ ol.manual li{margin:.35rem 0}
 
 <section class="panel" id="step1" aria-labelledby="h1s">
 <h2 id="h1s"><span class="ico"><svg class="i"><use href="#i-search"/></svg></span><span data-i18n="step1Title"></span></h2>
-<div id="backupsBox" class="backups" hidden><h3><svg class="i"><use href="#i-undo"/></svg><span data-i18n="backupsTitle"></span></h3><p class="muted" data-i18n="backupsText"></p><div class="cards" id="backups"></div></div>
+<details id="backupsBox" class="backups" hidden><summary><svg class="i"><use href="#i-undo"/></svg><span id="backupsSummary"></span></summary><div class="body"><p class="muted" data-i18n="backupsText"></p><div class="cards" id="backups"></div></div></details>
 <p class="lead" data-i18n="step1Text"></p>
 <div class="status-line"><span class="spin" id="spinner" hidden></span><span id="status" role="status" aria-live="polite"></span></div>
 <progress id="progress" max="100" aria-label="Progress" hidden></progress><p id="progressText" class="muted"></p>
@@ -1959,6 +2020,7 @@ ol.manual li{margin:.35rem 0}
 <section class="panel" id="step2" aria-labelledby="h2s" hidden>
 <h2 id="h2s"><span class="ico"><svg class="i"><use href="#i-cpu"/></svg></span><span data-i18n="step2Title"></span></h2>
 <p class="lead" data-i18n="step2Text"></p>
+<div id="vulnAlert" class="alert" role="alert" hidden><h3><svg class="i"><use href="#i-shield"/></svg><span data-i18n="vulnTitle"></span></h3><p id="vulnText"></p><p class="fix"><strong data-i18n="vulnFixLabel"></strong> <span data-i18n="vulnFix"></span></p></div>
 <div class="cards" id="cards" role="radiogroup" aria-labelledby="h2s"></div>
 <label class="field" hidden><span data-i18n="results"></span><select id="results"></select></label>
 <details><summary><svg class="i"><use href="#i-info"/></svg><span data-i18n="evidence"></span></summary><div class="body">
@@ -1974,11 +2036,13 @@ ol.manual li{margin:.35rem 0}
 <section class="panel" id="step3" aria-labelledby="h3s" hidden>
 <h2 id="h3s"><span class="ico"><svg class="i"><use href="#i-update"/></svg></span><span data-i18n="step3Title"></span></h2>
 <p class="lead" data-i18n="warning"></p>
+<div id="vulnRec" class="alert" role="alert" hidden><p><strong data-i18n="vulnFixLabel"></strong> <span data-i18n="vulnFix"></span></p></div>
 <div class="cards">
 <button id="update" class="card rec" type="button" disabled><span class="ico"><svg class="i"><use href="#i-update"/></svg></span><span><span class="tt" data-i18n="update"></span><span class="dd" data-i18n="updateDesc"></span></span></button>
 <button id="mitigate" class="card" type="button" disabled><span class="ico"><svg class="i"><use href="#i-shield"/></svg></span><span><span class="tt" data-i18n="mitigate"></span><span class="dd" data-i18n="mitigateDesc"></span></span></button>
 </div>
-<details><summary><svg class="i"><use href="#i-book"/></svg><span data-i18n="manualHeading"></span></summary><div class="body"><p class="muted" data-i18n="manualIntro"></p><ol id="manual" class="manual"></ol><h3 data-i18n="manualCommandsTitle"></h3><pre id="manualCommands" class="preview" data-i18n="manualCommands"></pre></div></details>
+<details><summary><svg class="i"><use href="#i-book"/></svg><span data-i18n="manualHeading"></span></summary><div class="body"><p class="muted" data-i18n="manualIntro"></p><ol id="manual" class="manual"></ol><h3 data-i18n="manualCommandsTitle"></h3><pre id="manualCommands" data-i18n="manualCommands" hidden></pre><pre id="cmdView" class="cmd" aria-label="PowerShell"></pre></div></details>
+<div class="cmdbox"><h3><svg class="i"><use href="#i-play"/></svg><span data-i18n="terminalTitle"></span></h3><pre id="terminalCmds" class="cmd" aria-label="PowerShell"></pre></div>
 <div class="row"><button id="back3" class="btn ghost" type="button"><svg class="i"><use href="#i-back"/></svg><span data-i18n="back"></span></button></div>
 </section>
 
@@ -2046,7 +2110,8 @@ const messages = {
  'Stop only the affected service during the approved window, apply the chosen change using the vendor procedure, then restart. Check service health and effective JVM options/version. If checks fail, stop and restore the saved configuration/runtime.',
  'Rescan and document the outcome. Keep the backup until validated. Contact ELO support if paths, service ownership or compatibility are uncertain.'],
  manualCommandsTitle:'PowerShell commands (administrator)',manualCommands:'# Run in an ADMINISTRATOR PowerShell. Adjust the paths and service names to your scan result.\n\n# 1) Find the runtime, its version and the services that use it\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nGet-Content \'C:\\ELO\\java\\release\' | Select-String \'IMPLEMENTOR|JAVA_RUNTIME_VERSION|OS_ARCH\'\nGet-CimInstance Win32_Service | Where-Object { $_.PathName -match \'ELO\' } | Select-Object Name, State, PathName\n[Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\')\n\n# 2) Back up the runtime (ZIP) before changing anything\nCompress-Archive -LiteralPath \'C:\\ELO\\java\' -DestinationPath \'C:\\ELO\\java-backup.zip\'\n\n# 3) Temporary mitigation (machine-wide): KEEP the old value and append, never overwrite\n$old = [Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\'); $old\n[Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', (($old + \' -XX:-UseBASE64Intrinsics\').Trim()), \'Machine\')\n# Undo: [Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', $old, \'Machine\')   (use $null if it was empty)\n# Services only see the change after they are restarted.\n\n# 4) Update the runtime by hand (download the newest release of the SAME vendor and branch first)\n(Get-FileHash \'C:\\Downloads\\new-java.zip\' -Algorithm SHA256).Hash        # compare with the vendor\'s published SHA256\nStop-Service \'ELO-SRV01-1\' -Force                                        # every service that uses this Java\nRename-Item \'C:\\ELO\\java\' \'java.old\'\nExpand-Archive -LiteralPath \'C:\\Downloads\\new-java.zip\' -DestinationPath \'C:\\ELO\\java-new\'\nMove-Item (Get-ChildItem \'C:\\ELO\\java-new\' -Directory | Select-Object -First 1).FullName \'C:\\ELO\\java\'\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nStart-Service \'ELO-SRV01-1\'\n\n# 5) If something fails: stop the services, put the old runtime back, start the services\nStop-Service \'ELO-SRV01-1\' -Force\nRename-Item \'C:\\ELO\\java\' \'java.failed\'; Rename-Item \'C:\\ELO\\java.old\' \'java\'\nStart-Service \'ELO-SRV01-1\'\n# Or restore from the ZIP: Expand-Archive \'C:\\ELO\\java-backup.zip\' -DestinationPath \'C:\\ELO\\restore\'; then move the java folder back',
- backupsTitle:'Existing backups',backupsText:'Backups made by this tool were found on this server. Pick one to bring that Java version back; the runtime that is installed now is kept next to it.',restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: before the CVE-2026-114938 fix',backupRisk_patched:'Listed as fixed for CVE-2026-114938',backupRisk_unknown:'Security status unknown: treat as potentially vulnerable',backupStop:'Restoring stops the ELO Tomcat services that use this Java (ELO is unavailable meanwhile) and starts them again afterwards.',
+ backupsTitle:'Existing backups',backupsText:'Backups made by this tool were found on this server. Pick one to bring that Java version back; the runtime that is installed now is kept next to it.',vulnTitle:'Vulnerability found: CVE-2026-114938 (Java4Shell)',vulnText:'{n} runtime(s) are before the fixed release: {list}. The JIT BASE64 intrinsics flaw lets this Java produce wrong results; the vendor fixed it in a newer release.',vulnFixLabel:'Solution:',vulnFix:'update Java to the current release of the same branch (step 3, Update Java runtime). The temporary mitigation only reduces the risk until you update.',terminalTitle:'Run it from the terminal (administrator PowerShell)',terminalCmdsText:'# Update Java to the current release (recommended)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Temporary mitigation only (adds -XX:-UseBASE64Intrinsics; restart the ELO services afterwards)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Check the result (--target is the position in the scan list, starting at 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'contains a vulnerable Java',
+restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: before the CVE-2026-114938 fix',backupRisk_patched:'Listed as fixed for CVE-2026-114938',backupRisk_unknown:'Security status unknown: treat as potentially vulnerable',backupStop:'Restoring stops the ELO Tomcat services that use this Java (ELO is unavailable meanwhile) and starts them again afterwards.',
  exportHeading:'Activity log',exportJson:'Export JSON results',exportLog:'Export activity log',
  idle:'Ready',scanning:'Scanning',cancelling:'Cancellation requested; waiting for the scanner',completed:'Scan completed',cancelled:'Scan cancelled; results may be incomplete',error:'Operation failed',unknown:'Unknown',
  vulnerable:'Potentially vulnerable',safe:'No vulnerability detected by current rules',mitigated:'Mitigation detected',unsupported:'Unsupported runtime',
@@ -2105,7 +2170,8 @@ const messages = {
  'Stoppen Sie nur den betroffenen Dienst im genehmigten Wartungsfenster, führen Sie die gewählte Änderung nach Herstellerverfahren aus und starten Sie ihn erneut. Prüfen Sie Dienstzustand und wirksame JVM-Optionen beziehungsweise Version. Bei Fehlern stoppen und gesicherte Konfiguration oder Laufzeit wiederherstellen.',
  'Scannen Sie erneut und dokumentieren Sie das Ergebnis. Bewahren Sie die Sicherung bis zur erfolgreichen Prüfung auf. Bei unklaren Pfaden, Dienstzuordnung oder Kompatibilität wenden Sie sich an den ELO-Support.'],
  manualCommandsTitle:'PowerShell-Befehle (Administrator)',manualCommands:'# In einer ADMINISTRATOR-PowerShell ausfuehren. Pfade und Dienstnamen an das Scan-Ergebnis anpassen.\n\n# 1) Runtime, Version und die Dienste finden, die sie verwenden\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nGet-Content \'C:\\ELO\\java\\release\' | Select-String \'IMPLEMENTOR|JAVA_RUNTIME_VERSION|OS_ARCH\'\nGet-CimInstance Win32_Service | Where-Object { $_.PathName -match \'ELO\' } | Select-Object Name, State, PathName\n[Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\')\n\n# 2) Runtime vor jeder Aenderung als ZIP sichern\nCompress-Archive -LiteralPath \'C:\\ELO\\java\' -DestinationPath \'C:\\ELO\\java-backup.zip\'\n\n# 3) Vorlaeufige Risikominderung (systemweit): alten Wert BEHALTEN und anhaengen, nie ueberschreiben\n$old = [Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\'); $old\n[Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', (($old + \' -XX:-UseBASE64Intrinsics\').Trim()), \'Machine\')\n# Rueckgaengig: [Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', $old, \'Machine\')   ($null, falls leer)\n# Dienste sehen die Aenderung erst nach einem Neustart.\n\n# 4) Runtime manuell aktualisieren (zuerst die neueste Version DESSELBEN Herstellers und Branches laden)\n(Get-FileHash \'C:\\Downloads\\new-java.zip\' -Algorithm SHA256).Hash        # mit der veroeffentlichten SHA256 des Herstellers vergleichen\nStop-Service \'ELO-SRV01-1\' -Force                                        # jeden Dienst, der dieses Java verwendet\nRename-Item \'C:\\ELO\\java\' \'java.old\'\nExpand-Archive -LiteralPath \'C:\\Downloads\\new-java.zip\' -DestinationPath \'C:\\ELO\\java-new\'\nMove-Item (Get-ChildItem \'C:\\ELO\\java-new\' -Directory | Select-Object -First 1).FullName \'C:\\ELO\\java\'\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nStart-Service \'ELO-SRV01-1\'\n\n# 5) Bei Fehlern: Dienste stoppen, alte Runtime zurueckstellen, Dienste starten\nStop-Service \'ELO-SRV01-1\' -Force\nRename-Item \'C:\\ELO\\java\' \'java.failed\'; Rename-Item \'C:\\ELO\\java.old\' \'java\'\nStart-Service \'ELO-SRV01-1\'\n# Oder aus dem ZIP: Expand-Archive \'C:\\ELO\\java-backup.zip\' -DestinationPath \'C:\\ELO\\restore\'; dann den java-Ordner zurueckverschieben',
- backupsTitle:'Vorhandene Backups',backupsText:'Auf diesem Server wurden Backups dieses Werkzeugs gefunden. Wählen Sie eines, um diese Java-Version zurückzuholen; die aktuell installierte Runtime bleibt daneben erhalten.',restoreShort:'Dieses Backup wiederherstellen',backupRisk_vulnerable:'Verwundbar: vor dem Fix für CVE-2026-114938',backupRisk_patched:'Für CVE-2026-114938 als behoben aufgeführt',backupRisk_unknown:'Sicherheitsstatus unbekannt: als potenziell verwundbar behandeln',backupStop:'Die Wiederherstellung beendet die ELO-Tomcat-Dienste, die dieses Java verwenden (ELO ist solange nicht verfügbar), und startet sie danach wieder.',
+ backupsTitle:'Vorhandene Backups',backupsText:'Auf diesem Server wurden Backups dieses Werkzeugs gefunden. Wählen Sie eines, um diese Java-Version zurückzuholen; die aktuell installierte Runtime bleibt daneben erhalten.',vulnTitle:'Schwachstelle gefunden: CVE-2026-114938 (Java4Shell)',vulnText:'{n} Runtime(s) liegen vor der behobenen Version: {list}. Der Fehler in den JIT-BASE64-Intrinsics kann falsche Ergebnisse liefern; der Hersteller hat ihn in einer neueren Version behoben.',vulnFixLabel:'Loesung:',vulnFix:'Java auf die aktuelle Version desselben Branches aktualisieren (Schritt 3, Java-Runtime aktualisieren). Die vorlaeufige Risikominderung senkt das Risiko nur bis zum Update.',terminalTitle:'Im Terminal ausfuehren (Administrator-PowerShell)',terminalCmdsText:'# Java auf die aktuelle Version aktualisieren (empfohlen)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Nur vorlaeufige Risikominderung (haengt -XX:-UseBASE64Intrinsics an; danach die ELO-Dienste neu starten)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Ergebnis pruefen (--target ist die Position in der Scan-Liste, ab 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'enthaelt ein verwundbares Java',
+restoreShort:'Dieses Backup wiederherstellen',backupRisk_vulnerable:'Verwundbar: vor dem Fix für CVE-2026-114938',backupRisk_patched:'Für CVE-2026-114938 als behoben aufgeführt',backupRisk_unknown:'Sicherheitsstatus unbekannt: als potenziell verwundbar behandeln',backupStop:'Die Wiederherstellung beendet die ELO-Tomcat-Dienste, die dieses Java verwenden (ELO ist solange nicht verfügbar), und startet sie danach wieder.',
  exportHeading:'Aktivitätsprotokoll',exportJson:'JSON-Ergebnisse exportieren',exportLog:'Aktivitätsprotokoll exportieren',
  idle:'Bereit',scanning:'Scan läuft',cancelling:'Abbruch angefordert; Scanner wird abgewartet',completed:'Scan abgeschlossen',cancelled:'Scan abgebrochen; Ergebnisse möglicherweise unvollständig',error:'Vorgang fehlgeschlagen',unknown:'Unbekannt',
  vulnerable:'Möglicherweise verwundbar',safe:'Nach aktuellen Regeln keine Schwachstelle erkannt',mitigated:'Risikominderung erkannt',unsupported:'Nicht unterstützte Laufzeit',
@@ -2137,8 +2203,15 @@ const messages = {
  }
 };
 const $ = id => document.getElementById(id);
-const token = new URLSearchParams(location.hash.slice(1)).get('token') || '';
+// The link carries the token once (fragment). It is kept only for this tab (sessionStorage) so that a page
+// refresh keeps working; a new local session link replaces it. Never sent anywhere except as X-Session-Token.
+let token = new URLSearchParams(location.hash.slice(1)).get('token') || '';
 history.replaceState(null, '', location.pathname + location.search);
+try {
+ if (/^[A-Za-z0-9_-]{16,256}$/.test(token)) sessionStorage.setItem('eloSessionToken',token);
+ else { const saved = sessionStorage.getItem('eloSessionToken') || ''; token = /^[A-Za-z0-9_-]{16,256}$/.test(saved) ? saved : ''; }
+} catch (_) { /* storage unavailable: the link must be reopened after a refresh */ }
+const forgetToken = () => { try { sessionStorage.removeItem('eloSessionToken'); } catch (_) { } };
 let language = 'en', state = 'idle', rows = [], preview = null, pending = false, polling = false, lastError = '';
 let backups = [], backupsKey = '', progress = null, checked = null, lastSuccessfulRefresh = null, security = {verifiedOn:null,advisories:[]};
 let lastWarnings = [], errorFromPoll = false, recoveryRequired = false, recoveryWarnings = [];
@@ -2231,6 +2304,7 @@ async function api(path, body) {
  try { response = await fetch('/api/'+path, {method:body === undefined ? 'GET' : 'POST',headers:{'X-Session-Token':token,...(body === undefined ? {} : {'Content-Type':'application/json'})},...(body === undefined ? {} : {body:JSON.stringify(body)}),credentials:'omit',cache:'no-store',redirect:'error',referrerPolicy:'no-referrer'}); }
  catch (_) { throw 'network'; }
  if (response.ok) return readJson(response,4*1024*1024);
+ if (response.status === 401) forgetToken();
  const fallback = response.status === 401 ? 'auth' : response.status === 403 ? 'accessDenied' : 'failed';
  let data;
  try { data = await readJson(response,256*1024); } catch (_) { throw new ApiFailure(fallback); }
@@ -2253,7 +2327,7 @@ function renderCards() {
  cardsKey = key; $('cards').replaceChildren();
  rows.forEach(row => {
  const card = document.createElement('button'), title = document.createElement('span'), path = document.createElement('span'), badge = document.createElement('span');
- card.className = 'rt'; card.setAttribute('type','button'); card.setAttribute('role','radio'); card.setAttribute('aria-checked',String(row.id === $('results').value));
+ card.className = 'rt'; card.dataset.status = row.status; card.setAttribute('type','button'); card.setAttribute('role','radio'); card.setAttribute('aria-checked',String(row.id === $('results').value));
  title.className = 't'; title.textContent = safeText(row.vendor)+' '+safeText(row.version)+(row.architecture === 'unknown' ? '' : ' · '+row.architecture);
  path.className = 'p'; path.textContent = safeText(row.runtimeRoot);
  badge.className = 'badge'; badge.setAttribute('data-status',row.status); badge.textContent = t(row.status);
@@ -2262,9 +2336,36 @@ function renderCards() {
  $('cards').append(card);
  });
 }
+function highlightInto(el, source) {
+ el.replaceChildren();
+ source.split('\n').forEach(line => {
+ const row = document.createElement('span');
+ if (/^\s*#/.test(line)) { row.className = 'c-note'; row.textContent = line; }
+ else if (line === '') { row.textContent = ' '; }
+ else line.split(/(--[a-z-]+|\$[A-Za-z]+|'[^']*')/).forEach(part => {
+ if (!part) return;
+ const piece = document.createElement('span');
+ if (part.startsWith('--')) piece.className = 'c-flag'; else if (part[0] === '$') piece.className = 'c-var'; else if (part[0] === "'") piece.className = 'c-str';
+ piece.textContent = part; row.append(piece);
+ });
+ el.append(row);
+ });
+}
+let cmdKey = '';
+function renderAdvice(row) {
+ const vulnerable = rows.filter(item => item.status === 'vulnerable');
+ toggle('vulnAlert',vulnerable.length === 0); toggle('vulnRec',!(row && row.status === 'vulnerable'));
+ const list = vulnerable.slice(0,5).map(item => safeText(item.vendor)+' '+safeText(item.version)+' ('+safeText(item.runtimeRoot)+')').join('; ');
+ $('vulnText').textContent = vulnerable.length ? t('vulnText').replace('{n}',() => String(vulnerable.length)).replace('{list}',() => list) : '';
+ const n = Math.max(0,rows.findIndex(item => row && item.id === row.id));
+ const key = language+'|'+n; if (key === cmdKey) return; cmdKey = key;
+ highlightInto($('terminalCmds'),t('terminalCmdsText').replace(/\{n\}/g,() => String(n)));
+ highlightInto($('cmdView'),t('manualCommands'));
+}
 function renderBackups() {
  const key = JSON.stringify(backups.map(item => [item.id,item.risk]))+'|'+language+'|'+(pending || running() || recoveryRequired);
  toggle('backupsBox',backups.length === 0);
+ $('backupsSummary').textContent = t('backupsTitle')+' ('+backups.length+')'+(backups.some(item => item.risk !== 'patched') ? ' · '+t('backupsVuln') : '');
  if (key === backupsKey) return;
  backupsKey = key; $('backups').replaceChildren();
  backups.forEach(item => {
@@ -2306,7 +2407,7 @@ function render() {
  rows.forEach(item => { const tr = document.createElement('tr'); cells(item).forEach(value => { const td = document.createElement('td'); td.textContent = value; tr.append(td); }); $('jvmRows').append(tr); });
  const labels = ['path','runtimeRoot','version','vendor','architecture','classification','eloRationale','classificationEvidence'];
  $('details').textContent = row ? cells(row).map((value,index) => t(labels[index])+': '+value).join('\n') : '';
- renderCards(); renderBackups();
+ renderCards(); renderBackups(); renderAdvice(row);
  $('verifiedOn').textContent = security.verifiedOn ? t('verifiedDate')+': '+security.verifiedOn : t('noAdvisories');
  $('advisories').replaceChildren();
  security.advisories.forEach(item => {
@@ -2369,6 +2470,8 @@ async function refresh() {
  finally { polling = false; }
 }
 async function perform(work, allowRecovery = false) {
+ // A click during a background refresh waits for it instead of being silently ignored.
+ for (let i = 0; polling && i < 200; i++) await new Promise(resolve => setTimeout(resolve,25));
  if (pending || polling || (recoveryRequired && !allowRecovery)) return;
  pending = true; lastError = ''; lastWarnings = []; errorFromPoll = false; render();
  try { await work(); } catch (error) { clearPreview(); fail(error); }

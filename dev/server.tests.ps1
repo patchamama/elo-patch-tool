@@ -11,6 +11,7 @@ function Reject([scriptblock]$Work, [int]$Status) {
 }
 $s = New-EloServerSession -Port 54321 -UiHtml '<!doctype html>' -ScanSource 'function Invoke-EloJavaScan { param($DriveRoots,$ManualPath,$ShouldCancel) [pscustomobject]@{ Results=@(); Cancelled=(& $ShouldCancel) } }'
 $s.Adapters.BackupRoots = { @() }
+$script:LogLines=New-Object 'System.Collections.Generic.List[string]'; $s.Adapters.Log={ param($m) $script:LogLines.Add([string]$m) }
 Assert ($s.Token -cmatch '^[a-f0-9]{64}$') '256-bit session token'
 Assert ($s.Token -cne (New-EloSecret)) 'independent random secrets'
 function Request($Method='GET', $Path='/api/status', $Body='', $Headers=$null, $Remote='127.0.0.1') {
@@ -36,7 +37,7 @@ Reject { Invoke-EloApi $s (Request POST '/api/report' '{"language":"<script>"}')
 Reject { Invoke-EloApi $s (Request POST '/api/report' '{"language":"en"}' -Headers @{Host='127.0.0.1:54321';Origin=$s.Origin;'Content-Type'='application/json'}) } 401
 Reject { Invoke-EloApi $s (Request GET '/api/report') } 405
 Reject { Invoke-EloApi $s (Request POST '/api/report?language=en' '{}') } 404
-$evidenceSession=New-EloServerSession -Port 54322 -UiHtml 'fixture' -ScanSource 'fixture'
+$evidenceSession=New-EloServerSession -Port 54322 -UiHtml 'fixture' -ScanSource 'fixture'; $evidenceSession.Adapters.Log={ param($m) }
 $evidenceSession.Adapters.Resources=$s.Adapters.Resources
 $scan=Invoke-EloJavaScan -DriveRoots @() -ManualPath 'C:\fixture' -IsReparsePoint { $false } -GetChildren {
     [pscustomobject]@{Name='java.exe';FullName='C:\fixture\java.exe';PSIsContainer=$false;Attributes=0}
@@ -148,7 +149,7 @@ try {
 
 # Trusted in-memory adapters: never touch real environment or installed Java.
 $script:Fake=@{Record=@{Exists=$true;Value='-Xmx1g -Dname="hello world"';Kind='ExpandString'};Admin=$true;Hash='original';Writes=0;Probes=0;FailProbe=0;FailWrite=$false;FailRollback=$false;Now=[DateTime]::UtcNow}
-$s.Adapters=@{
+$s.Adapters=@{ Log={ param($m) $script:LogLines.Add([string]$m) };
     Admin={ $script:Fake.Admin }; Clock={ $script:Fake.Now }
     ReadOptions={ @{Exists=$script:Fake.Record.Exists;Value=$script:Fake.Record.Value;Kind=$script:Fake.Record.Kind} }
     WriteOptions={ param($Record)
@@ -373,6 +374,21 @@ try {
     Assert ((@($rp.warnings | ForEach-Object { $_.en }) -join ' ').Contains('BEFORE the fix for CVE-2026-114938') -and (@($rp.warnings | ForEach-Object { $_.de }) -join ' ').Contains('VOR dem Fix') -and (@($rp.warnings | ForEach-Object { $_.en }) -join ' ').Contains('ELO Tomcat')) 'restore preview names the security problem of the backup and the Tomcat stop'
     $r=Invoke-EloApi $s (Request POST /api/action ('{"actionId":"restore-backup","resultId":"'+$id+'","previewId":"'+$rp.previewId+'"}'))
     Assert ($r.ok -and $m.State.Restores.Count -eq 1 -and $m.State.Restores[0].Backup -ceq (Join-Path $bkDir 'java.backup-20260101120000.zip') -and $m.State.Restores[0].Runtime -ceq (Join-Path $bkDir 'java')) 'restore of a discovered backup goes through the backend adapter'
+    # Ids are stable (preview and apply survive a list refresh) and a backup is restorable without a scan.
+    $s.BackupsCache=$null; $again=@(Get-EloBackupList $s)
+    Assert ($again[0].id -ceq $id -and $again[0].id -cmatch '^[a-f0-9]{64}$') 'backup ids are stable across list refreshes'
+    Assert ($m.State.Restores.Count -eq 1 -and @($script:LogLines | Where-Object { $_ -like '*SECURITY*BEFORE the CVE-2026-114938 fix*' }).Count -eq 1) 'restoring a vulnerable backup is announced in the backend window'
+    Assert ($s.ReportJvms[-1].Classification -ceq 'PotentiallyVulnerable' -and $s.ReportActions[-1].Kind -ceq 'Restore' -and $s.ReportActions[-1].RuntimeIndex -eq $s.ReportJvms.Count) 'the report records the restored runtime as potentially vulnerable'
+    Assert (-not (($script:LogLines -join "`n").Contains($s.Token))) 'the backend log never contains the session token'
+    $idleState=$s.State; $s.State='idle'; $s.Results=@(); $s.Targets=@{}
+    $id2=@($again)[1].id
+    $s.Adapters.Identity={ param($Path) @{Vendor='Azul Zulu';Branch='21';Architecture='x64';ImageType='jdk';Version='21.0.1'} }
+    $rp2=Invoke-EloApi $s (Request POST /api/preview ('{"actionId":"restore-backup","resultId":"'+$id2+'"}'))
+    Assert ((@($rp2.warnings | ForEach-Object { $_.en }) -join ' ').Contains('cannot be determined') -and (@($rp2.warnings | ForEach-Object { $_.en }) -join ' ').Contains('Tomcat')) 'unknown-status backup warns about security and about stopping the ELO services'
+    $r2=Invoke-EloApi $s (Request POST /api/action ('{"actionId":"restore-backup","resultId":"'+$id2+'","previewId":"'+$rp2.previewId+'"}'))
+    Assert ($r2.ok -and $s.ReportJvms[-1].Classification -ceq 'Unknown') 'a backup can be restored without a scan (idle session)'
+    $s.State=$idleState
+    Assert ((Get-EloSessionReportHtml $s 'en') -match '(?i)vulnerab') 'the technical report mentions the vulnerable restored runtime'
     Reject { Invoke-EloApi $s (Request POST /api/preview '{"actionId":"restore-backup","resultId":"0000000000000000000000000000000000000000000000000000000000000000"}') } 409
     Remove-Item -LiteralPath (Join-Path $bkDir 'java.backup-20260101120000.zip') -Force
     $s.Backups=@{$id=@{Path=(Join-Path $bkDir 'java.backup-20260101120000.zip');Runtime=(Join-Path $bkDir 'java');Root=$bkDir;Version='17.0.2+8'}}
@@ -385,7 +401,7 @@ try {
 }
 Assert ($script:Fake.Writes -eq 0 -and $script:Fake.Probes -eq 0) 'update flow never writes machine options'
 Reset-Fake; $p=Preview
-$other=New-EloServerSession -Port 54321 -UiHtml '<html>' -ScanSource '# none'
+$other=New-EloServerSession -Port 54321 -UiHtml '<html>' -ScanSource '# none'; $other.Adapters.Log={ param($m) }
 Reject { Invoke-EloMitigation $other ([pscustomobject]@{actionId='mitigate';resultId='jvm1';previewId=$p.previewId}) } 409
 Reset-Fake; $p=Preview
 Reject { Apply 'wrong' } 409
