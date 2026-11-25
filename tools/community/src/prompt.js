@@ -16,13 +16,17 @@ Return exactly this shape:
 {
   "isVulnerabilityReport": boolean,
   "id": string|null,            // CVE id if present
-  "title": {"en": string, "de": string},
+  "title": {"en": string, "de": string, "es": string},
   "severity": "high"|"medium"|"low",
   "severityReason": string,
   "javaRelated": boolean,
   "solutionsReported": [{"kind": "update"|"mitigation"|"workaround"|"none", "summary": string}],
-  "problem": {"en": string, "de": string},     // what is wrong; may use {n} and {list} placeholders
-  "solution": {"en": string, "de": string},    // what the administrator should do
+  "summary": {"en": string, "de": string, "es": string},   // 2-4 sentences: what the article says, who is affected
+  "problem": {"en": string, "de": string, "es": string},   // what is wrong; may use {n} and {list} placeholders
+  "solution": {"en": string, "de": string, "es": string},  // what the administrator should do
+  "scriptWorthwhile": boolean,   // true only if a detection/fix by script on a Windows server is realistic (Java runtime version or JVM flag)
+  "scriptReason": string,        // one sentence: why a script helps, or why it does not (e.g. needs a vendor hotfix)
+  "solutionHints": [string],     // where to look or what to try if the article gives no complete solution
   "detection": {"method": "version-table"|"probe-expect", "probes": [{"id": string, "args": [string], "expect": [{"id": string, "pattern": string, "meaning": string}]}],
                 "vendors": {"Temurin": {"fixed": [string], "fixedSource": string}}|null,
                 "rule": {"probe": string, "vulnerablePattern": string, "safePattern": string|null}|null},
@@ -35,4 +39,12 @@ function userPrompt(article, maxChars = 12000) {
   return `Article title: ${String(article.title || '').slice(0, 300)}\nArticle date: ${article.date || 'unknown'}\nArticle URL: ${article.url || ''}\n<article>\n${body}\n</article>`;
 }
 
-module.exports = { SYSTEM, userPrompt };
+const REFINE_SYSTEM = SYSTEM + `
+You are now REFINING an earlier analysis. The administrator supplies additional solution information (HINT) and/or asked you to research the internet.
+Use the hint and your research to complete detection, mitigation and solution and to set scriptWorthwhile honestly. Cite sources only as https URLs in advisoryUrl. Answer with the same JSON shape plus "advisoryUrl": string|null.`;
+
+function refinePrompt(article, previous, hint, maxChars = 12000) {
+  return userPrompt(article, maxChars) + '\n<previous-analysis>\n' + JSON.stringify(previous || {}).slice(0, 6000) + '\n</previous-analysis>\n<hint>\n' + String(hint || '(none - research the internet)').slice(0, 8000) + '\n</hint>';
+}
+
+module.exports = { SYSTEM, REFINE_SYSTEM, userPrompt, refinePrompt };

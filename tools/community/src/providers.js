@@ -18,7 +18,7 @@ function resolveConfig(config, env = process.env) {
   if (config.provider !== 'ollama' || config.apiKeyEnv) {
     const name = config.apiKeyEnv;
     if (typeof name !== 'string' || !/^[A-Z][A-Z0-9_]{2,63}$/.test(name)) throw new Error('ai_key_env_name_invalid: set apiKeyEnv to the NAME of the environment variable');
-    apiKey = env[name];
+    apiKey = String(env[name] || '').trim();
     if (!apiKey) throw new Error('ai_key_missing: environment variable ' + name + ' is not set');
   }
   return { provider: config.provider, model: config.model, baseUrl, apiKey, maxTokens: Number(config.maxTokens) > 0 ? Math.min(Number(config.maxTokens), 16000) : 4096 };
@@ -106,4 +106,44 @@ async function listModels(config, fetchImpl = fetch, env = process.env) {
   return extractModels(cfg.provider, data);
 }
 
-module.exports = { PROVIDERS, resolveConfig, buildRequest, buildListRequest, extractModels, listModels, extractText, parseJsonLoose, callProvider, redact };
+// ---- research mode: the provider's own web-search tool (OpenAI Responses API, Anthropic web_search). Ollama has none.
+function buildResearchRequest(cfg, system, user) {
+  const json = { 'Content-Type': 'application/json' };
+  if (cfg.provider === 'openai') {
+    return { url: cfg.baseUrl + '/responses', headers: { ...json, Authorization: 'Bearer ' + cfg.apiKey },
+      body: { model: cfg.model, tools: [{ type: 'web_search' }], instructions: system, input: user } };
+  }
+  if (cfg.provider === 'anthropic') {
+    return { url: cfg.baseUrl + '/v1/messages', headers: { ...json, 'x-api-key': cfg.apiKey, 'anthropic-version': '2023-06-01' },
+      body: { model: cfg.model, max_tokens: cfg.maxTokens, system, tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }], messages: [{ role: 'user', content: user }] } };
+  }
+  throw new Error('research_unsupported: web research needs OpenAI or Anthropic; with Ollama paste the solution text instead');
+}
+
+function extractResearchText(provider, data) {
+  if (provider === 'openai') {
+    if (typeof (data && data.output_text) === 'string' && data.output_text) return data.output_text;
+    const parts = [];
+    for (const item of Array.isArray(data && data.output) ? data.output : []) {
+      if (item && item.type === 'message') for (const c of Array.isArray(item.content) ? item.content : []) if (c && typeof c.text === 'string') parts.push(c.text);
+    }
+    return parts.join('');
+  }
+  return Array.isArray(data && data.content) ? data.content.filter(p => p && p.type === 'text').map(p => p.text).join('') : undefined;
+}
+
+async function callProviderResearch(config, system, user, fetchImpl = fetch, env = process.env) {
+  const cfg = resolveConfig(config, env);
+  const req = buildResearchRequest(cfg, system, user);
+  let res;
+  try { res = await fetchImpl(req.url, { method: 'POST', headers: req.headers, body: JSON.stringify(req.body), redirect: 'error', signal: AbortSignal.timeout(240000) }); }
+  catch (e) { throw new Error('ai_network_error: ' + redact(e && e.message, cfg)); }
+  if (!res.ok) {
+    let detail = ''; try { detail = await res.text(); } catch (_) { /* ignore */ }
+    throw new Error('ai_http_' + res.status + ': ' + redact(detail, cfg));
+  }
+  let data; try { data = await res.json(); } catch (_) { throw new Error('ai_response_not_json'); }
+  return parseJsonLoose(extractResearchText(cfg.provider, data));
+}
+
+module.exports = { buildResearchRequest, extractResearchText, callProviderResearch, PROVIDERS, resolveConfig, buildRequest, buildListRequest, extractModels, listModels, extractText, parseJsonLoose, callProvider, redact };

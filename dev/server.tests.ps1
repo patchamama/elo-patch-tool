@@ -583,7 +583,24 @@ $s.ReportIndexes = @{jvm1=1}
 $notVuln = Invoke-EloApi $s (Request POST /api/preview '{"actionId":"mitigate","resultId":"jvm1"}')
 Assert ((@($notVuln.warnings | ForEach-Object { $_.en }) -join ' ').Contains('not classified as vulnerable by the catalog') -and (@($notVuln.warnings | ForEach-Object { $_.de }) -join ' ').Contains('nicht als verwundbar eingestuft')) 'mitigation preview for a runtime the catalog does not call vulnerable explains the situation instead of refusing it'
 $applied = Invoke-EloApi $s (Request POST /api/action ('{"actionId":"mitigate","resultId":"jvm1","previewId":"'+$notVuln.previewId+'"}'))
-Assert ($applied.ok -and $script:Fake.Writes -eq 1) 'the mitigation is applied for such a runtime (after the flag probe)'# ---- ELO Community helper: status, model list, setup/run jobs. Fake processes only; no network, no node.
+Assert ($applied.ok -and $script:Fake.Writes -eq 1) 'the mitigation is applied for such a runtime (after the flag probe)'
+# Spanish: the catalog and the backend warnings carry es; the report endpoint accepts it.
+$s.Adapters.BackupRoots = { @() }; $s.BackupsCache = $null; $s.LastError = $null; $s.RecoveryRequired = $false
+$resultsEs = Invoke-EloApi $s (Request -Path /api/results)
+Assert ($resultsEs.vulnerabilities[0].title.es -match 'Java4Shell' -and $resultsEs.vulnerabilities[0].problem.es -match 'runtime' -and $resultsEs.security.advisories[0].title.es) 'the catalog texts reach the UI with a Spanish version'
+$esErr = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/preview '{"actionId":"mitigate","resultId":"nope"}') }
+$warn = Add-EloSpanish @{en='This runtime is already the newest release of its branch. Nothing to update.';de='x'}
+Assert ($warn.es -ceq 'Este runtime ya es la última versión de su rama. No hay nada que actualizar.') 'static backend warnings are translated from a table'
+$svc = Add-EloSpanish @{en='These services use the runtime and will be STOPPED before the replacement and started again afterwards: ELO-SRV01-1. ELO is unavailable meanwhile. Confirming accepts this.';de='x'}
+Assert ($svc.es -match 'ELO-SRV01-1' -and $svc.es -match 'DETENDRÁN') 'dynamic warnings with a service list are translated by pattern'
+$other = Add-EloSpanish @{en='A text nobody translated';de='x'}
+Assert (-not $other.ContainsKey('es')) 'an untranslated text simply has no es (the UI falls back to English)'
+$evidenceSession.Adapters.Resources={ @{ServerName='SRV01';WindowsVersion='10.0';WindowsBuild='20348';Disks=@()} }; $evidenceSession.State='completed'
+$repEs = Get-EloSessionReportHtml $evidenceSession es
+Assert ($repEs.Contains('<html lang="es">') -and $repEs.Contains('Estado del escaneo de la sesion: Completado')) 'the session report can be produced in Spanish'
+$e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/report '{"language":"fr"}') }
+Assert ($e.Status -eq 400) 'other languages are still rejected'
+# ---- ELO Community helper: status, model list, setup/run jobs. Fake processes only; no network, no node.
 $cmRoot = Join-Path ([IO.Path]::GetTempPath()) ('elo-cm-test-' + [guid]::NewGuid().ToString('N'))
 $savedPd = $env:ProgramData
 try {
@@ -622,7 +639,7 @@ try {
     }
     $script:CmModels = 'fail'
     $e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/community/models '{"provider":"openai","apiKey":"sk-typed-secret"}') }
-    Assert ($e.Status -eq 502 -and $e.Body.error -ceq 'community_failed' -and -not ($e.Body | ConvertTo-Json -Depth 5).Contains('sk-typed-secret') -and ($e.Body | ConvertTo-Json -Depth 5).Contains('ai_http_401')) 'a failing provider call reports the code, never the key'
+    Assert ($e.Status -eq 502 -and $e.Body.error -ceq 'community_failed' -and -not ($e.Body | ConvertTo-Json -Depth 5).Contains('sk-typed-secret') -and ($e.Body | ConvertTo-Json -Depth 5).Contains('HTTP 401') -and ($e.Body | ConvertTo-Json -Depth 5).Contains('empty the field')) 'a failing provider call explains the cause (rejected key), never shows the key'
     $script:CmModels = ''
 
     # jobs
@@ -656,6 +673,52 @@ try {
     Assert ($r.ok -and $script:CmCalls[-1].Arguments -cmatch 'elo-community\.js" setup --yes --out') 'setup runs only with consent and as its own job'
     $e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/community/setup '{"consent":"no"}') }
     Assert ($e.Status -eq 400 -and $e.Body.error -ceq 'consent_required') 'setup without consent installs nothing'
+    # trimmed typed secrets, friendly failure causes, access test, refine job, draft validation, article summaries
+    $null = Invoke-EloApi $s (Request POST /api/community/cancel '{}')
+    $s.CommunityJob = $null
+    $null = Invoke-EloApi $s (Request POST /api/community/models '{"provider":"openai","apiKey":"  sk-spaces  \n"}')
+    Assert ($script:CmCalls[-1].Environment['OPENAI_API_KEY'] -ceq 'sk-spaces') 'a typed API key is trimmed (pasted whitespace no longer causes a 401)'
+    $script:CmAccess = 'ok'
+    $s.Adapters.RunProcess = { param($FilePath,$Arguments,$Environment,$WorkingDirectory,$TimeoutSec) $script:CmCalls += ,@{Kind='run';Arguments=$Arguments;Environment=$Environment}; if ($script:CmAccess -ceq 'bad') { return @{ExitCode=1;Output='';Error='elo-community: login_failed: the community rejected the credentials'} }; return @{ExitCode=0;Output=('{"ok":true,"articlesOnPage":27}'+"`n");Error=''} }
+    $acc = Invoke-EloApi $s (Request POST /api/community/access '{"consent":"yes","user":"me@example.org","password":"pw-typed-secret"}')
+    Assert ($acc.ok -and $acc.articlesOnPage -eq 27 -and $script:CmCalls[-1].Arguments -cmatch 'elo-community\.js" access --yes$' -and $script:CmCalls[-1].Environment['ELO_COMMUNITY_PASSWORD'] -ceq 'pw-typed-secret' -and -not ($acc | ConvertTo-Json).Contains('pw-typed-secret')) 'the sign-in test returns only ok and the number of visible articles'
+    $e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/community/access '{"consent":"no"}') }
+    Assert ($e.Status -eq 400 -and $e.Body.error -ceq 'consent_required') 'the sign-in test needs consent'
+    $script:CmAccess = 'bad'
+    $e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/community/access '{"consent":"yes","password":"pw-typed-secret"}') }
+    Assert ($e.Status -eq 502 -and (($e.Body | ConvertTo-Json -Depth 5).Contains('rejected the user name or password')) -and -not ($e.Body | ConvertTo-Json -Depth 5).Contains('pw-typed-secret')) 'a rejected login is explained without echoing the password'
+    # refine job re-uses a run folder
+    $stamp = '20261125123000'; $runDir = Join-Path (Join-Path (Get-EloQuarantineRoot) 'drafts') $stamp
+    $null = [IO.Directory]::CreateDirectory($runDir); [IO.File]::WriteAllText((Join-Path $runDir 'articles.json'), '{"articles":[]}')
+    $e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/community/refine ('{"consent":"yes","run":"20200101000000","article":"0","provider":"openai","model":"m","hint":"x"}')) }
+    Assert ($e.Status -eq 409 -and $e.Body.error -ceq 'community_run_missing') 'refine only works on an existing run folder'
+    foreach ($bad in @('{"consent":"yes","run":"..\\..\\x","article":"0","provider":"openai","model":"m","hint":"x"}','{"consent":"yes","run":"20261125123000","article":"abc","provider":"openai","model":"m","hint":"x"}','{"consent":"yes","run":"20261125123000","article":"0","provider":"openai","model":"m"}')) {
+        $e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/community/refine $bad) }
+        Assert ($e.Status -eq 400) "refine request rejected: $bad"
+    }
+    $r = Invoke-EloApi $s (Request POST /api/community/refine ('{"consent":"yes","run":"20261125123000","article":"2","provider":"openai","model":"gpt-6-sol","hint":"Fix: update to 17.0.21.1+2","research":"yes","apiKey":"sk-typed-secret"}'))
+    $call = $script:CmCalls[-1]
+    Assert ($r.ok -and $call.Arguments -cmatch 'refine --run ".*20261125123000" --article 2 --provider openai --model gpt-6-sol --hint-file ".*hint-.*\.txt" --research --yes --log ' -and -not $call.Arguments.Contains('sk-typed-secret') -and $call.Environment['OPENAI_API_KEY'] -ceq 'sk-typed-secret') 'a refine job passes the article, the solution text as a file, the research flag and the key only through the environment'
+    $hintFile = @(Get-ChildItem -LiteralPath $runDir -Filter 'hint-*.txt')[0].FullName
+    Assert ([IO.File]::ReadAllText($hintFile) -ceq 'Fix: update to 17.0.21.1+2') 'the solution text is handed over as a file (no shell quoting)'
+    $summary = @(@{index=0;url='https://community.elo.com/x/#/post/(A)';title='Java4Shell';date='2026-11-18';status='drafted';error=$null;severity='high';severityReason='RCE';summary=@{en='English text';de='Deutscher Text';es='Texto en espanol'};javaRelated=$true;scriptWorthwhile=$true;scriptReason='Version check';solutionsReported=@(@{kind='update';summary='Update Java'},@{kind='evil';summary='x'});draftId='CVE-2026-114938';issues=1},@{index=1;url='https://evil.example/x';title='Other';date='';status='weird';error='ai_http_401: the AI rejected the API key';severity='extreme';severityReason='';summary=$null;javaRelated=$false;scriptWorthwhile=$false;scriptReason='';solutionsReported=@();draftId=$null;issues=0})
+    [IO.File]::WriteAllText((Join-Path $runDir 'analysis-summary.json'), ($summary | ConvertTo-Json -Depth 8))
+    $script:CmProc.HasExited = $true; $script:CmProc.ExitCode = 0
+    $j = Invoke-EloApi $s (Request -Path /api/community/job)
+    $arts = @($j.articles)
+    Assert ($j.state -ceq 'completed' -and $j.runId -ceq $stamp -and $arts.Count -eq 2 -and $arts[0].severity -ceq 'high' -and $arts[0].summary.es -ceq 'Texto en espanol' -and $arts[0].scriptWorthwhile -and $arts[0].draftId -ceq 'CVE-2026-114938' -and @($arts[0].solutions).Count -eq 2 -and $arts[0].solutions[1].kind -ceq 'none') 'a finished job returns the articles with rating, summary (EN/DE/ES), script verdict and solutions, sanitized'
+    Assert ($arts[1].url -ceq '' -and $arts[1].status -ceq 'error' -and $arts[1].severity -ceq '' -and $arts[1].error -match 'rejected the API key') 'non-community links, unknown statuses and unknown severities are neutralized; a per-article error is kept'
+    # draft validation + simulation inside the app
+    $draft = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'vulndb.json')) | ConvertFrom-Json
+    $draft.vulnerabilities[0].status = 'draft'
+    [IO.File]::WriteAllText((Join-Path $runDir 'draft-vulndb.json'), ($draft | ConvertTo-Json -Depth 20))
+    $val = Invoke-EloApi $s (Request POST /api/community/validate ('{"run":"'+$stamp+'"}'))
+    Assert ($val.valid -and @($val.entries).Count -eq 1 -and $val.entries[0].id -ceq 'CVE-2026-114938' -and $val.entries[0].status -ceq 'draft' -and $val.entries[0].passed -and $val.entries[0].detected -ceq 'PotentiallyVulnerable') 'a draft is validated and its simulation replayed by the app'
+    [IO.File]::WriteAllText((Join-Path $runDir 'draft-vulndb.json'), '{"schemaVersion":1,"vulnerabilities":[{"id":"x"}]}')
+    $bad = Invoke-EloApi $s (Request POST /api/community/validate ('{"run":"'+$stamp+'"}'))
+    Assert (-not $bad.valid -and $bad.error) 'an invalid draft is reported, not installed'
+    $e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/community/validate '{"run":"../x"}') }
+    Assert ($e.Status -eq 400) 'validate accepts only a timestamped run folder id'
     $e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/community/status '{}') }
     Assert ($e.Status -eq 405) 'status is GET only'
     $null = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/community/nothing '{}') }

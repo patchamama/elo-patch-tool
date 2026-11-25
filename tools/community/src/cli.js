@@ -4,9 +4,9 @@ const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { parseSince, parseMax } = require('./since');
-const { callProvider, listModels, PROVIDERS } = require('./providers');
-const { SYSTEM, userPrompt } = require('./prompt');
-const { buildDraftEntry, validateEntry, buildDraftDb } = require('./draft');
+const { callProvider, callProviderResearch, listModels, PROVIDERS } = require('./providers');
+const { SYSTEM, REFINE_SYSTEM, userPrompt, refinePrompt } = require('./prompt');
+const { buildDraftEntry, validateEntry, buildDraftDb, bilingual, clean, SEVERITY } = require('./draft');
 const { loadSecrets } = require('./secrets');
 const { setup, requireCommunityConsent } = require('./setup');
 
@@ -15,6 +15,8 @@ const HELP = `ELO Community vulnerability helper (optional, drafts only)
 Usage: node tools/community/bin/elo-community.js <command> [options]
 
 Commands
+  access   Test the sign-in to the ELO Community with your credentials (no articles are read).
+  refine   Improve one draft with a solution text you provide (--hint-file) and/or web research (--research).
   models   List the models your AI provider offers (JSON), to choose one.
   setup    Show what the community helper needs and install it ONLY after you say yes.
   fetch    Sign in to the ELO Community board, list the latest articles and save their text.
@@ -46,8 +48,8 @@ automatically: review the draft, then  ELO-Patch-Tools.bat --cli --catalog-valid
 
 function parseArgs(argv) {
   const out = { command: argv[0] && !argv[0].startsWith('--') ? argv[0] : 'help', options: {} };
-  const valued = ['log', 'since', 'max', 'provider', 'model', 'base-url', 'ai', 'out', 'articles', 'draft', 'channel', 'config'];
-  const flags = ['headed', 'help', 'yes'];
+  const valued = ['run', 'article', 'hint-file', 'log', 'since', 'max', 'provider', 'model', 'base-url', 'ai', 'out', 'articles', 'draft', 'channel', 'config'];
+  const flags = ['headed', 'help', 'yes', 'research'];
   for (let i = out.command === 'help' && !argv[0] ? 0 : 1; i < argv.length; i++) {
     const a = argv[i];
     if (!a.startsWith('--')) throw new Error('unexpected_argument: ' + a);
@@ -103,22 +105,99 @@ async function fetchArticles(options, root, now, deps = {}) {
   } finally { await browser.close(); }
 }
 
+const SOLUTION_KINDS = ['update', 'mitigation', 'workaround', 'none'];
+
+// One short record per article for the UI: rating, summary, whether a script is worthwhile, and the draft id.
+function summarize(article, index, analysis, entry, issues, status, error) {
+  const a = analysis && typeof analysis === 'object' ? analysis : {};
+  const summary = bilingual(a.summary, 900, { en: '' });
+  return {
+    index, url: article.url, title: clean(article.title, 300), date: article.date || null, status, error: error ? clean(String(error), 200) : null,
+    severity: entry ? entry.severity : (SEVERITY[String(a.severity || '').toLowerCase()] || null), severityReason: clean(a.severityReason, 500),
+    summary: summary.en === 'Not provided' ? null : summary,
+    javaRelated: a.javaRelated === true, scriptWorthwhile: a.scriptWorthwhile === true, scriptReason: clean(a.scriptReason, 400),
+    solutionsReported: (Array.isArray(a.solutionsReported) ? a.solutionsReported : []).slice(0, 5).map(s => ({ kind: SOLUTION_KINDS.includes(s && s.kind) ? s.kind : 'none', summary: clean(s && s.summary, 300) })),
+    draftId: entry ? entry.id : null, issues: issues.length
+  };
+}
+
 async function analyzeArticles(articles, cfg, now, deps = {}) {
   const call = deps.callProvider || callProvider;
-  const entries = []; const analyses = []; const failures = [];
-  for (const article of articles) {
+  const entries = []; const analyses = []; const failures = []; const summaries = [];
+  const meta = { provider: cfg.provider, model: cfg.model, stamp: now.toISOString().replace(/[-:T]/g, '').slice(0, 14), today: now.toISOString().slice(0, 10), createdUtc: now.toISOString() };
+  for (let index = 0; index < articles.length; index++) {
+    const article = articles[index];
     try {
       const analysis = await call(cfg, SYSTEM, userPrompt(article));
       analyses.push({ url: article.url, analysis });
-      const { entry, issues } = buildDraftEntry(analysis, article, { provider: cfg.provider, model: cfg.model, stamp: now.toISOString().replace(/[-:T]/g, '').slice(0, 14), today: now.toISOString().slice(0, 10), createdUtc: now.toISOString() });
-      if (!entry) { failures.push({ url: article.url, reason: issues.join(' ') }); continue; }
+      const { entry, issues } = buildDraftEntry(analysis, article, meta);
+      if (!entry) { failures.push({ url: article.url, reason: issues.join(' ') }); summaries.push(summarize(article, index, analysis, null, issues, 'not-a-report', null)); continue; }
       const problems = validateEntry(entry);
-      if (problems.length) { failures.push({ url: article.url, reason: 'draft rejected: ' + problems.join(', ') }); continue; }
+      if (problems.length) { failures.push({ url: article.url, reason: 'draft rejected: ' + problems.join(', ') }); summaries.push(summarize(article, index, analysis, null, issues, 'rejected', problems.join(', '))); continue; }
       if (entries.some(e => e.id === entry.id)) entry.id = entry.id.slice(0, 55) + '-' + (entries.length + 1);
       entries.push(entry);
-    } catch (e) { failures.push({ url: article.url, reason: String(e.message || e).slice(0, 300) }); }
+      summaries.push(summarize(article, index, analysis, entry, issues, 'drafted', null));
+    } catch (e) {
+      const reason = String(e.message || e).slice(0, 300);
+      failures.push({ url: article.url, reason });
+      summaries.push(summarize(article, index, null, null, [], 'error', reason.split(/[\s:]/)[0] === 'ai_http_401' ? 'ai_http_401: the AI rejected the API key' : reason));
+    }
   }
-  return { entries, analyses, failures };
+  return { entries, analyses, failures, summaries };
+}
+
+// Improve ONE draft with a solution text supplied by the administrator and/or web research by the AI provider.
+async function refineArticle(options, root, now, deps = {}) {
+  const runDir = path.resolve(String(options.run || ''));
+  if (!options.run || !fs.existsSync(path.join(runDir, 'articles.json'))) throw new Error('run_folder_invalid: pass --run with a folder that contains articles.json');
+  const index = Number(options.article);
+  const articlesDoc = readJson(path.join(runDir, 'articles.json'));
+  if (!Number.isInteger(index) || index < 0 || index >= articlesDoc.articles.length) throw new Error('article_index_invalid');
+  const article = articlesDoc.articles[index];
+  let hint = '';
+  if (options['hint-file']) { hint = fs.readFileSync(path.resolve(options['hint-file']), 'utf8').slice(0, 8000); }
+  if (!hint.trim() && !options.research) throw new Error('refine_needs_hint_or_research: provide a solution text or ask for research');
+  const cfg = aiConfig(options, root);
+  const analysesFile = path.join(runDir, 'analysis.json');
+  const analyses = fs.existsSync(analysesFile) ? readJson(analysesFile) : [];
+  const previous = (analyses.find(x => x.url === article.url) || {}).analysis;
+  const call = options.research ? (deps.callProviderResearch || callProviderResearch) : (deps.callProvider || callProvider);
+  const analysis = await call(cfg, REFINE_SYSTEM, refinePrompt(article, previous, hint));
+  const meta = { provider: cfg.provider, model: cfg.model, stamp: now.toISOString().replace(/[-:T]/g, '').slice(0, 14), today: now.toISOString().slice(0, 10), createdUtc: now.toISOString() };
+  const { entry, issues } = buildDraftEntry(analysis, article, meta);
+  if (!entry) throw new Error('refined_not_a_report: ' + issues.join(' '));
+  const problems = validateEntry(entry);
+  if (problems.length) throw new Error('refined_draft_rejected: ' + problems.join(', '));
+  entry.review.refined = { by: options.research ? 'web-research' : 'administrator-hint', hintProvided: Boolean(hint.trim()), createdUtc: now.toISOString() };
+  const draftFile = path.join(runDir, 'draft-vulndb.json');
+  const db = fs.existsSync(draftFile) ? readJson(draftFile) : buildDraftDb([], [], now.toISOString().slice(0, 10));
+  const at = db.vulnerabilities.findIndex(e => e.review && e.review.article && e.review.article.url === article.url);
+  if (at >= 0) { entry.id = db.vulnerabilities[at].id; db.vulnerabilities[at] = entry; } else db.vulnerabilities.push(entry);
+  writeJson(draftFile, db);
+  const nextAnalyses = analyses.filter(x => x.url !== article.url); nextAnalyses.push({ url: article.url, analysis });
+  writeJson(analysesFile, nextAnalyses);
+  const summaryFile = path.join(runDir, 'analysis-summary.json');
+  const summaries = fs.existsSync(summaryFile) ? readJson(summaryFile) : [];
+  const record = summarize(article, index, analysis, entry, issues, 'drafted', null);
+  const slot = summaries.findIndex(s => s.index === index);
+  if (slot >= 0) summaries[slot] = record; else summaries.push(record);
+  writeJson(summaryFile, summaries);
+  return { entry, record };
+}
+
+// Sign in to the ELO Community and count the articles visible on the first page. Reads no article.
+async function testAccess(options, root, deps = {}) {
+  const cfg = readJson(path.join(root, 'config', 'community.json'));
+  const community = deps.community || require('./community');
+  const chromium = deps.chromium || require('playwright-core').chromium;
+  const browser = await chromium.launch({ channel: options.channel || 'chrome', headless: !options.headed });
+  try {
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 900 } })).newPage();
+    await community.login(page, cfg, { user: process.env.ELO_COMMUNITY_USER, password: process.env.ELO_COMMUNITY_PASSWORD });
+    await page.waitForSelector(cfg.list.item, { timeout: 20000 }).catch(() => {});
+    const count = await page.evaluate(sel => document.querySelectorAll(sel).length, cfg.list.item);
+    return { ok: true, articlesOnPage: count };
+  } finally { await browser.close(); }
 }
 
 function renderReport({ entries, failures, since, provider, model, outDir }) {
@@ -165,6 +244,18 @@ async function main(argv, deps = {}) {
     }
     return 0;
   }
+  if (command === 'access') {
+    await (deps.consent || requireCommunityConsent)(options);
+    const result = await testAccess(options, root, deps);
+    process.stdout.write(JSON.stringify(result) + '\n');
+    return 0;
+  }
+  if (command === 'refine') {
+    if (options.research || options['hint-file']) await (deps.consent || requireCommunityConsent)(options, { skipLogin: true });
+    const { record } = await refineArticle(options, root, now, deps);
+    process.stdout.write('Refined article ' + record.index + ' -> draft ' + record.draftId + '\n');
+    return 0;
+  }
   if (command === 'models') {
     const cfg = aiConfig(options, root, { requireModel: false });
     const models = await (deps.listModels || listModels)(cfg);
@@ -188,9 +279,10 @@ async function main(argv, deps = {}) {
   const sources = [{ id: 'elo-community-kbb103', type: 'elo-community', title: community.board.name, url: community.board.url, access: 'login required; credentials come from the environment, never from this file' }];
   writeJson(path.join(outDir, 'analysis.json'), result.analyses);
   writeJson(path.join(outDir, 'draft-vulndb.json'), buildDraftDb(result.entries, sources, now.toISOString().slice(0, 10)));
+  writeJson(path.join(outDir, 'analysis-summary.json'), result.summaries);
   fs.writeFileSync(path.join(outDir, 'report.md'), renderReport({ entries: result.entries, failures: result.failures, since: articlesDoc.since, provider: cfg.provider, model: cfg.model, outDir }), 'utf8');
   process.stdout.write(`Drafted ${result.entries.length} entr${result.entries.length === 1 ? 'y' : 'ies'} (${result.failures.length} skipped) in ${outDir}\nNothing was installed. Read report.md, then validate and simulate the draft.\n`);
   return 0;
 }
 
-module.exports = { main, parseArgs, defaultOutDir, analyzeArticles, renderReport, aiConfig, HELP };
+module.exports = { refineArticle, testAccess, summarize, main, parseArgs, defaultOutDir, analyzeArticles, renderReport, aiConfig, HELP };

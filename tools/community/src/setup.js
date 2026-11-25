@@ -66,6 +66,7 @@ async function setup(options = {}, deps = {}) {
 
 // Gate for fetch/run: show the plan, require consent (--yes or an interactive "yes"), and never install anything.
 async function requireCommunityConsent(options, deps = {}) {
+  if (deps.skipLogin) return true; // refine talks to the AI provider only; the web UI asked for consent already
   const installed = dependencyInstalled(ROOT, deps.exists);
   const out = deps.out || (s => process.stderr.write(s));
   out(describePlan({ forCommunity: true, installed, chrome: chromePath(deps.exists, deps.env), nodeVersion: process.version }) + '\n\n');

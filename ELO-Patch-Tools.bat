@@ -1108,7 +1108,7 @@ function Get-EloSecurityMetadata {
     $items=@(); $verified=@()
     foreach ($v in (Get-EloActiveVulnerabilities)) {
         if ($v.verifiedOn) { $verified+=[string]$v.verifiedOn }
-        foreach ($a in @($v.advisories)) { $items+=@{id=[string]$a.id;url=[string]$a.url;title=@{en=[string]$a.title.en;de=[string]$a.title.de}} }
+        foreach ($a in @($v.advisories)) { $advTitle=@{en=[string]$a.title.en;de=[string]$a.title.de}; if ($a.title.es) { $advTitle.es=[string]$a.title.es }; $items+=@{id=[string]$a.id;url=[string]$a.url;title=$advTitle} }
     }
     if ($items.Count -eq 0) { return @{verifiedOn=$null;advisories=@()} }
     return @{verifiedOn=[string]($verified | Sort-Object -Descending | Select-Object -First 1);advisories=$items}
@@ -1117,8 +1117,9 @@ function Get-EloVulnerabilityInfo {
     # What the UI needs per active vulnerability: severity, problem and solution texts, and the action ids.
     $list=@()
     foreach ($v in (Get-EloActiveVulnerabilities)) {
+        $tri={ param($x) $o=@{en=[string]$x.en;de=[string]$x.de}; if ($x.es) { $o.es=[string]$x.es }; $o }
         $list+=@{id=[string]$v.id;alias=[string](@($v.aliases) | Select-Object -First 1);severity=[string]$v.severity
-            title=@{en=[string]$v.title.en;de=[string]$v.title.de};problem=@{en=[string]$v.problem.en;de=[string]$v.problem.de};solution=@{en=[string]$v.solution.en;de=[string]$v.solution.de}
+            title=(& $tri $v.title);problem=(& $tri $v.problem);solution=(& $tri $v.solution)
             actions=@(@($v.actions) | ForEach-Object { [string]$_.id })}
         $m=Get-EloVulnAction $v 'jvm-option'
         if ($m) { $list[-1].mitigation=@{variable=[string]$m.variable;option=[string]$m.option;verifyArgs=@(@($m.verify.args) | ForEach-Object { [string]$_ })} }
@@ -1371,10 +1372,11 @@ function New-EloMitigationPreview {
     $values=@{option=[string]$spec.Action.option;variable=[string]$spec.Action.variable;old=$old;kind=[string]$before.Kind;new=[string]$after.Value}
     $summaryEn=Format-EloVulnText ([string]$spec.Action.summary.en) $values
     $summaryDe=Format-EloVulnText ([string]$spec.Action.summary.de) $values
+    $summaryAll=@{en=$summaryEn;de=$summaryDe}; if ($spec.Action.summary.es) { $summaryAll.es=Format-EloVulnText ([string]$spec.Action.summary.es) $values }
     $Session.Preview=$preview
     $notice=@()
     if ($target.Status -cne 'PotentiallyVulnerable') { $notice=@(@{en='This runtime is not classified as vulnerable by the catalog (for example another vendor). The temporary mitigation is allowed anyway: the option is probed with this exact java.exe first and nothing is written if that fails. It still applies machine-wide.';de='Diese Runtime wird vom Katalog nicht als verwundbar eingestuft (z. B. anderer Hersteller). Die vorlaeufige Risikominderung ist trotzdem erlaubt: die Option wird zuerst mit genau dieser java.exe geprueft; schlaegt das fehl, wird nichts geschrieben. Sie gilt weiterhin systemweit.'}) }
-    return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe};warnings=@($notice)+@(
+    return @{previewId=$preview.Id;summary=$summaryAll;warnings=@($notice)+@(
         @{en='Existing JVMs are NOT protected. No restart is performed. Windows services may retain an old environment even after restart; a verified PrintFlagsFinal probe is not proof of service protection. Coordinate supported ELO configuration with your administrator.';de='Bestehende JVMs sind NICHT geschuetzt. Kein Neustart. Windows-Dienste koennen alte Umgebungswerte behalten. Der PrintFlagsFinal-Test beweist keinen Schutz des Dienstes. Unterstuetzte ELO-Konfiguration mit Administrator klaeren.'},
         @{en='Global options can break unrelated JVMs. Advisory source verification does not establish ELO or JVM-option compatibility. Session-only backup is lost on exit: save the previous value from this preview before confirmation. No runtime update is available.';de='Globale Optionen koennen andere JVMs stoeren. Quellenpruefung beweist keine ELO- oder JVM-Optionskompatibilitaet. Sitzungssicherung geht beim Beenden verloren: alten Wert vor Bestaetigung sichern. Laufzeit-Update nicht verfuegbar.'})}
 }
@@ -1511,7 +1513,9 @@ function Get-EloRestoreSecurityWarning {
     $m=$Vulnerability.messages.$name
     if (-not $m) { return @() }
     $values=Get-EloVulnMessageValues $Vulnerability $Vendor $Version
-    return @(@{en=(Format-EloVulnText ([string]$m.en) $values);de=(Format-EloVulnText ([string]$m.de) $values)})
+    $warning=@{en=(Format-EloVulnText ([string]$m.en) $values);de=(Format-EloVulnText ([string]$m.de) $values)}
+    if ($m.es) { $warning.es=Format-EloVulnText ([string]$m.es) $values }
+    return @($warning)
 }function Get-EloBackupList {
     # Backup ZIPs written by this tool (<runtime>.backup-<yyyyMMddHHmmss>.zip) next to a runtime, on every
     # drive at level 1 (X:\) and level 2 (X:\<folder>\). Read-only, bounded, cached for 30 s. The ids are
@@ -1606,6 +1610,7 @@ function New-EloRuntimeUpdatePreview {
     $vendor=$package.Vendor; $kind=$package.ImageType.ToUpperInvariant()
     $summaryEn="Replace the $vendor $kind $($package.Branch) runtime in $runtime ($from) with the newest release of the same branch, $to ($($package.Architecture), SHA256 $($package.Sha256)). Steps: verified ZIP backup $($paths.Backup); HTTPS download from the vendor; extraction to $($paths.Stage); Java self-test; rename the old runtime to $($paths.Old); install; re-test. Any failure restores the old runtime. The old runtime and the backup are kept; nothing is deleted."
     $summaryDe="Die $vendor-$kind-$($package.Branch)-Runtime in $runtime ($from) durch die neueste Version desselben Branches ersetzen: $to ($($package.Architecture), SHA256 $($package.Sha256)). Schritte: geprueftes ZIP-Backup $($paths.Backup); HTTPS-Download beim Hersteller; Entpacken nach $($paths.Stage); Java-Selbsttest; alte Runtime nach $($paths.Old) umbenennen; installieren; erneut testen. Bei jedem Fehler wird die alte Runtime wiederhergestellt. Alte Runtime und Backup bleiben erhalten; es wird nichts geloescht."
+    $summaryEs="Sustituir el runtime $vendor $kind $($package.Branch) en $runtime ($from) por la última versión de la misma rama, $to ($($package.Architecture), SHA256 $($package.Sha256)). Pasos: copia ZIP verificada $($paths.Backup); descarga HTTPS del fabricante; extracción en $($paths.Stage); prueba de Java; renombrar el runtime antiguo a $($paths.Old); instalar; probar de nuevo. Cualquier fallo restaura el runtime antiguo. El runtime antiguo y la copia se conservan; no se borra nada."
     $warnings=@(
         @{en='ELO compatibility with this runtime is NOT verified; the update can affect ELO support. Confirming accepts this risk.';de='Die ELO-Kompatibilitaet dieser Runtime ist NICHT geprueft; das Update kann den ELO-Support beeintraechtigen. Mit der Bestaetigung wird dieses Risiko akzeptiert.'}
         @{en='The download is limited to the vendor''s official release host and its published SHA256. Installing the vendor package with its installer remains the preferred long-term fix.';de='Der Download ist auf den offiziellen Herstellerhost und die veroeffentlichte SHA256 beschraenkt. Die Installation des Herstellerpakets mit dem Installer bleibt die bevorzugte langfristige Loesung.'})
@@ -1613,7 +1618,7 @@ function New-EloRuntimeUpdatePreview {
         $list=Format-EloServiceList $services
         $warnings=@(@{en="These services use the runtime and will be STOPPED before the replacement and started again afterwards: $list. ELO is unavailable meanwhile. Confirming accepts this.";de="Diese Dienste verwenden die Runtime und werden vor dem Austausch BEENDET und danach wieder gestartet: $list. ELO ist in dieser Zeit nicht verfuegbar. Mit der Bestaetigung wird dies akzeptiert."})+$warnings
     }
-    return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe};warnings=$warnings}
+    return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe;es=$summaryEs};warnings=$warnings}
 }
 function Add-EloUpdateReportActions {
     param($Session,[string]$Outcome,$Preview,[int]$RuntimeIndex,[string]$FailureCode)
@@ -1697,6 +1702,7 @@ function New-EloRestorePreview {
     $Session.Preview=$preview
     $summaryEn="Restore the runtime ($($preview.ToVersion)) of $($source.Runtime) from the backup ZIP $($source.Backup). Every file is hash-checked before the swap; the current runtime (if any) is renamed to $($source.Runtime).replaced-$($preview.Stamp) and kept; nothing is deleted."
     $summaryDe="Die Runtime ($($preview.ToVersion)) von $($source.Runtime) aus dem Backup-ZIP $($source.Backup) wiederherstellen. Jede Datei wird vor dem Austausch per Hash geprueft; die aktuelle Runtime (falls vorhanden) wird nach $($source.Runtime).replaced-$($preview.Stamp) umbenannt und bleibt erhalten; es wird nichts geloescht."
+    $summaryEs="Restaurar el runtime ($($preview.ToVersion)) de $($source.Runtime) desde el ZIP de copia $($source.Backup). Cada archivo se comprueba por hash antes del cambio; el runtime actual (si existe) se renombra a $($source.Runtime).replaced-$($preview.Stamp) y se conserva; no se borra nada."
     $ver=[string]$preview.ToVersion; $vend=[string]$source.Vendor
     $assessment=Get-EloBackupAssessment $vend $ver
     $warnings=@(Get-EloRestoreSecurityWarning ([string]$source.Risk) $assessment.Vulnerability $vend $ver)
@@ -1706,7 +1712,7 @@ function New-EloRestorePreview {
     } else {
         $warnings=@(@{en='No running service or process uses this runtime right now. If the ELO Tomcat services run on it, stop them first (ELO will be unavailable) or the restore is refused.';de='Zurzeit verwendet kein laufender Dienst oder Prozess diese Runtime. Laufen die ELO-Tomcat-Dienste darauf, diese zuerst beenden (ELO ist dann nicht verfuegbar), sonst wird die Wiederherstellung abgelehnt.'})+$warnings
     }
-    return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe};warnings=$warnings}
+    return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe;es=$summaryEs};warnings=$warnings}
 }
 function Invoke-EloRestoreAction {
     param($Session,$Body)
@@ -1744,7 +1750,7 @@ function Invoke-EloRestoreAction {
     $Session.LastUpdate=$null; $Session.BackupsCache=$null
     return @{ok=$true}
 }function Get-EloSessionReportHtml {
-    param($Session,[ValidateSet('en','de')][string]$Language)
+    param($Session,[ValidateSet('en','de','es')][string]$Language)
     # ELO version: only from the installed Indexserver files below the parent of a scanned runtime.
     $eloRoots=@($Session.Targets.Values | ForEach-Object { try { [IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName([string]$_.Location))) } catch { $null } } | Where-Object { $_ } | Select-Object -Unique)
     $eloVersion=$null; if ($Session.Adapters.EloVersion -is [scriptblock] -and $eloRoots.Count -gt 0) { try { $eloVersion=& $Session.Adapters.EloVersion $eloRoots } catch { $eloVersion=$null } }
@@ -1756,6 +1762,10 @@ function Invoke-EloRestoreAction {
     if ($Language -eq 'de') {
         $states=@{idle='Bereit';scanning='Scan laeuft';cancelling='Abbruch angefordert';completed='Abgeschlossen';cancelled='Abgebrochen';error='Fehlgeschlagen'}
         $notice='Scanstatus der Sitzung: '; $scope='Sitzungsnachweise (auch fruehere Scans); nur ein abgeschlossener Scan ist eine vollstaendige Momentaufnahme. Ein Runtime-Update erfolgt nur nach ausdruecklicher Bestaetigung. ELO-API-Unterstuetzung und Risikominderung im laufenden ELO-Prozess sind nicht nachgewiesen.'
+    }
+    if ($Language -eq 'es') {
+        $states=@{idle='Listo';scanning='Escaneando';cancelling='Cancelacion solicitada';completed='Completado';cancelled='Cancelado';error='Fallido'}
+        $notice='Estado del escaneo de la sesion: '; $scope='Observaciones de la sesion (tambien de escaneos anteriores); solo un escaneo completado es una instantanea completa. Una actualizacion del runtime se realiza solo tras confirmacion explicita. El soporte de la API de ELO y la mitigacion en procesos ELO en ejecucion no estan verificados.'
     }
     $state=$states[$Session.State]; if (-not $state) { $state='Unknown / Unbekannt' }
     # A failed rollback can invalidate earlier machine-option evidence. Do not
@@ -1810,8 +1820,8 @@ function Get-EloCommunityEnvironment {
     param($Body)
     $env2=@{}
     $map=@{user='ELO_COMMUNITY_USER';password='ELO_COMMUNITY_PASSWORD'}
-    foreach ($k in $map.Keys) { $v=Assert-EloCommunityText $Body.$k $null 300 'invalid_parameters'; if ($v) { $env2[$map[$k]]=$v } }
-    $key=Assert-EloCommunityText $Body.apiKey $null 400 'invalid_parameters'
+    foreach ($k in $map.Keys) { $v=Assert-EloCommunityText ([string]$Body.$k).Trim() $null 300 'invalid_parameters'; if ($v) { $env2[$map[$k]]=$v } }
+    $key=Assert-EloCommunityText ([string]$Body.apiKey).Trim() $null 400 'invalid_parameters'
     if ($key) { $prov=[string]$Body.provider; if ($prov -ceq 'openai') { $env2['OPENAI_API_KEY']=$key } elseif ($prov -ceq 'anthropic') { $env2['ANTHROPIC_API_KEY']=$key } }
     return $env2
 }
@@ -1871,7 +1881,8 @@ function Start-EloCommunityJob {
     if ($job -and $job.Process -and -not $job.Process.HasExited) { Stop-EloRequest 409 'community_busy' }
     $tool=Get-EloCommunityTool $Session
     $stamp=(& $Session.Adapters.Clock).ToString('yyyyMMddHHmmss')
-    $outDir=Join-Path (Join-Path (Get-EloQuarantineRoot) 'drafts') $stamp
+    if ($Kind -ceq 'refine') { $outDir=Resolve-EloCommunityRunDir ([string]$Body.run) }
+    else { $outDir=Join-Path (Join-Path (Get-EloQuarantineRoot) 'drafts') $stamp }
     $null=[IO.Directory]::CreateDirectory($outDir)
     $logFile=Join-Path $outDir 'run.log'
     $environment=@{}
@@ -1882,19 +1893,88 @@ function Start-EloCommunityJob {
         $max=[int]$Body.max; if ($max -lt 1 -or $max -gt 50) { Stop-EloRequest 400 'invalid_parameters' }
         $arguments=@(('"'+$tool.Cli+'"'),'run','--since',$since,'--max',[string]$max)+(Get-EloCommunityAiArguments $Body $true)
         $environment=Get-EloCommunityEnvironment $Body
+    } elseif ($Kind -ceq 'refine') {
+        if ([string]$Body.article -cnotmatch '^[0-9]{1,2}$') { Stop-EloRequest 400 'invalid_parameters' }
+        $hint=[string]$Body.hint; if ($hint.Length -gt 4000 -or $hint -match '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]') { Stop-EloRequest 400 'invalid_parameters' }
+        $research=([string]$Body.research -ceq 'yes')
+        if (-not $research -and -not $hint.Trim()) { Stop-EloRequest 400 'missing_parameter' }
+        $arguments=@(('"'+$tool.Cli+'"'),'refine','--run',('"'+$outDir+'"'),'--article',[string][int]$Body.article)+(Get-EloCommunityAiArguments $Body $true)
+        if ($hint.Trim()) { $hintFile=Join-Path $outDir ('hint-'+$stamp+'.txt'); [IO.File]::WriteAllText($hintFile,$hint,(New-Object Text.UTF8Encoding($false))); $arguments+=@('--hint-file',('"'+$hintFile+'"')) }
+        if ($research) { $arguments+='--research' }
+        $environment=Get-EloCommunityEnvironment $Body
     } else {
         $arguments=@(('"'+$tool.Cli+'"'),'setup')
     }
-    $arguments+=@('--yes','--out',('"'+$outDir+'"'),'--log',('"'+$logFile+'"'))
+    $arguments+=@('--yes')
+    if ($Kind -cne 'refine') { $arguments+=@('--out',('"'+$outDir+'"')) }
+    $arguments+=@('--log',('"'+$logFile+'"'))
     Write-EloLog $Session "Community: starting '$Kind' (output in $outDir)."
     try { $process=& $Session.Adapters.StartProcess $tool.Node ($arguments -join ' ') $environment $tool.Root }
     catch { Stop-EloRequestDetail 502 'community_failed' 'process_start_failed' }
     $Session.CommunityJob=@{Kind=$Kind;Process=$process;OutDir=$outDir;LogFile=$logFile;Started=(& $Session.Adapters.Clock);Environment=$environment;Reported=$false}
 }
+function Get-EloCommunityFailureHint {
+    # Plain-language cause for the codes the helper reports (never contains a credential).
+    param([string]$Code)
+    switch -Regex ($Code) {
+        '^ai_http_401$' { return @{en='The AI provider rejected the API key (HTTP 401). Check the key typed in the field, or empty the field to use the key saved in secrets.local.env or the environment.';de='Der KI-Anbieter hat den API-Schluessel abgelehnt (HTTP 401). Den eingegebenen Schluessel pruefen oder das Feld leeren, um den in secrets.local.env bzw. der Umgebung gespeicherten zu verwenden.';es='El proveedor de IA rechazo la clave de API (HTTP 401). Revisa la clave escrita en el campo o vacia el campo para usar la guardada en secrets.local.env o en el entorno.'} }
+        '^ai_http_429$' { return @{en='The AI provider limits the requests (HTTP 429). Wait a moment and try again.';de='Der KI-Anbieter begrenzt die Anfragen (HTTP 429). Kurz warten und erneut versuchen.';es='El proveedor de IA limita las peticiones (HTTP 429). Espera un momento y reintenta.'} }
+        '^ai_http_(400|404)$' { return @{en='The AI provider does not accept the request or the model. Load the model list and choose one your account offers.';de='Der KI-Anbieter akzeptiert Anfrage oder Modell nicht. Modellliste laden und ein Modell Ihres Kontos waehlen.';es='El proveedor de IA no acepta la peticion o el modelo. Carga la lista de modelos y elige uno de tu cuenta.'} }
+        '^ai_key_missing$' { return @{en='No API key: type one in the field or save it as OPENAI_API_KEY / ANTHROPIC_API_KEY in secrets.local.env.';de='Kein API-Schluessel: im Feld eingeben oder als OPENAI_API_KEY / ANTHROPIC_API_KEY in secrets.local.env speichern.';es='Falta la clave de API: escribela en el campo o guardala como OPENAI_API_KEY / ANTHROPIC_API_KEY en secrets.local.env.'} }
+        '^ai_network_error$' { return @{en='The AI provider could not be reached. Check the network, the proxy and the base URL.';de='Der KI-Anbieter ist nicht erreichbar. Netzwerk, Proxy und Basis-URL pruefen.';es='No se pudo contactar con el proveedor de IA. Revisa la red, el proxy y la URL base.'} }
+        'login_failed' { return @{en='The ELO Community rejected the user name or password.';de='Die ELO Community hat Benutzername oder Passwort abgelehnt.';es='La ELO Community rechazo el usuario o la contrasena.'} }
+        'credentials_missing' { return @{en='Type your ELO Community user and password, or save them in secrets.local.env.';de='ELO-Community-Benutzer und -Passwort eingeben oder in secrets.local.env speichern.';es='Escribe tu usuario y contrasena de ELO Community o guardalos en secrets.local.env.'} }
+        '^dependency_missing$' { return @{en='The helper is not installed yet: confirm and press Install the helper first.';de='Der Helfer ist noch nicht installiert: zuerst bestaetigen und Helfer installieren.';es='El asistente aun no esta instalado: confirma y pulsa Instalar el asistente.'} }
+        '^research_unsupported$' { return @{en='Web research needs OpenAI or Anthropic. With Ollama paste a solution text instead.';de='Webrecherche braucht OpenAI oder Anthropic. Mit Ollama stattdessen einen Loesungstext einfuegen.';es='La investigacion web necesita OpenAI o Anthropic. Con Ollama pega un texto con la solucion.'} }
+    }
+    return $null
+}
+function ConvertTo-EloCommunitySummary {
+    # Reads analysis-summary.json written by the helper and returns a bounded, sanitized list for the UI.
+    param([string]$RunDir)
+    $file=Join-Path $RunDir 'analysis-summary.json'
+    $out=@()
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return @() }
+    # Windows PowerShell 5.1 returns a JSON array as ONE object: enumerate it explicitly.
+    try { $parsed=[IO.File]::ReadAllText($file) | ConvertFrom-Json; $items=@($parsed | ForEach-Object { $_ }) } catch { return @() }
+    $clip={ param($v,[int]$n) $s=[string]$v; $s=($s -replace '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]',' '); if ($s.Length -gt $n) { $s.Substring(0,$n) } else { $s } }
+    foreach ($a in @($items | Select-Object -First 60)) {
+        $url=[string]$a.url; if ($url -cnotmatch '^https://community\.elo\.com/[^\s"<>]{0,380}$') { $url='' }
+        $status=[string]$a.status; if (@('drafted','not-a-report','rejected','error') -cnotcontains $status) { $status='error' }
+        $sev=[string]$a.severity; if (@('high','medium','low') -cnotcontains $sev) { $sev='' }
+        $summary=$null
+        if ($a.summary -and $a.summary.en) { $summary=@{en=(& $clip $a.summary.en 900);de=(& $clip $(if ($a.summary.de) { $a.summary.de } else { $a.summary.en }) 900)}; if ($a.summary.es) { $summary.es=(& $clip $a.summary.es 900) } }
+        $solutions=@(@($a.solutionsReported) | Where-Object { $_ } | Select-Object -First 5 | ForEach-Object { $k=[string]$_.kind; if (@('update','mitigation','workaround','none') -cnotcontains $k) { $k='none' }; @{kind=$k;summary=(& $clip $_.summary 300)} })
+        $out+=@{index=[int]$a.index;url=$url;title=(& $clip $a.title 300);date=(& $clip $a.date 10);status=$status;error=(& $clip $a.error 200);severity=$sev;severityReason=(& $clip $a.severityReason 500)
+            summary=$summary;javaRelated=[bool]($a.javaRelated -eq $true);scriptWorthwhile=[bool]($a.scriptWorthwhile -eq $true);scriptReason=(& $clip $a.scriptReason 400);solutions=@($solutions);draftId=(& $clip $a.draftId 64);issues=[int]$a.issues}
+    }
+    return $out
+}
+function Test-EloCommunityDraft {
+    # Validates a draft catalog with the app's own validator and replays its simulations (never touches the machine).
+    param([string]$RunDir)
+    $file=Join-Path $RunDir 'draft-vulndb.json'
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return @{valid=$false;error='draft_missing';entries=@()} }
+    try { $db=Read-EloVulnDbFile $file } catch { return @{valid=$false;error=(ConvertTo-EloUpdateCode ([string]$_.Exception.Message));entries=@()} }
+    $entries=@()
+    foreach ($v in @($db.vulnerabilities | Select-Object -First 50)) {
+        $sim=$null; try { $sim=Invoke-EloVulnSimulation $v $db } catch { $sim=@{Passed=$false;Reason='simulation_failed'} }
+        $entries+=@{id=[string]$v.id;status=[string]$v.status;passed=[bool]$sim.Passed;detected=[string]$sim.Status;reason=[string]$sim.Reason}
+    }
+    return @{valid=$true;error='';entries=@($entries)}
+}
+function Resolve-EloCommunityRunDir {
+    # A run folder is only ever one of the timestamped folders below the quarantine drafts folder.
+    param([string]$Stamp)
+    if ($Stamp -cnotmatch '^[0-9]{14}$') { Stop-EloRequest 400 'invalid_parameters' }
+    $dir=Join-Path (Join-Path (Get-EloQuarantineRoot) 'drafts') $Stamp
+    if (-not (Test-Path -LiteralPath (Join-Path $dir 'articles.json') -PathType Leaf)) { Stop-EloRequest 409 'community_run_missing' }
+    return $dir
+}
 function Get-EloCommunityJobState {
     param($Session)
     $job=$Session.CommunityJob
-    if (-not $job) { return @{state='idle';kind='';log=@();drafts=@();outDir=''} }
+    if (-not $job) { return @{state='idle';kind='';log=@();drafts=@();articles=@();runId='';outDir=''} }
     $state='running'
     if ($job.Process.HasExited) {
         if ($job.Cancelled) { $state='cancelled' } elseif ($job.Process.ExitCode -eq 0) { $state='completed' } else { $state='failed' }
@@ -1910,7 +1990,8 @@ function Get-EloCommunityJobState {
     }
     $drafts=@()
     $draftFile=Join-Path $job.OutDir 'draft-vulndb.json'
-    if ($state -ceq 'completed' -and $job.Kind -ceq 'run' -and (Test-Path -LiteralPath $draftFile -PathType Leaf)) {
+    $articles=@(); if (($state -ceq 'completed' -or $state -ceq 'failed') -and $job.Kind -cin @('run','refine')) { $articles=@(ConvertTo-EloCommunitySummary $job.OutDir) }
+    if ($state -ceq 'completed' -and $job.Kind -cin @('run','refine') -and (Test-Path -LiteralPath $draftFile -PathType Leaf)) {
         try {
             $db=[IO.File]::ReadAllText($draftFile) | ConvertFrom-Json
             foreach ($e in @($db.vulnerabilities | Select-Object -First 50)) {
@@ -1920,7 +2001,7 @@ function Get-EloCommunityJobState {
             }
         } catch { $drafts=@() }
     }
-    return @{state=$state;kind=[string]$job.Kind;log=@($log);drafts=@($drafts);outDir=[string]$job.OutDir}
+    return @{state=$state;kind=[string]$job.Kind;log=@($log);drafts=@($drafts);articles=@($articles);runId=(Split-Path -Leaf ([string]$job.OutDir));outDir=[string]$job.OutDir}
 }
 function Invoke-EloCommunityApi {
     param($Session,$Request)
@@ -1941,6 +2022,33 @@ function Invoke-EloCommunityApi {
             Start-EloCommunityJob $Session 'run' $body
             return @{ok=$true}
         }
+        '/api/community/access' {
+            $body=ConvertFrom-EloBody $Request.Body -Required @('consent') -Optional @('user','password')
+            if ([string]$body.consent -cne 'yes') { Stop-EloRequest 400 'consent_required' }
+            $tool=Get-EloCommunityTool $Session
+            $environment=Get-EloCommunityEnvironment $body
+            Write-EloLog $Session 'Community: testing the sign-in.'
+            try { $r=& $Session.Adapters.RunProcess $tool.Node ((@(('"'+$tool.Cli+'"'),'access','--yes')) -join ' ') $environment $tool.Root 120 }
+            catch { Stop-EloRequestDetail 502 'community_failed' (ConvertTo-EloUpdateCode ([string]$_.Exception.Message)) }
+            $msg=Remove-EloCommunitySecrets (([string]$r.Error+[string]$r.Output)) $environment
+            if ($r.ExitCode -ne 0) {
+                $code='access_failed'; if ($msg -match 'login_failed') { $code='login_failed' } elseif ($msg -match 'credentials_missing') { $code='credentials_missing' } elseif ($msg -match 'dependency_missing') { $code='dependency_missing' }
+                Stop-EloRequestDetail 502 'community_failed' $code
+            }
+            $json=@(([string]$r.Output -split "`r?`n") | Where-Object { $_ -match '^\{.*\}\s*$' } | Select-Object -Last 1)
+            if ($json.Count -ne 1) { Stop-EloRequestDetail 502 'community_failed' 'access_unreadable' }
+            try { $parsed=$json[0] | ConvertFrom-Json } catch { Stop-EloRequestDetail 502 'community_failed' 'access_unreadable' }
+            return @{ok=[bool]($parsed.ok -eq $true);articlesOnPage=[int]$parsed.articlesOnPage}
+        }
+        '/api/community/refine' {
+            $body=ConvertFrom-EloBody $Request.Body -Required @('consent','run','article','provider','model') -Optional @('hint','research','apiKey','baseUrl')
+            Start-EloCommunityJob $Session 'refine' $body
+            return @{ok=$true}
+        }
+        '/api/community/validate' {
+            $body=ConvertFrom-EloBody $Request.Body -Required @('run')
+            return (Test-EloCommunityDraft (Resolve-EloCommunityRunDir ([string]$body.run)))
+        }
         '/api/community/cancel' {
             $null=ConvertFrom-EloBody $Request.Body
             $job=$Session.CommunityJob
@@ -1954,7 +2062,7 @@ function Invoke-EloApi {
     param($Session,$Request)
     Assert-EloBoundary $Session $Request
     if (-not (Test-EloSecret ([string]$Request.Headers['X-Session-Token']) $Session.Token)) { Stop-EloRequest 401 'authentication_required' }
-    $get=@('/api/status','/api/results','/api/community/status','/api/community/job'); $post=@('/api/scan','/api/cancel','/api/preview','/api/action','/api/report','/api/community/models','/api/community/setup','/api/community/run','/api/community/cancel')
+    $get=@('/api/status','/api/results','/api/community/status','/api/community/job'); $post=@('/api/scan','/api/cancel','/api/preview','/api/action','/api/report','/api/community/models','/api/community/setup','/api/community/run','/api/community/cancel','/api/community/access','/api/community/refine','/api/community/validate')
     if ($Request.Target -cnotin ($get+$post)) { Stop-EloRequest 404 'unknown_route' }
     if (($Request.Target -cin $get -and $Request.Method -cne 'GET') -or ($Request.Target -cin $post -and $Request.Method -cne 'POST')) { Stop-EloRequest 405 'method_rejected' }
     Update-EloScanWorker $Session
@@ -1974,7 +2082,7 @@ function Invoke-EloApi {
     switch -CaseSensitive ($Request.Target) {
         '/api/report' {
             $body=ConvertFrom-EloBody $Request.Body -Required @('language')
-            if ($body.language -cnotin @('en','de')) { Stop-EloRequest 400 'invalid_language' }
+            if ($body.language -cnotin @('en','de','es')) { Stop-EloRequest 400 'invalid_language' }
             return @{html=(Get-EloSessionReportHtml $Session $body.language)}
         }
         '/api/scan' {
@@ -2010,6 +2118,7 @@ function Invoke-EloApi {
             if ($body.actionId -ceq 'update-runtime') { if ($preview) { $result=New-EloRuntimeUpdatePreview $Session $body.resultId } else { $result=Invoke-EloRuntimeUpdateAction $Session $body } }
             elseif ($body.actionId -ceq 'restore-backup') { if ($preview) { $result=New-EloRestorePreview $Session $body.resultId } else { $result=Invoke-EloRestoreAction $Session $body } }
             else { if ($preview) { $result=New-EloMitigationPreview $Session $body.resultId } else { $result=Invoke-EloMitigation $Session $body } }
+            if ($preview -and $result.warnings) { $result.warnings=@(@($result.warnings) | ForEach-Object { Add-EloSpanish $_ }) }
             Write-EloLog $Session "$phase '$($body.actionId)' OK."
             return $result
             } catch {
@@ -2065,6 +2174,36 @@ function Write-EloHttpResponse {
     $head=[Text.Encoding]::ASCII.GetBytes($headers)
     $Stream.Write($head,0,$head.Length); $Stream.Write($bytes,0,$bytes.Length); $Stream.Flush()
 }
+# Spanish (castellano) for messages the backend builds in English and German. Static texts are looked up by their
+# English text; the dynamic ones (service lists) are matched by pattern. The UI falls back to English when a text has no es.
+$script:EloSpanishStatic=@{
+    'This runtime is not classified as vulnerable by the catalog (for example another vendor). The temporary mitigation is allowed anyway: the option is probed with this exact java.exe first and nothing is written if that fails. It still applies machine-wide.'='Este runtime no está clasificado como vulnerable por el catálogo (por ejemplo, otro fabricante). La mitigación temporal se permite igualmente: la opción se prueba antes con este java.exe exacto y no se escribe nada si falla. Sigue aplicándose a toda la máquina.'
+    'Existing JVMs are NOT protected. No restart is performed. Windows services may retain an old environment even after restart; a verified PrintFlagsFinal probe is not proof of service protection. Coordinate supported ELO configuration with your administrator.'='Las JVM existentes NO quedan protegidas. No se reinicia nada. Los servicios de Windows pueden conservar un entorno antiguo incluso tras reiniciar; una prueba PrintFlagsFinal verificada no demuestra la protección del servicio. Coordina con tu administrador la configuración compatible de ELO.'
+    'ELO compatibility with this runtime is NOT verified; the update can affect ELO support. Confirming accepts this risk.'='La compatibilidad de ELO con este runtime NO está verificada; la actualización puede afectar al soporte de ELO. Al confirmar aceptas este riesgo.'
+    'The download is limited to the vendor''s official release host and its published SHA256. Installing the vendor package with its installer remains the preferred long-term fix.'='La descarga se limita al host oficial de versiones del fabricante y a su SHA256 publicado. Instalar el paquete del fabricante con su instalador sigue siendo la solución preferible a largo plazo.'
+    'No running service or process uses this runtime right now. If the ELO Tomcat services run on it, stop them first (ELO will be unavailable) or the restore is refused.'='Ningún servicio ni proceso en ejecución usa ahora este runtime. Si los servicios Tomcat de ELO lo usan, deténlos antes (ELO no estará disponible) o la restauración se rechaza.'
+    'Access was denied. Check elevation and filesystem/registry permissions; no protection is claimed. Do not bypass access controls.'='Acceso denegado. Revisa la elevación y los permisos de archivos/registro; no se afirma ninguna protección. No eludas los controles de acceso.'
+    'Mitigation requires an elevated administrator session. Read-only scans do not require elevation; inaccessible locations can make assessment incomplete.'='La mitigación requiere una sesión de administrador elevada. Los escaneos de solo lectura no la necesitan; las ubicaciones inaccesibles pueden dejar la valoración incompleta.'
+    'Manual recovery is required before another change. Restore the preview backup and verify it; opening a new session alone does not restore the environment.'='Hace falta recuperación manual antes de otro cambio. Restaura la copia de la vista previa y verifícala; abrir una sesión nueva por sí solo no restaura el entorno.'
+    'Verification failed; the exact previous environment value and type were restored and read back. No protection is claimed.'='La verificación falló; se restauraron y releyeron el valor anterior exacto del entorno y su tipo. No se afirma ninguna protección.'
+    'The scan encountered inaccessible/skipped locations or traversal limits. Results are not a complete assessment. Select a narrower accessible local root; review permissions without bypassing access controls.'='El escaneo encontró ubicaciones inaccesibles u omitidas o límites de recorrido. Los resultados no son una valoración completa. Elige una carpeta local accesible más estrecha y revisa los permisos sin eludir los controles de acceso.'
+    'The selected local directory is missing or inaccessible. Select an accessible directory and check permissions.'='La carpeta local seleccionada no existe o no es accesible. Elige una carpeta accesible y revisa los permisos.'
+    'Automatic runtime update is unavailable: provenance, ELO compatibility, validated backups, reversible replacement and rollback guarantees are not implemented and verified. Nothing was downloaded or replaced.'='La actualización automática del runtime no está disponible: no están implementadas ni verificadas la procedencia, la compatibilidad con ELO, las copias validadas, la sustitución reversible ni las garantías de reversión. No se descargó ni sustituyó nada.'
+    'The ELO Community helper is not available here (it needs the tools\community folder next to the tool and Node.js). The patch tool itself is unaffected.'='El asistente de ELO Community no está disponible aquí (necesita la carpeta tools\community junto a la herramienta y Node.js). La herramienta de parches no se ve afectada.'
+    'A community job is already running. Wait for it or cancel it.'='Ya hay un trabajo de la comunidad en curso. Espera a que termine o cancélalo.'
+    'Confirm that extra software may be installed and that your ELO Community credentials are used.'='Confirma que puede instalarse software adicional y que se usan tus credenciales de ELO Community.'
+    'This runtime is already the newest release of its branch. Nothing to update.'='Este runtime ya es la última versión de su rama. No hay nada que actualizar.'
+    'No backup from this session exists for this runtime. Restore manually from a backup ZIP using the commands in the technical report.'='No existe una copia de esta sesión para este runtime. Restaura manualmente desde un ZIP de copia con los comandos del informe técnico.'
+}
+function Add-EloSpanish {
+    param($Item)
+    if ($Item -isnot [hashtable] -or -not $Item.ContainsKey('en') -or $Item.ContainsKey('es')) { return $Item }
+    $en=[string]$Item.en
+    if ($script:EloSpanishStatic.ContainsKey($en)) { $Item.es=$script:EloSpanishStatic[$en]; return $Item }
+    if ($en -cmatch '^These services use the runtime and will be STOPPED before the replacement and started again afterwards: (.+)\. ELO is unavailable meanwhile\. Confirming accepts this\.$') { $Item.es='Estos servicios usan el runtime y se DETENDRÁN antes de la sustitución y se volverán a arrancar después: '+$Matches[1]+'. ELO no está disponible mientras tanto. Al confirmar aceptas esto.'; return $Item }
+    if ($en -cmatch '^The restore requires STOPPING the ELO services \(Tomcat\) that use this runtime: (.+)\. ELO is unavailable while the runtime is swapped; they are started again afterwards\. Confirming accepts this\.$') { $Item.es='La restauración exige DETENER los servicios de ELO (Tomcat) que usan este runtime: '+$Matches[1]+'. ELO no está disponible mientras se cambia el runtime; después se vuelven a arrancar. Al confirmar aceptas esto.'; return $Item }
+    return $Item
+}
 function ConvertTo-EloErrorResponse {
     param([Exception]$Exception)
     $status=500; $code='operation_failed'; $cursor=$Exception
@@ -2091,7 +2230,12 @@ function ConvertTo-EloErrorResponse {
     }
     $detail=''; if ($cursor -and $cursor.Data.Contains('Detail')) { $detail=' ['+[string]$cursor.Data['Detail']+']' }
     switch ($code) {
-        'community_failed' { $warnings+=@{en="The community helper failed.$detail Check the backend window for details; credentials are never shown.";de="Der Community-Helfer ist fehlgeschlagen.$detail Details im Backend-Fenster pruefen; Zugangsdaten werden nie angezeigt."} }
+        'community_failed' {
+            $hint=Get-EloCommunityFailureHint ([string]$cursor.Data['Detail'])
+            if ($hint) { $warnings+=$hint }
+            else { $warnings+=@{en="The community helper failed.$detail Check the backend window for details; credentials are never shown.";de="Der Community-Helfer ist fehlgeschlagen.$detail Details im Backend-Fenster pruefen; Zugangsdaten werden nie angezeigt."} }
+        }
+        'community_run_missing' { $warnings+=@{en='That run folder no longer exists. Run the analysis again.';de='Dieser Lauf-Ordner existiert nicht mehr. Analyse erneut ausfuehren.';es='Esa carpeta de ejecucion ya no existe. Vuelve a ejecutar el analisis.'} }
         'update_not_needed' { $warnings+=@{en='This runtime is already the newest release of its branch. Nothing to update.';de='Diese Runtime ist bereits die neueste Version ihres Branches. Nichts zu aktualisieren.'} }
         'no_backup_for_target' { $warnings+=@{en='No backup from this session exists for this runtime. Restore manually from a backup ZIP using the commands in the technical report.';de='Fuer diese Runtime existiert in dieser Sitzung kein Backup. Manuell aus einem Backup-ZIP wiederherstellen; Befehle stehen im technischen Bericht.'} }
         'restore_failed_no_change' { $warnings+=@{en="The restore was rejected before the runtime was swapped.$detail The current runtime is unchanged.";de="Die Wiederherstellung wurde abgelehnt, bevor die Runtime getauscht wurde.$detail Die aktuelle Runtime ist unveraendert."} }
@@ -2100,7 +2244,7 @@ function ConvertTo-EloErrorResponse {
         'update_failed_rolled_back' { $warnings+=@{en="The new runtime failed validation.$detail The original runtime was restored and verified; the failed runtime and the backup ZIP were kept.";de="Die neue Runtime bestand die Pruefung nicht.$detail Die urspruengliche Runtime wurde wiederhergestellt und geprueft; fehlgeschlagene Runtime und Backup-ZIP bleiben erhalten."} }
         'update_manual_recovery_required' { $warnings+=@{en="Automatic restore failed.$detail Further actions are locked. Restore manually from the backup ZIP using the commands in the technical report.";de="Automatische Wiederherstellung fehlgeschlagen.$detail Weitere Aktionen sind gesperrt. Manuell aus dem Backup-ZIP wiederherstellen; Befehle stehen im technischen Bericht."} }
     }
-    return @{Status=$status;Body=@{error=$code;warnings=@($warnings)}}
+    return @{Status=$status;Body=@{error=$code;warnings=@($warnings | ForEach-Object { Add-EloSpanish $_ })}}
 }
 function New-EloLoopbackListener {
     param([ValidateRange(0,65535)][int]$Port=0)
@@ -2376,6 +2520,16 @@ ol.manual li{margin:.35rem 0}
 .community select[size]{width:100%;font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:.3rem;margin-top:.35rem}
 .community select:not([size]){display:block;width:100%;font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:.5rem;margin-top:.35rem}
 .community input[type=number]{display:block;width:100%;font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:.55rem .7rem;margin-top:.35rem}
+.masked{-webkit-text-security:disc;text-security:disc}
+.models>summary{font-weight:600}
+.articles{display:grid;gap:10px;margin:10px 0}
+.article{border:1.5px solid var(--line);border-radius:13px;padding:12px 14px;background:var(--surface)}
+.article h4{margin:0 0 4px;display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:.98rem}
+.article p{margin:.3rem 0}
+.article .p{color:var(--muted);font-size:.8125rem;overflow-wrap:anywhere}
+.article .worth{font-weight:700}
+.article textarea{display:block;width:100%;min-height:90px;font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:.5rem .7rem;margin:.35rem 0}
+.article .refine{border-top:1px dashed var(--line);margin-top:8px;padding-top:8px}
 .notice{border:1.5px solid var(--warn);background:var(--warn-soft);border-radius:12px;padding:10px 14px;margin:10px 0}
 .notice ul{margin:.35rem 0 0 1.1rem;padding:0}
 .banner-inline{color:var(--bad);font-weight:600;white-space:pre-wrap;margin:6px 0}
@@ -2417,7 +2571,7 @@ pre.cmd .c-str{color:#fca5a5}
 <div class="logo"><svg class="i"><use href="#i-cpu"/></svg></div>
 <div><h1>ELO Patch Tools</h1><p class="sub" data-i18n="tagline"></p></div>
 <button id="settingsBtn" class="btn ghost settings-btn" type="button" aria-expanded="false" aria-controls="communityBox"><svg class="i"><use href="#i-gear"/></svg><span data-i18n="settings"></span></button>
-<label class="lang"><svg class="i"><use href="#i-globe"/></svg><span data-i18n="language"></span> <select id="language"><option value="en">English</option><option value="de">Deutsch</option></select></label>
+<label class="lang"><svg class="i"><use href="#i-globe"/></svg><span data-i18n="language"></span> <select id="language"><option value="en">English</option><option value="de">Deutsch</option><option value="es">Español</option></select></label>
 </header>
 <nav aria-label="Steps"><ol class="stepper" id="stepper">
 <li><button class="step" id="nav1" type="button" data-state="current"><span class="dot"><svg class="i"><use href="#i-search"/></svg></span><span class="lbl" data-i18n="step1"></span></button></li>
@@ -2441,12 +2595,15 @@ pre.cmd .c-str{color:#fca5a5}
 <fieldset class="grid2"><legend data-i18n="communityAccount"></legend>
 <label class="field"><span data-i18n="communityUser"></span><input id="cUser" type="text" maxlength="300" autocomplete="off" spellcheck="false"></label>
 <label class="field"><span data-i18n="communityPassword"></span><input id="cPass" type="password" maxlength="300" autocomplete="new-password"></label>
+<div class="field"><button id="cTest" class="btn" type="button"><svg class="i"><use href="#i-check"/></svg><span data-i18n="communityTest"></span></button><p id="cTestResult" class="muted" role="status"></p></div>
 </fieldset>
 <fieldset class="grid2"><legend data-i18n="communityAi"></legend>
 <label class="field"><span data-i18n="aiProvider"></span><select id="aiProvider"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="ollama">Ollama (local)</option></select></label>
-<label class="field"><span data-i18n="aiKey"></span><input id="aiKey" type="password" maxlength="400" autocomplete="new-password"></label>
+<label class="field"><span data-i18n="aiKey"></span><input id="aiKey" class="masked" type="text" maxlength="400" autocomplete="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-form-type="other"></label>
 <label class="field"><span data-i18n="aiBase"></span><input id="aiBase" type="text" maxlength="200" autocomplete="off" spellcheck="false" placeholder="https://api.openai.com/v1"></label>
-<div class="field"><span data-i18n="aiModel"></span><select id="aiModel" size="8" aria-label="Model"></select><div class="row"><button id="aiLoad" class="btn" type="button"><svg class="i"><use href="#i-list"/></svg><span data-i18n="aiLoad"></span></button><span id="aiModelNote" class="muted"></span></div></div>
+<div class="field"><span data-i18n="aiModel"></span>
+<details id="aiModelsBox" class="models"><summary id="aiModelSummary"></summary><div class="body"><select id="aiModel" size="8" aria-label="Model"></select></div></details>
+<div class="row"><button id="aiLoad" class="btn" type="button"><svg class="i"><use href="#i-list"/></svg><span data-i18n="aiLoad"></span></button><span id="aiModelNote" class="muted"></span></div></div>
 </fieldset>
 <fieldset class="grid2"><legend data-i18n="communityScope"></legend>
 <label class="field"><span data-i18n="cSince"></span><select id="cSince"><option value="30d">30</option><option value="90d">90</option><option value="180d">180</option><option value="1y">365</option><option value="3y">3 y</option></select></label>
@@ -2455,7 +2612,10 @@ pre.cmd .c-str{color:#fca5a5}
 <label class="confirm"><input id="cConsent" type="checkbox"><span data-i18n="communityConsent"></span></label>
 <div class="row"><button id="communityRun" class="btn primary" type="button" disabled><svg class="i"><use href="#i-play"/></svg><span data-i18n="communityRun"></span></button><button id="communityCancel" class="btn" type="button" hidden><svg class="i"><use href="#i-stop"/></svg><span data-i18n="cancel"></span></button></div>
 <pre id="communityLog" class="log" aria-live="polite"></pre>
-<div id="communityDrafts" class="cards"></div>
+<h3 id="communityArticlesTitle" hidden data-i18n="communityArticlesTitle"></h3>
+<div id="communityArticles" class="articles"></div>
+<div class="row"><button id="communityValidate" class="btn" type="button" hidden><svg class="i"><use href="#i-check"/></svg><span data-i18n="communityValidate"></span></button></div>
+<pre id="communityValidation" class="log"></pre>
 <pre id="communityNext" class="cmd" aria-label="PowerShell" hidden></pre>
 
 <div class="row"><button id="settingsClose" class="btn ghost" type="button"><svg class="i"><use href="#i-back"/></svg><span data-i18n="close"></span></button></div>
@@ -2578,7 +2738,7 @@ const messages = {
  'Stop only the affected service during the approved window, apply the chosen change using the vendor procedure, then restart. Check service health and effective JVM options/version. If checks fail, stop and restore the saved configuration/runtime.',
  'Rescan and document the outcome. Keep the backup until validated. Contact ELO support if paths, service ownership or compatibility are uncertain.'],
  manualCommandsTitle:'PowerShell commands (administrator)',manualCommands:'# Run in an ADMINISTRATOR PowerShell. Adjust the paths and service names to your scan result.\n\n# 1) Find the runtime, its version and the services that use it\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nGet-Content \'C:\\ELO\\java\\release\' | Select-String \'IMPLEMENTOR|JAVA_RUNTIME_VERSION|OS_ARCH\'\nGet-CimInstance Win32_Service | Where-Object { $_.PathName -match \'ELO\' } | Select-Object Name, State, PathName\n[Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\')\n\n# 2) Back up the runtime (ZIP) before changing anything\nCompress-Archive -LiteralPath \'C:\\ELO\\java\' -DestinationPath \'C:\\ELO\\java-backup.zip\'\n\n# 3) Temporary mitigation (machine-wide): KEEP the old value and append, never overwrite\n$old = [Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\'); $old\n[Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', (($old + \' -XX:-UseBASE64Intrinsics\').Trim()), \'Machine\')\n# Undo: [Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', $old, \'Machine\')   (use $null if it was empty)\n# Services only see the change after they are restarted.\n\n# 4) Update the runtime by hand (download the newest release of the SAME vendor and branch first)\n(Get-FileHash \'C:\\Downloads\\new-java.zip\' -Algorithm SHA256).Hash        # compare with the vendor\'s published SHA256\nStop-Service \'ELO-SRV01-1\' -Force                                        # every service that uses this Java\nRename-Item \'C:\\ELO\\java\' \'java.old\'\nExpand-Archive -LiteralPath \'C:\\Downloads\\new-java.zip\' -DestinationPath \'C:\\ELO\\java-new\'\nMove-Item (Get-ChildItem \'C:\\ELO\\java-new\' -Directory | Select-Object -First 1).FullName \'C:\\ELO\\java\'\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nStart-Service \'ELO-SRV01-1\'\n\n# 5) If something fails: stop the services, put the old runtime back, start the services\nStop-Service \'ELO-SRV01-1\' -Force\nRename-Item \'C:\\ELO\\java\' \'java.failed\'; Rename-Item \'C:\\ELO\\java.old\' \'java\'\nStart-Service \'ELO-SRV01-1\'\n# Or restore from the ZIP: Expand-Archive \'C:\\ELO\\java-backup.zip\' -DestinationPath \'C:\\ELO\\restore\'; then move the java folder back',
- backupsTitle:'Existing backups',backupsText:'Backups made by this tool were found on this server. Pick one to bring that Java version back; the runtime that is installed now is kept next to it.',behindTitle:'Without this tool: the same steps by hand',behindIntro:'These are the commands this tool runs behind the scenes, step by step, for the selected runtime. Run them in an ADMINISTRATOR PowerShell if you prefer to fix it without the tool. Replace the text in <angle brackets>.',behindUpdateTitle:'Update Java runtime (what the tool does)',behindMitigateTitle:'Temporary mitigation (what the tool does)',settings:'Settings',close:'Close',communityTitle:'Settings: ELO Community + AI (optional)',communityIntro:'Reads the latest security articles of the ELO Community, rates them (high / medium / low) with an AI and drafts catalog entries with a simulation. It only writes DRAFTS to the quarantine folder; nothing is installed or changed on this server.',communityNeedsTitle:'What this needs (nothing is installed until you confirm)',communityNeed1:'Your ELO Community account (user name or e-mail + password) to sign in at community.elo.com. Typed here, used for this run only, never stored.',communityNeed2:'An AI: an API key (OpenAI / Anthropic) or a local Ollama. Only the article text is sent to the provider.',communityNeed3:'Extra software: Node.js 18+, Google Chrome and the npm package playwright-core (about 14 MB, installed into tools/community only after you confirm).',communityAccount:'ELO Community account',communityUser:'User name or e-mail',communityPassword:'Password',communityAi:'AI provider',aiProvider:'Provider',aiKey:'API key',aiBase:'Base URL (optional)',aiModel:'Model',aiLoad:'Load available models',communityScope:'Which articles',cSince:'Newer than (days)',cMax:'At most (articles)',communityConsent:'I confirm that extra software may be installed and that my ELO Community credentials and the AI key are used for this run.',communityRun:'Analyze latest security articles',communitySetup:'Install the helper (playwright-core, ~14 MB)',communityHelperMissing:'The helper folder tools/community was not found next to this tool, so this feature is unavailable. The patch tool itself is not affected.',communityNodeMissing:'Node.js 18+ was not found. Install it from nodejs.org to use this feature.',communityNeedsSetup:'Helper not installed yet: confirm below and press Install.',communityReady:'Ready.',communitySaved:'Saved in secrets.local.env or the environment: {list}. Leave the field empty to use it.',communityModels:'{n} models loaded',communityModelNone:'Load the models first.',communityModelMissing:'Your configured model {name} is not offered by this account; {pick} is selected instead. Pick another one if you prefer.',communityDraftsTitle:'Drafts',communityOutDir:'Drafts saved in the quarantine folder:',communityJobRunning:'Running...',communityJobDone:'Finished.',communityJobFailed:'Failed; see the log.',communityJobCancelled:'Cancelled.',communitySolution:'solution reported',communitySim:'simulation',communityDetects:'detects',communityIssues:'open issues',yes:'yes',no:'no',communityError:'The community helper could not do that.',
+ backupsTitle:'Existing backups',backupsText:'Backups made by this tool were found on this server. Pick one to bring that Java version back; the runtime that is installed now is kept next to it.',behindTitle:'Without this tool: the same steps by hand',behindIntro:'These are the commands this tool runs behind the scenes, step by step, for the selected runtime. Run them in an ADMINISTRATOR PowerShell if you prefer to fix it without the tool. Replace the text in <angle brackets>.',behindUpdateTitle:'Update Java runtime (what the tool does)',behindMitigateTitle:'Temporary mitigation (what the tool does)',settings:'Settings',close:'Close',communityTitle:'Settings: ELO Community + AI (optional)',communityIntro:'Reads the latest security articles of the ELO Community, rates them (high / medium / low) with an AI and drafts catalog entries with a simulation. It only writes DRAFTS to the quarantine folder; nothing is installed or changed on this server.',communityNeedsTitle:'What this needs (nothing is installed until you confirm)',communityNeed1:'Your ELO Community account (user name or e-mail + password) to sign in at community.elo.com. Typed here, used for this run only, never stored.',communityNeed2:'An AI: an API key (OpenAI / Anthropic) or a local Ollama. Only the article text is sent to the provider.',communityNeed3:'Extra software: Node.js 18+, Google Chrome and the npm package playwright-core (about 14 MB, installed into tools/community only after you confirm).',communityAccount:'ELO Community account',communityUser:'User name or e-mail',communityPassword:'Password',communityAi:'AI provider',aiProvider:'Provider',aiKey:'API key',aiBase:'Base URL (optional)',aiModel:'Model',aiLoad:'Load available models',communityScope:'Which articles',cSince:'Newer than (days)',cMax:'At most (articles)',communityConsent:'I confirm that extra software may be installed and that my ELO Community credentials and the AI key are used for this run.',communityRun:'Analyze latest security articles',communitySetup:'Install the helper (playwright-core, ~14 MB)',communityHelperMissing:'The helper folder tools/community was not found next to this tool, so this feature is unavailable. The patch tool itself is not affected.',communityNodeMissing:'Node.js 18+ was not found. Install it from nodejs.org to use this feature.',communityNeedsSetup:'Helper not installed yet: confirm below and press Install.',communityReady:'Ready.',communitySaved:'Saved in secrets.local.env or the environment: {list}. Leave the field empty to use it.',communityModels:'{n} models loaded',communityModelNone:'Load the models first.',communityTest:'Test ELO Community access',communityTesting:'Signing in...',communityAccessOk:'Signed in. {n} articles are visible.',communityAccessFail:'The sign-in did not work.',communityArticlesTitle:'Articles found',communityScript:'A script is worthwhile',communitySolutionsTitle:'Solutions in the article',communityNoSolution:'none reported',sol_update:'update',sol_mitigation:'mitigation',sol_workaround:'workaround',sol_none:'none',communityArticleError:'Could not analyze',communityAi401:'The AI rejected the API key (401). Check the key in Settings, or empty the field to use the saved one.',communityRefine:'Improve with a solution or research',communityRefineHint:'Paste a solution text, notes or links; the AI integrates them into the script draft',communityResearch:'Let the AI research solutions on the internet (OpenAI / Anthropic only)',communityRefineRun:'Re-analyze this article',communityRefineNeeds:'Paste a solution text or tick the research box.',communityValidate:'Check the drafts (validate + simulate)',communitySimPassed:'simulation passed',communitySimFailed:'no simulation / not detected',communityInvalid:'The draft is not valid:',communityWhySeverity:'Why this level',communityDraftId:'Draft',communityAfterReview:'After your review set "status": "active" and install:',communityStatus_drafted:'draft',communityStatus_not_a_report:'not a report',communityStatus_rejected:'rejected',communityStatus_error:'error',communityModelMissing:'Your configured model {name} is not offered by this account; {pick} is selected instead. Pick another one if you prefer.',communityDraftsTitle:'Drafts',communityOutDir:'Drafts saved in the quarantine folder:',communityJobRunning:'Running...',communityJobDone:'Finished.',communityJobFailed:'Failed; see the log.',communityJobCancelled:'Cancelled.',communitySolution:'solution reported',communitySim:'simulation',communityDetects:'detects',communityIssues:'open issues',yes:'yes',no:'no',communityError:'The community helper could not do that.',
 mitigateHint:'This runtime is not classified as vulnerable (for example another vendor than the catalog covers). The temporary mitigation is still available: the option is tested with this exact java.exe first and nothing is written if that fails.',severity_high:'High',severity_medium:'Medium',severity_low:'Low',vulnTitle:'Vulnerability found: CVE-2026-114938 (Java4Shell)',vulnText:'{n} runtime(s) are before the fixed release: {list}. The JIT BASE64 intrinsics flaw lets this Java produce wrong results; the vendor fixed it in a newer release.',vulnFixLabel:'Solution:',vulnFix:'update Java to the current release of the same branch (step 3, Update Java runtime). The temporary mitigation only reduces the risk until you update.',terminalTitle:'Run it from the terminal (administrator PowerShell)',terminalCmdsText:'# Update Java to the current release (recommended)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Temporary mitigation only (adds -XX:-UseBASE64Intrinsics; restart the ELO services afterwards)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Check the result (--target is the position in the scan list, starting at 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'contains a vulnerable Java',
 restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: this version is before the vendor fix for a catalog vulnerability',backupRisk_patched:'Listed as fixed for every catalog vulnerability',backupRisk_unknown:'Security status unknown: treat as potentially vulnerable',backupStop:'Restoring stops the ELO Tomcat services that use this Java (ELO is unavailable meanwhile) and starts them again afterwards.',
  exportHeading:'Activity log',exportJson:'Export JSON results',exportLog:'Export activity log',
@@ -2639,7 +2799,7 @@ restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: this versi
  'Stoppen Sie nur den betroffenen Dienst im genehmigten Wartungsfenster, führen Sie die gewählte Änderung nach Herstellerverfahren aus und starten Sie ihn erneut. Prüfen Sie Dienstzustand und wirksame JVM-Optionen beziehungsweise Version. Bei Fehlern stoppen und gesicherte Konfiguration oder Laufzeit wiederherstellen.',
  'Scannen Sie erneut und dokumentieren Sie das Ergebnis. Bewahren Sie die Sicherung bis zur erfolgreichen Prüfung auf. Bei unklaren Pfaden, Dienstzuordnung oder Kompatibilität wenden Sie sich an den ELO-Support.'],
  manualCommandsTitle:'PowerShell-Befehle (Administrator)',manualCommands:'# In einer ADMINISTRATOR-PowerShell ausfuehren. Pfade und Dienstnamen an das Scan-Ergebnis anpassen.\n\n# 1) Runtime, Version und die Dienste finden, die sie verwenden\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nGet-Content \'C:\\ELO\\java\\release\' | Select-String \'IMPLEMENTOR|JAVA_RUNTIME_VERSION|OS_ARCH\'\nGet-CimInstance Win32_Service | Where-Object { $_.PathName -match \'ELO\' } | Select-Object Name, State, PathName\n[Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\')\n\n# 2) Runtime vor jeder Aenderung als ZIP sichern\nCompress-Archive -LiteralPath \'C:\\ELO\\java\' -DestinationPath \'C:\\ELO\\java-backup.zip\'\n\n# 3) Vorlaeufige Risikominderung (systemweit): alten Wert BEHALTEN und anhaengen, nie ueberschreiben\n$old = [Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\'); $old\n[Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', (($old + \' -XX:-UseBASE64Intrinsics\').Trim()), \'Machine\')\n# Rueckgaengig: [Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', $old, \'Machine\')   ($null, falls leer)\n# Dienste sehen die Aenderung erst nach einem Neustart.\n\n# 4) Runtime manuell aktualisieren (zuerst die neueste Version DESSELBEN Herstellers und Branches laden)\n(Get-FileHash \'C:\\Downloads\\new-java.zip\' -Algorithm SHA256).Hash        # mit der veroeffentlichten SHA256 des Herstellers vergleichen\nStop-Service \'ELO-SRV01-1\' -Force                                        # jeden Dienst, der dieses Java verwendet\nRename-Item \'C:\\ELO\\java\' \'java.old\'\nExpand-Archive -LiteralPath \'C:\\Downloads\\new-java.zip\' -DestinationPath \'C:\\ELO\\java-new\'\nMove-Item (Get-ChildItem \'C:\\ELO\\java-new\' -Directory | Select-Object -First 1).FullName \'C:\\ELO\\java\'\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nStart-Service \'ELO-SRV01-1\'\n\n# 5) Bei Fehlern: Dienste stoppen, alte Runtime zurueckstellen, Dienste starten\nStop-Service \'ELO-SRV01-1\' -Force\nRename-Item \'C:\\ELO\\java\' \'java.failed\'; Rename-Item \'C:\\ELO\\java.old\' \'java\'\nStart-Service \'ELO-SRV01-1\'\n# Oder aus dem ZIP: Expand-Archive \'C:\\ELO\\java-backup.zip\' -DestinationPath \'C:\\ELO\\restore\'; dann den java-Ordner zurueckverschieben',
- backupsTitle:'Vorhandene Backups',backupsText:'Auf diesem Server wurden Backups dieses Werkzeugs gefunden. Wählen Sie eines, um diese Java-Version zurückzuholen; die aktuell installierte Runtime bleibt daneben erhalten.',behindTitle:'Ohne dieses Werkzeug: dieselben Schritte von Hand',behindIntro:'Das sind die Befehle, die dieses Werkzeug im Hintergrund Schritt für Schritt für die gewählte Runtime ausführt. Führen Sie sie in einer ADMINISTRATOR-PowerShell aus, wenn Sie das Problem ohne das Werkzeug beheben möchten. Text in <spitzen Klammern> ersetzen.',behindUpdateTitle:'Java-Runtime aktualisieren (was das Werkzeug tut)',behindMitigateTitle:'Vorläufige Risikominderung (was das Werkzeug tut)',settings:'Einstellungen',close:'Schließen',communityTitle:'Einstellungen: ELO Community + KI (optional)',communityIntro:'Liest die neuesten Sicherheitsartikel der ELO Community, bewertet sie (hoch / mittel / niedrig) mit einer KI und entwirft Katalogeinträge mit Simulation. Es werden nur ENTWÜRFE im Quarantäne-Ordner geschrieben; auf diesem Server wird nichts installiert oder geändert.',communityNeedsTitle:'Was dafür nötig ist (nichts wird installiert, bevor Sie bestätigen)',communityNeed1:'Ihr ELO-Community-Konto (Benutzername oder E-Mail + Passwort) zur Anmeldung bei community.elo.com. Hier eingegeben, nur für diesen Lauf verwendet, nie gespeichert.',communityNeed2:'Eine KI: ein API-Schlüssel (OpenAI / Anthropic) oder ein lokales Ollama. Nur der Artikeltext wird an den Anbieter gesendet.',communityNeed3:'Zusätzliche Software: Node.js 18+, Google Chrome und das npm-Paket playwright-core (etwa 14 MB, wird erst nach Bestätigung in tools/community installiert).',communityAccount:'ELO-Community-Konto',communityUser:'Benutzername oder E-Mail',communityPassword:'Passwort',communityAi:'KI-Anbieter',aiProvider:'Anbieter',aiKey:'API-Schlüssel',aiBase:'Basis-URL (optional)',aiModel:'Modell',aiLoad:'Verfügbare Modelle laden',communityScope:'Welche Artikel',cSince:'Neuer als (Tage)',cMax:'Höchstens (Artikel)',communityConsent:'Ich bestätige, dass zusätzliche Software installiert werden darf und meine ELO-Community-Zugangsdaten sowie der KI-Schlüssel für diesen Lauf verwendet werden.',communityRun:'Neueste Sicherheitsartikel analysieren',communitySetup:'Helfer installieren (playwright-core, ~14 MB)',communityHelperMissing:'Der Ordner tools/community wurde neben diesem Werkzeug nicht gefunden; die Funktion ist nicht verfügbar. Das Patch-Werkzeug selbst ist nicht betroffen.',communityNodeMissing:'Node.js 18+ wurde nicht gefunden. Für diese Funktion von nodejs.org installieren.',communityNeedsSetup:'Helfer noch nicht installiert: unten bestätigen und Installieren drücken.',communityReady:'Bereit.',communitySaved:'In secrets.local.env oder der Umgebung gespeichert: {list}. Feld leer lassen, um es zu verwenden.',communityModels:'{n} Modelle geladen',communityModelNone:'Zuerst die Modelle laden.',communityModelMissing:'Das konfigurierte Modell {name} wird von diesem Konto nicht angeboten; stattdessen ist {pick} gewählt. Wählen Sie bei Bedarf ein anderes.',communityDraftsTitle:'Entwürfe',communityOutDir:'Entwürfe im Quarantäne-Ordner gespeichert:',communityJobRunning:'Läuft...',communityJobDone:'Fertig.',communityJobFailed:'Fehlgeschlagen; siehe Protokoll.',communityJobCancelled:'Abgebrochen.',communitySolution:'Lösung berichtet',communitySim:'Simulation',communityDetects:'erkennt',communityIssues:'offene Punkte',yes:'ja',no:'nein',communityError:'Der Community-Helfer konnte das nicht ausführen.',
+ backupsTitle:'Vorhandene Backups',backupsText:'Auf diesem Server wurden Backups dieses Werkzeugs gefunden. Wählen Sie eines, um diese Java-Version zurückzuholen; die aktuell installierte Runtime bleibt daneben erhalten.',behindTitle:'Ohne dieses Werkzeug: dieselben Schritte von Hand',behindIntro:'Das sind die Befehle, die dieses Werkzeug im Hintergrund Schritt für Schritt für die gewählte Runtime ausführt. Führen Sie sie in einer ADMINISTRATOR-PowerShell aus, wenn Sie das Problem ohne das Werkzeug beheben möchten. Text in <spitzen Klammern> ersetzen.',behindUpdateTitle:'Java-Runtime aktualisieren (was das Werkzeug tut)',behindMitigateTitle:'Vorläufige Risikominderung (was das Werkzeug tut)',settings:'Einstellungen',close:'Schließen',communityTitle:'Einstellungen: ELO Community + KI (optional)',communityIntro:'Liest die neuesten Sicherheitsartikel der ELO Community, bewertet sie (hoch / mittel / niedrig) mit einer KI und entwirft Katalogeinträge mit Simulation. Es werden nur ENTWÜRFE im Quarantäne-Ordner geschrieben; auf diesem Server wird nichts installiert oder geändert.',communityNeedsTitle:'Was dafür nötig ist (nichts wird installiert, bevor Sie bestätigen)',communityNeed1:'Ihr ELO-Community-Konto (Benutzername oder E-Mail + Passwort) zur Anmeldung bei community.elo.com. Hier eingegeben, nur für diesen Lauf verwendet, nie gespeichert.',communityNeed2:'Eine KI: ein API-Schlüssel (OpenAI / Anthropic) oder ein lokales Ollama. Nur der Artikeltext wird an den Anbieter gesendet.',communityNeed3:'Zusätzliche Software: Node.js 18+, Google Chrome und das npm-Paket playwright-core (etwa 14 MB, wird erst nach Bestätigung in tools/community installiert).',communityAccount:'ELO-Community-Konto',communityUser:'Benutzername oder E-Mail',communityPassword:'Passwort',communityAi:'KI-Anbieter',aiProvider:'Anbieter',aiKey:'API-Schlüssel',aiBase:'Basis-URL (optional)',aiModel:'Modell',aiLoad:'Verfügbare Modelle laden',communityScope:'Welche Artikel',cSince:'Neuer als (Tage)',cMax:'Höchstens (Artikel)',communityConsent:'Ich bestätige, dass zusätzliche Software installiert werden darf und meine ELO-Community-Zugangsdaten sowie der KI-Schlüssel für diesen Lauf verwendet werden.',communityRun:'Neueste Sicherheitsartikel analysieren',communitySetup:'Helfer installieren (playwright-core, ~14 MB)',communityHelperMissing:'Der Ordner tools/community wurde neben diesem Werkzeug nicht gefunden; die Funktion ist nicht verfügbar. Das Patch-Werkzeug selbst ist nicht betroffen.',communityNodeMissing:'Node.js 18+ wurde nicht gefunden. Für diese Funktion von nodejs.org installieren.',communityNeedsSetup:'Helfer noch nicht installiert: unten bestätigen und Installieren drücken.',communityReady:'Bereit.',communitySaved:'In secrets.local.env oder der Umgebung gespeichert: {list}. Feld leer lassen, um es zu verwenden.',communityModels:'{n} Modelle geladen',communityModelNone:'Zuerst die Modelle laden.',communityTest:'ELO-Community-Zugang testen',communityTesting:'Anmeldung läuft...',communityAccessOk:'Angemeldet. {n} Artikel sichtbar.',communityAccessFail:'Die Anmeldung hat nicht funktioniert.',communityArticlesTitle:'Gefundene Artikel',communityScript:'Ein Skript lohnt sich',communitySolutionsTitle:'Lösungen im Artikel',communityNoSolution:'keine berichtet',sol_update:'Update',sol_mitigation:'Risikominderung',sol_workaround:'Workaround',sol_none:'keine',communityArticleError:'Konnte nicht analysiert werden',communityAi401:'Die KI hat den API-Schlüssel abgelehnt (401). Schlüssel in den Einstellungen prüfen oder das Feld leeren, um den gespeicherten zu verwenden.',communityRefine:'Mit Lösung oder Recherche verbessern',communityRefineHint:'Lösungstext, Notizen oder Links einfügen; die KI übernimmt sie in den Skript-Entwurf',communityResearch:'KI im Internet nach Lösungen recherchieren lassen (nur OpenAI / Anthropic)',communityRefineRun:'Diesen Artikel neu analysieren',communityRefineNeeds:'Lösungstext einfügen oder Recherche ankreuzen.',communityValidate:'Entwürfe prüfen (validieren + simulieren)',communitySimPassed:'Simulation bestanden',communitySimFailed:'keine Simulation / nicht erkannt',communityInvalid:'Der Entwurf ist ungültig:',communityWhySeverity:'Warum diese Stufe',communityDraftId:'Entwurf',communityAfterReview:'Nach Ihrer Prüfung "status": "active" setzen und installieren:',communityStatus_drafted:'Entwurf',communityStatus_not_a_report:'kein Bericht',communityStatus_rejected:'abgelehnt',communityStatus_error:'Fehler',communityModelMissing:'Das konfigurierte Modell {name} wird von diesem Konto nicht angeboten; stattdessen ist {pick} gewählt. Wählen Sie bei Bedarf ein anderes.',communityDraftsTitle:'Entwürfe',communityOutDir:'Entwürfe im Quarantäne-Ordner gespeichert:',communityJobRunning:'Läuft...',communityJobDone:'Fertig.',communityJobFailed:'Fehlgeschlagen; siehe Protokoll.',communityJobCancelled:'Abgebrochen.',communitySolution:'Lösung berichtet',communitySim:'Simulation',communityDetects:'erkennt',communityIssues:'offene Punkte',yes:'ja',no:'nein',communityError:'Der Community-Helfer konnte das nicht ausführen.',
 mitigateHint:'Diese Runtime ist nicht als verwundbar eingestuft (z. B. anderer Hersteller als im Katalog). Die vorübergehende Risikominderung bleibt verfügbar: die Option wird zuerst mit genau dieser java.exe geprüft; schlägt das fehl, wird nichts geschrieben.',severity_high:'Hoch',severity_medium:'Mittel',severity_low:'Niedrig',vulnTitle:'Schwachstelle gefunden: CVE-2026-114938 (Java4Shell)',vulnText:'{n} Runtime(s) liegen vor der behobenen Version: {list}. Der Fehler in den JIT-BASE64-Intrinsics kann falsche Ergebnisse liefern; der Hersteller hat ihn in einer neueren Version behoben.',vulnFixLabel:'Loesung:',vulnFix:'Java auf die aktuelle Version desselben Branches aktualisieren (Schritt 3, Java-Runtime aktualisieren). Die vorlaeufige Risikominderung senkt das Risiko nur bis zum Update.',terminalTitle:'Im Terminal ausfuehren (Administrator-PowerShell)',terminalCmdsText:'# Java auf die aktuelle Version aktualisieren (empfohlen)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Nur vorlaeufige Risikominderung (haengt -XX:-UseBASE64Intrinsics an; danach die ELO-Dienste neu starten)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Ergebnis pruefen (--target ist die Position in der Scan-Liste, ab 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'enthaelt ein verwundbares Java',
 restoreShort:'Dieses Backup wiederherstellen',backupRisk_vulnerable:'Verwundbar: diese Version liegt vor dem Herstellerfix einer Katalog-Schwachstelle',backupRisk_patched:'Für alle Katalog-Schwachstellen als behoben aufgeführt',backupRisk_unknown:'Sicherheitsstatus unbekannt: als potenziell verwundbar behandeln',backupStop:'Die Wiederherstellung beendet die ELO-Tomcat-Dienste, die dieses Java verwenden (ELO ist solange nicht verfügbar), und startet sie danach wieder.',
  exportHeading:'Aktivitätsprotokoll',exportJson:'JSON-Ergebnisse exportieren',exportLog:'Aktivitätsprotokoll exportieren',
@@ -2670,6 +2830,67 @@ restoreShort:'Dieses Backup wiederherstellen',backupRisk_vulnerable:'Verwundbar:
  securityHeading:'Sicherheitsinformationen',securityHelp:'Offizielle Sicherheitshinweise und Prüfdatum werden vom Backend-Verantwortlichen bereitgestellt und geprüft. Diese Oberfläche prüft Format und offizielle Domain, nicht den aktuellen Inhalt oder die Anwendbarkeit. Links öffnen sich nur auf Anforderung; externe Ressourcen werden nicht geladen. Prüfen Sie Nachweise und Herstellersupport vor Änderungen.',
  resultNotice:'Während eines Scans, nach einem Abbruch oder Fehler können Ergebnisse unvollständig oder veraltet sein. Sie sind keine aktuelle, vollständige Bewertung.',
  verifiedDate:'Prüfdatum der Quellen (UTC)',noAdvisories:'Keine geprüften Sicherheitshinweise bereitgestellt. Daraus darf keine Unbedenklichkeit der Laufzeit abgeleitet werden.'
+ },
+ es: {
+ working:'Trabajando… preparar o aplicar el cambio puede tardar un minuto (descarga verificada, pruebas, copia de seguridad). Mantén esta página abierta.',language:'Idioma',tagline:'Revisión, actualización y recuperación de Java para servidores ELO',intro:'Detección local de solo lectura. Escanear o previsualizar no cambia nada. Mantén esta sesión abierta mientras se trabaja.',
+ step1:'Escaneo',step2:'Runtime',step3:'Acción',step4:'Confirmar',step5:'Informe',
+ step1Title:'Buscar runtimes de Java',step1Text:'Un escaneo de solo lectura busca Java en X:\\java\\bin y X:\\<carpeta>\\java\\bin (por ejemplo ELO\\java\\bin) en cada unidad (C: a Z:). No se cambia nada.',
+ step2Title:'Elegir un runtime',step2Text:'Selecciona el runtime de Java con el que quieres trabajar.',step3Title:'Elegir una acción',step4Title:'Revisar y confirmar',step5Title:'Informe y siguientes pasos',
+ continue:'Continuar',back:'Atrás',startOver:'Escanear de nuevo',advanced:'Avanzado: buscar en otra carpeta',evidence:'Evidencia técnica',
+ scanningNow:'Escaneando unidades',foundN:'Runtimes de Java encontrados: {n}.',foundNone:'No se encontró ningún runtime de Java. Abre «Avanzado» para buscar en otra carpeta y vuelve a escanear.',
+ updateDesc:'Instala la última versión de la misma rama y fabricante de Java. Incluye copia de seguridad verificada, prueba de Java y reversión automática.',
+ mitigateDesc:'Añade -XX:-UseBASE64Intrinsics al entorno de la máquina. Rápido y temporal; no es una actualización de Java.',
+ doneUpdate:'El runtime se actualizó y se verificó. Se conservaron el ZIP de la copia y el runtime anterior. Escanea de nuevo para confirmar la nueva versión.',
+ doneMitigation:'La mitigación se aplicó y se verificó para las JVM que arranquen después. Los procesos en ejecución siguen sin protección hasta que se reinicien.',
+ doneRestore:'El runtime anterior se restauró desde el ZIP de la copia y se verificó.',
+ restore:'Restaurar la versión anterior',restoreHint:'Revierte la actualización de esta sesión desde el ZIP de copia verificado; el runtime actualizado se conserva al lado.',
+ restoreBackup:'Restaurar desde la copia',confirmRestore:'He revisado la vista previa de la restauración y autorizo sustituir el runtime actual por la copia.',
+ reportText:'Descarga el informe técnico para tu equipo. Incluye las JVM detectadas, las acciones y los comandos de copia y restauración.',
+ updateNotNeeded:'Este runtime ya es la última versión de su rama. No hay nada que actualizar.',noBackup:'No existe una copia hecha en esta sesión para este runtime.',restoreFailed:'La restauración se rechazó antes de cambiar el runtime. El runtime actual no ha cambiado.',
+ technicalReport:'Descargar informe técnico HTML',scanHeading:'Detección',scan:'Iniciar escaneo de solo lectura',cancel:'Cancelar escaneo',results:'Seleccionar JVM para la vista previa',none:'No se encontraron JVM',
+ actionHeading:'Cambios independientes y opcionales',warning:'Elige un cambio. Actualizar puede afectar a la compatibilidad y al soporte del fabricante; la mitigación temporal no es una actualización del runtime. No se aplica nada antes de confirmar.',
+ mitigate:'Mitigación temporal',update:'Actualizar el runtime de Java',preview:'Vista previa del cambio',apply:'Aplicar el cambio confirmado',
+ confirmMitigation:'He revisado la vista previa de la mitigación, la copia y el plan de reversión y autorizo este cambio.',confirmUpdate:'He revisado la vista previa de la actualización, los riesgos de compatibilidad, la copia y el plan de reversión y autorizo esta actualización del runtime.',
+ noPreview:'Selecciona una JVM y previsualiza un cambio. Un nuevo escaneo, carpeta de búsqueda, selección o vista previa borra la confirmación.',
+ manualHeading:'Instrucciones manuales de parcheo',manualIntro:'Estas instrucciones no ejecutan comandos ni cambian el sistema. Sigue la guía de ELO y del fabricante del runtime para tu instalación exacta.',
+ manual:['Identifica el servicio ELO afectado y su runtime de Java real a partir del escaneo. Verifica la versión con los avisos del fabricante; un hallazgo potencial no es prueba de que sea explotable.',
+ 'Planifica una ventana de mantenimiento. Anota las opciones de JVM y la configuración del entorno existentes. Haz copia de la configuración del servicio y del runtime; verifica un procedimiento de reversión antes de cambiar nada.',
+ 'Mitigación temporal: en la configuración de JVM admitida del servicio afectado, añade -XX:-UseBASE64Intrinsics sin sustituir las opciones existentes ni los valores globales del entorno. Confirma que el runtime admite esta opción. No es una solución permanente.',
+ 'Actualización del runtime por separado: obtén un runtime parcheado y compatible, aprobado por el fabricante, de una fuente de confianza. Verifica integridad, arquitectura y soporte de ELO. No sustituyas un runtime en uso ni uses una descarga cualquiera.',
+ 'Detén solo el servicio afectado durante la ventana aprobada, aplica el cambio elegido con el procedimiento del fabricante y reinícialo. Comprueba el estado del servicio y las opciones/versión efectivas de la JVM. Si fallan las comprobaciones, detente y restaura la configuración/runtime guardados.',
+ 'Vuelve a escanear y documenta el resultado. Conserva la copia hasta validar. Contacta con el soporte de ELO si hay dudas sobre rutas, propiedad del servicio o compatibilidad.'],
+ manualCommandsTitle:'Comandos de PowerShell (administrador)',manualCommands:'# Ejecuta en una PowerShell de ADMINISTRADOR. Ajusta las rutas y los nombres de servicio al resultado del escaneo.\n\n# 1) Encuentra el runtime, su versión y los servicios que lo usan\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nGet-Content \'C:\\ELO\\java\\release\' | Select-String \'IMPLEMENTOR|JAVA_RUNTIME_VERSION|OS_ARCH\'\nGet-CimInstance Win32_Service | Where-Object { $_.PathName -match \'ELO\' } | Select-Object Name, State, PathName\n[Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\')\n\n# 2) Haz una copia (ZIP) del runtime antes de cambiar nada\nCompress-Archive -LiteralPath \'C:\\ELO\\java\' -DestinationPath \'C:\\ELO\\java-backup.zip\'\n\n# 3) Mitigación temporal (toda la máquina): CONSERVA el valor anterior y añade, nunca sobrescribas\n$old = [Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\'); $old\n[Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', (($old + \' -XX:-UseBASE64Intrinsics\').Trim()), \'Machine\')\n# Deshacer: [Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', $old, \'Machine\')   (usa $null si estaba vacío)\n# Los servicios solo ven el cambio después de reiniciarse.\n\n# 4) Actualiza el runtime a mano (descarga antes la última versión del MISMO fabricante y rama)\n(Get-FileHash \'C:\\Downloads\\new-java.zip\' -Algorithm SHA256).Hash        # compara con el SHA256 publicado por el fabricante\nStop-Service \'ELO-SRV01-1\' -Force                                        # cada servicio que use este Java\nRename-Item \'C:\\ELO\\java\' \'java.old\'\nExpand-Archive -LiteralPath \'C:\\Downloads\\new-java.zip\' -DestinationPath \'C:\\ELO\\java-new\'\nMove-Item (Get-ChildItem \'C:\\ELO\\java-new\' -Directory | Select-Object -First 1).FullName \'C:\\ELO\\java\'\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nStart-Service \'ELO-SRV01-1\'\n\n# 5) Si algo falla: detén los servicios, devuelve el runtime anterior y arranca los servicios\nStop-Service \'ELO-SRV01-1\' -Force\nRename-Item \'C:\\ELO\\java\' \'java.failed\'; Rename-Item \'C:\\ELO\\java.old\' \'java\'\nStart-Service \'ELO-SRV01-1\'\n# O restaura desde el ZIP: Expand-Archive \'C:\\ELO\\java-backup.zip\' -DestinationPath \'C:\\ELO\\restore\'; después mueve la carpeta java de vuelta',
+ backupsTitle:'Copias de seguridad existentes',backupsText:'Se encontraron en este servidor copias hechas por esta herramienta. Elige una para recuperar esa versión de Java; el runtime instalado ahora se conserva al lado.',behindTitle:'Sin esta herramienta: los mismos pasos a mano',behindIntro:'Son los comandos que esta herramienta ejecuta entre bastidores, paso a paso, para el runtime seleccionado. Ejecútalos en una PowerShell de ADMINISTRADOR si prefieres solucionarlo sin la herramienta. Sustituye el texto entre <corchetes angulares>.',behindUpdateTitle:'Actualizar el runtime de Java (lo que hace la herramienta)',behindMitigateTitle:'Mitigación temporal (lo que hace la herramienta)',settings:'Ajustes',close:'Cerrar',communityTitle:'Ajustes: ELO Community + IA (opcional)',communityIntro:'Lee los últimos artículos de seguridad de la ELO Community, los valora (alto / medio / bajo) con una IA y redacta entradas de catálogo con una simulación. Solo escribe BORRADORES en la carpeta de cuarentena; no se instala ni cambia nada en este servidor.',communityNeedsTitle:'Qué hace falta (no se instala nada hasta que confirmes)',communityNeed1:'Tu cuenta de ELO Community (usuario o correo + contraseña) para entrar en community.elo.com. Se escribe aquí, se usa solo en esta ejecución y nunca se guarda.',communityNeed2:'Una IA: una clave de API (OpenAI / Anthropic) o un Ollama local. Solo se envía el texto del artículo al proveedor.',communityNeed3:'Software adicional: Node.js 18+, Google Chrome y el paquete npm playwright-core (unos 14 MB, se instala en tools/community solo tras confirmar).',communityAccount:'Cuenta de ELO Community',communityUser:'Usuario o correo',communityPassword:'Contraseña',communityAi:'Proveedor de IA',aiProvider:'Proveedor',aiKey:'Clave de API',aiBase:'URL base (opcional)',aiModel:'Modelo',aiLoad:'Cargar los modelos disponibles',communityScope:'Qué artículos',cSince:'Más recientes que (días)',cMax:'Como máximo (artículos)',communityConsent:'Confirmo que puede instalarse software adicional y que se usan mis credenciales de ELO Community y la clave de la IA en esta ejecución.',communityRun:'Analizar los últimos artículos de seguridad',communitySetup:'Instalar el asistente (playwright-core, ~14 MB)',communityHelperMissing:'No se encontró la carpeta tools/community junto a esta herramienta, así que esta función no está disponible. La herramienta de parches no se ve afectada.',communityNodeMissing:'No se encontró Node.js 18+. Instálalo desde nodejs.org para usar esta función.',communityNeedsSetup:'El asistente aún no está instalado: confirma abajo y pulsa Instalar.',communityReady:'Listo.',communitySaved:'Guardado en secrets.local.env o en el entorno: {list}. Deja el campo vacío para usarlo.',communityModels:'{n} modelos cargados',communityModelNone:'Carga primero los modelos.',communityTest:'Probar el acceso a ELO Community',communityTesting:'Iniciando sesión...',communityAccessOk:'Sesión iniciada. Hay {n} artículos visibles.',communityAccessFail:'El inicio de sesión no funcionó.',communityArticlesTitle:'Artículos encontrados',communityScript:'Vale la pena un script',communitySolutionsTitle:'Soluciones en el artículo',communityNoSolution:'ninguna indicada',sol_update:'actualización',sol_mitigation:'mitigación',sol_workaround:'solución provisional',sol_none:'ninguna',communityArticleError:'No se pudo analizar',communityAi401:'La IA rechazó la clave de API (401). Revisa la clave en Ajustes o vacía el campo para usar la guardada.',communityRefine:'Mejorar con una solución o investigación',communityRefineHint:'Pega un texto de solución, notas o enlaces; la IA los integra en el borrador del script',communityResearch:'Dejar que la IA investigue soluciones en internet (solo OpenAI / Anthropic)',communityRefineRun:'Volver a analizar este artículo',communityRefineNeeds:'Pega un texto con la solución o marca la casilla de investigación.',communityValidate:'Comprobar los borradores (validar + simular)',communitySimPassed:'simulación superada',communitySimFailed:'sin simulación / no detectado',communityInvalid:'El borrador no es válido:',communityWhySeverity:'Por qué este nivel',communityDraftId:'Borrador',communityAfterReview:'Tras tu revisión pon "status": "active" e instala:',communityStatus_drafted:'borrador',communityStatus_not_a_report:'no es un informe',communityStatus_rejected:'rechazado',communityStatus_error:'error',communityModelMissing:'Tu modelo configurado {name} no lo ofrece esta cuenta; se selecciona {pick} en su lugar. Elige otro si lo prefieres.',communityDraftsTitle:'Borradores',communityOutDir:'Borradores guardados en la carpeta de cuarentena:',communityJobRunning:'En curso...',communityJobDone:'Terminado.',communityJobFailed:'Falló; consulta el registro.',communityJobCancelled:'Cancelado.',communitySolution:'solución indicada',communitySim:'simulación',communityDetects:'detecta',communityIssues:'puntos abiertos',yes:'sí',no:'no',communityError:'El asistente de la comunidad no pudo hacerlo.',
+ mitigateHint:'Este runtime no está clasificado como vulnerable (por ejemplo, otro fabricante que el que cubre el catálogo). La mitigación temporal sigue disponible: la opción se prueba antes con este java.exe exacto y no se escribe nada si falla.',severity_high:'Alta',severity_medium:'Media',severity_low:'Baja',vulnTitle:'Vulnerabilidad encontrada: CVE-2026-114938 (Java4Shell)',vulnText:'{n} runtime(s) son anteriores a la versión corregida: {list}. El fallo de los intrínsecos BASE64 del JIT puede hacer que este Java dé resultados erróneos; el fabricante lo corrigió en una versión posterior.',vulnFixLabel:'Solución:',vulnFix:'actualiza Java a la versión actual de la misma rama (paso 3, Actualizar el runtime de Java). La mitigación temporal solo reduce el riesgo hasta que actualices.',terminalTitle:'Ejecútalo desde el terminal (PowerShell de administrador)',terminalCmdsText:'# Actualizar Java a la versión actual (recomendado)\n.\\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Solo mitigación temporal (añade -XX:-UseBASE64Intrinsics; reinicia después los servicios ELO)\n.\\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Comprobar el resultado (--target es la posición en la lista del escaneo, empezando en 0)\n.\\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'contiene un Java vulnerable',
+ restoreShort:'Restaurar esta copia',backupRisk_vulnerable:'Vulnerable: esta versión es anterior a la corrección del fabricante para una vulnerabilidad del catálogo',backupRisk_patched:'Figura como corregida para todas las vulnerabilidades del catálogo',backupRisk_unknown:'Estado de seguridad desconocido: trátala como potencialmente vulnerable',backupStop:'Restaurar detiene los servicios Tomcat de ELO que usan este Java (ELO no está disponible mientras tanto) y los vuelve a arrancar después.',
+ exportHeading:'Registro de actividad',exportJson:'Exportar resultados JSON',exportLog:'Exportar registro de actividad',
+ idle:'Listo',scanning:'Escaneando',cancelling:'Cancelación solicitada; esperando al escáner',completed:'Escaneo completado',cancelled:'Escaneo cancelado; los resultados pueden estar incompletos',error:'La operación falló',unknown:'Desconocido',
+ vulnerable:'Potencialmente vulnerable',safe:'Sin vulnerabilidad detectada con las reglas actuales',mitigated:'Mitigación detectada',unsupported:'Runtime no compatible',
+ progress:'Progreso',indeterminate:'Progreso no disponible',path:'Ruta de instalación',version:'Versión del runtime',classification:'Valoración',
+ auth:'Falta el token de sesión o fue rechazado. Vuelve a abrir el enlace de sesión local.',network:'No se puede contactar con el servicio local. Comprueba que el BAT sigue en ejecución.',
+ invalid:'El servicio local devolvió una respuesta no válida.',failed:'La petición falló. Revisa el servicio local y reintenta.',expired:'La vista previa caducó o ya no coincide con el objetivo. Solicita una nueva vista previa.',
+ accessDenied:'Acceso denegado. Revisa la elevación y los permisos de archivos/registro sin eludir los controles de acceso. No se afirma ninguna protección.',
+ adminNeeded:'La mitigación requiere una sesión de administrador elevada. El escaneo de solo lectura no la necesita. No es un error del token de sesión.',
+ boundaryRejected:'El servicio local rechazó el origen de la petición. Vuelve a abrir el enlace de sesión local original; no eludas las comprobaciones de origen ni de host.',
+ updateRefused:'No se puede ofrecer la actualización del runtime para esta JVM. No se descargó ni cambió nada.',updateRejected:'La actualización se rechazó antes de sustituir el runtime. El runtime original no ha cambiado.',updateRolledBack:'El nuevo runtime no superó la validación. Se restauró y verificó el runtime original; se conservaron el runtime fallido y el ZIP de la copia.',updateManualRecovery:'La restauración automática falló. Hace falta recuperación manual desde el ZIP de la copia (consulta el informe técnico).',
+ rollbackFailed:'La reversión falló: hace falta recuperación manual.',manualRecovery:'Hace falta recuperación manual antes de cualquier otro cambio.',
+ recoveryGuidance:'CRÍTICO: JAVA_TOOL_OPTIONS puede seguir modificado. Las peticiones que podrían cambiar el estado están bloqueadas en esta página. Restaura el valor anterior exacto Y el tipo de registro guardados en la vista previa con un procedimiento aprobado del Editor del Registro, junto con tu administrador. Verifica manualmente antes de cerrar esta sesión e iniciar otra. Abrir una sesión nueva por sí solo no restaura el entorno. No se afirma protección de las JVM existentes.',
+ rolledBack:'La verificación falló. Se restauraron y releyeron el valor anterior exacto del entorno y el tipo de registro. No se afirma ninguna protección.',
+ probeFailed:'La verificación de la opción de JVM falló antes de cualquier cambio. No se afirma ninguna protección.',
+ updateUnavailable:'La actualización automática del runtime no está disponible: no se han verificado procedencia, compatibilidad con ELO, copia, sustitución ni reversión. No se descargó ni sustituyó nada. Usa las instrucciones manuales y el soporte del fabricante.',
+ incompleteScan:'El escaneo está incompleto o supera los límites de evidencia. Elige una carpeta local accesible más estrecha y revisa los permisos sin eludir los controles de acceso.',
+ inaccessiblePath:'La carpeta local seleccionada no existe o no es accesible. Revisa la carpeta y los permisos.',
+ scanBusy:'Ya hay un escaneo en curso. Espera a que termine o solicita su cancelación.',completedScan:'Completa un escaneo correcto antes de solicitar un cambio.',
+ communityUnavailable:'El asistente de ELO Community no está disponible aquí.',communityFailed:'El asistente de la comunidad falló.',communityBusy:'Ya hay un trabajo de la comunidad en curso.',consentRequired:'Marca primero la casilla de consentimiento.',targetIneligible:'La JVM seleccionada no es apta para este cambio. Revisa la evidencia del escaneo.',optionsUnsupported:'La configuración existente de JVM/entorno es ambigua o no compatible. Revísala con tu administrador antes de hacer cambios.',
+ scanSent:'Escaneo solicitado',cancelSent:'Cancelación solicitada',previewReady:'Vista previa recibida',actionSent:'Acción confirmada completada',connected:'Sesión conectada',report:'Informe exportado',log:'Registro de actividad exportado',
+ units:'elementos revisados',previewKind:'Cambio seleccionado',mitigation:'Mitigación temporal',runtimeUpdate:'Actualización del runtime',
+ searchPath:'Carpeta local de búsqueda opcional',searchHelp:'En las unidades fijas o extraíbles listas de C: a Z:, el escaneo comprueba X:\\java\\bin\\java.exe, X:\\ELO\\java\\bin\\java.exe y X:\\<carpeta>\\java\\bin\\java.exe (cualquier carpeta de primer nivel, p. ej. X:\\OtraCarpeta\\java\\bin) en la raíz de cada unidad. Opcionalmente indica una carpeta local absoluta para buscar tras las comprobaciones de raíz, p. ej. C:\\ELO data. Son datos de búsqueda de solo lectura, nunca un comando. No se admiten rutas de red o de dispositivo ni comodines.',
+ invalidPath:'Indica una carpeta local absoluta de Windows de como máximo 1024 caracteres, sin caracteres de control, comodines ni segmentos relativos.',
+ jvmTable:'JVM descubiertas y evidencia',runtimeRoot:'Raíz del runtime',vendor:'Fabricante',architecture:'Arquitectura',eloRationale:'Motivo de la asociación con ELO',classificationEvidence:'Evidencia de la clasificación',
+ patched:'Parcheado','not-affected':'No afectado',inconclusive:'No concluyente',
+ securityHeading:'Información de seguridad',securityHelp:'El responsable del backend aporta y verifica los enlaces de avisos oficiales y la fecha de verificación. Esta interfaz comprueba su formato y el host oficial, no su contenido actual ni su aplicabilidad. Los enlaces solo se abren a petición; no se cargan recursos remotos. Revisa la evidencia y el soporte del fabricante antes de actuar.',
+ resultNotice:'Los resultados pueden estar incompletos o desactualizados durante un escaneo, tras una cancelación o tras un error. No son una valoración reciente ni completa.',
+ verifiedDate:'Fecha de verificación de las fuentes (UTC)',noAdvisories:'No se aportó información de seguridad verificada. No des por segura este runtime.'
  }
 };
 const $ = id => document.getElementById(id);
@@ -2687,13 +2908,13 @@ let vulns = [], backups = [], backupsKey = '', progress = null, checked = null, 
 let lastWarnings = [], errorFromPoll = false, recoveryRequired = false, recoveryWarnings = [];
 let step = 1, awaitingScan = false, scanStartedAt = null, finalKind = '', canRestore = false, cardsKey = '';
 const events = [], states = ['idle','scanning','cancelling','completed','cancelled','error'];
-const t = key => messages[language][key] || messages[language].unknown;
+const t = key => messages[language][key] || messages.en[key] || messages[language].unknown;
 const safeText = value => typeof value === 'string' ? (token ? value.split(token).join('[redacted]') : value).slice(0,16000) : '';
 const validId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 const record = value => value && typeof value === 'object' && !Array.isArray(value);
 const keys = (value, required, optional = []) => record(value) && required.every(key => Object.hasOwn(value,key)) && Object.keys(value).every(key => required.includes(key) || optional.includes(key));
 const text = (value,max) => typeof value === 'string' && value.trim().length >= 1 && value.length <= max && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
-const bilingual = (value,max) => keys(value,['en','de']) && text(value.en,max) && text(value.de,max);
+const bilingual = (value,max) => keys(value,['en','de'],['es']) && text(value.en,max) && text(value.de,max) && (value.es === undefined || text(value.es,max));
 const classifications = ['vulnerable','patched','not-affected','inconclusive','mitigated','unsupported','safe'];
 const rowFields = ['id','path','runtimeRoot','version','vendor','architecture','status','eloRationale','classificationEvidence'];
 const validBackup = item => keys(item,['id','path','runtime','version','vendor','risk','created','size']) && validId(item.id) && text(item.path,1024) && text(item.runtime,1024) && text(item.version,128) && text(item.vendor,32) && ['vulnerable','patched','unknown'].includes(item.risk) && text(item.created,32) && Number.isSafeInteger(item.size) && item.size >= 0;
@@ -2719,7 +2940,7 @@ function officialUrl(value) {
  return typeof date === 'string' && /^20\d{2}-\d{2}-\d{2}$/.test(date) && Number.isFinite(Date.parse(date)) && new Date(date).toISOString().slice(0,10) === date && date <= new Date().toISOString().slice(0,10) &&
  value.advisories.every(item => keys(item,['id','title','url']) && validId(item.id) && bilingual(item.title,256) && officialUrl(item.url)) && new Set(value.advisories.map(item => item.id)).size === value.advisories.length;
 }
-const localized = value => safeText(value[language]);
+const localized = value => safeText(value[language] || value.en);
 const running = () => state === 'scanning' || state === 'cancelling';
 function log(key) { events.push({time:new Date().toISOString(),key}); if(events.length > 500) events.shift(); renderLog(); }
 function renderLog() { $('activity').textContent = events.map(e => e.time+' '+t(e.key)).join('\n'); }
@@ -2824,8 +3045,26 @@ function highlightInto(el, source) {
 }
 let cmdKey = '', behindKey = '';
 const psq = value => String(value).replace(/'/g,"''");
+const esComments = {
+ 'Run in an ADMINISTRATOR PowerShell. Nothing here is deleted; the old runtime is only renamed.':'Ejecuta en una PowerShell de ADMINISTRADOR. Aquí no se borra nada; el runtime antiguo solo se renombra.',
+ 'Which processes and services use this runtime? (the tool stops only these)':'¿Qué procesos y servicios usan este runtime? (la herramienta detiene solo estos)',
+ 'Back up the runtime as a ZIP next to it (the tool also writes a SHA256 manifest of every file)':'Haz una copia del runtime en un ZIP al lado (la herramienta escribe además un manifiesto SHA256 de cada archivo)',
+ 'Newest release of the SAME vendor and branch, with its download URL and SHA256':'Última versión del MISMO fabricante y rama, con su URL de descarga y su SHA256',
+ 'pick the item with the highest java_version / openjdk_build_number, then:':'elige el elemento con mayor java_version / openjdk_build_number y luego:',
+ 'pick the newest item (version.semver), then:':'elige el elemento más reciente (version.semver) y luego:',
+ 'Ask your Java vendor for the newest release of this branch and note its HTTPS URL and SHA256:':'Pide a tu fabricante de Java la última versión de esta rama y anota su URL HTTPS y su SHA256:',
+ 'Download over HTTPS from the vendor host only and verify the hash':'Descarga por HTTPS solo desde el host del fabricante y verifica el hash',
+ 'Extract next to the runtime and test the NEW Java before touching the old one':'Extrae junto al runtime y prueba el Java NUEVO antes de tocar el antiguo',
+ 'Stop the services from step 1, swap the folders (the old one is kept), test again, start the services':'Detén los servicios del paso 1, cambia las carpetas (la antigua se conserva), prueba de nuevo y arranca los servicios',
+ 'If the test fails: put the old runtime back (the tool does this automatically)':'Si la prueba falla: devuelve el runtime antiguo (la herramienta lo hace automáticamente)',
+ 'Run in an ADMINISTRATOR PowerShell. This changes the MACHINE environment (all Java programs that start afterwards).':'Ejecuta en una PowerShell de ADMINISTRADOR. Esto cambia el entorno de la MÁQUINA (todos los programas Java que arranquen después).',
+ 'Append the option once (keep every other option exactly as it is)':'Añade la opción una sola vez (deja todas las demás opciones exactamente como están)',
+ 'Verify with a NEW java process (running JVMs and services keep the old environment until restarted)':'Verifica con un proceso java NUEVO (las JVM y servicios en ejecución conservan el entorno antiguo hasta reiniciarse)',
+ 'Restart the affected services so they pick the option up':'Reinicia los servicios afectados para que tomen la opción',
+ 'Undo (use $null if the variable was empty before)':'Deshacer (usa $null si la variable estaba vacía antes)'
+};
 function behindUpdateText(row) {
- const c = (en,de) => language === 'de' ? de : en;
+ const c = (en,de,es) => language === 'de' ? de : language === 'es' ? (es || esComments[en] || en) : en;
  const runtime = psq(row.runtimeRoot), name = runtime.split('\\').pop() || 'java';
  const branchMatch = /^(?:1\.)?(\d{1,3})/.exec(row.version), branch = branchMatch ? branchMatch[1] : '<branch>';
  const zulu = /zulu/i.test(row.vendor), temurin = /temurin|adoptium/i.test(row.vendor);
@@ -2880,13 +3119,13 @@ function behindUpdateText(row) {
  return lines.join('\n');
 }
 function behindMitigateText(row, mitigation) {
- const c = (en,de) => language === 'de' ? de : en;
+ const c = (en,de,es) => language === 'de' ? de : language === 'es' ? (es || esComments[en] || en) : en;
  const flag = (/^-XX:[+-]([A-Za-z0-9_]+)$/.exec(mitigation.option) || [])[1] || 'Flag';
  const java = psq(row.path);
  return [
  '# '+c('Run in an ADMINISTRATOR PowerShell. This changes the MACHINE environment (all Java programs that start afterwards).','In einer ADMINISTRATOR-PowerShell ausführen. Das ändert die SYSTEM-Umgebung (alle danach startenden Java-Programme).'),
  `$old = [Environment]::GetEnvironmentVariable('${mitigation.variable}', 'Machine'); $old`,
- '# 1) '+c('Save the current value above. Remove any existing '+flag+' entry from it yourself.','Aktuellen Wert oben sichern. Einen vorhandenen '+flag+'-Eintrag selbst daraus entfernen.'),
+ '# 1) '+c('Save the current value above. Remove any existing '+flag+' entry from it yourself.','Aktuellen Wert oben sichern. Einen vorhandenen '+flag+'-Eintrag selbst daraus entfernen.','Guarda el valor actual de arriba. Quita tú mismo cualquier entrada '+flag+' de él.'),
  '',
  '# 2) '+c('Append the option once (keep every other option exactly as it is)','Option genau einmal anhängen (alle anderen Optionen unverändert lassen)'),
  `[Environment]::SetEnvironmentVariable('${mitigation.variable}', (($old + ' ${mitigation.option}').Trim()), 'Machine')`,
@@ -2972,12 +3211,25 @@ function renderBackups() {
 }
 // ---- optional ELO Community + AI panel. Credentials and keys are typed here, sent once to the local backend for one
 // run (environment of the helper process) and never kept: the inputs are cleared after sending.
-let cStatus = null, cJob = {state:'idle',kind:'',log:[],drafts:[],outDir:''}, cModels = [], cBusy = false, cPolling = false, cError = '';
+let cStatus = null, cJob = {state:'idle',kind:'',log:[],drafts:[],articles:[],runId:'',outDir:''}, cModels = [], cBusy = false, cPolling = false, cError = '', cAccess = '', cValidation = null, cArticlesKey = '';
+const cForms = {};
+const solutionKinds = ['update','mitigation','workaround','none'];
 const validDraft = item => keys(item,['id','severity','title','solutionReported','simulation','issues','detects']) && /^[A-Za-z0-9._-]{3,64}$/.test(item.id) && severities.includes(item.severity) && typeof item.title === 'string' && item.title.length <= 300 && typeof item.solutionReported === 'boolean' && typeof item.simulation === 'boolean' && typeof item.detects === 'boolean' && Number.isSafeInteger(item.issues) && item.issues >= 0;
+const validSolution = item => keys(item,['kind','summary']) && solutionKinds.includes(item.kind) && typeof item.summary === 'string' && item.summary.length <= 300;
+const validArticle = item => keys(item,['index','url','title','date','status','error','severity','severityReason','summary','javaRelated','scriptWorthwhile','scriptReason','solutions','draftId','issues']) && Number.isSafeInteger(item.index) && item.index >= 0 && item.index < 100 &&
+ typeof item.url === 'string' && (item.url === '' || /^https:\/\/community\.elo\.com\/[^\s"<>]{0,380}$/.test(item.url)) && typeof item.title === 'string' && item.title.length <= 300 && typeof item.date === 'string' && item.date.length <= 10 &&
+ ['drafted','not-a-report','rejected','error'].includes(item.status) && typeof item.error === 'string' && item.error.length <= 200 && (item.severity === '' || severities.includes(item.severity)) && typeof item.severityReason === 'string' && item.severityReason.length <= 500 &&
+ (item.summary === null || (keys(item.summary,['en','de'],['es']) && text(item.summary.en,900) && text(item.summary.de,900) && (item.summary.es === undefined || text(item.summary.es,900)))) &&
+ typeof item.javaRelated === 'boolean' && typeof item.scriptWorthwhile === 'boolean' && typeof item.scriptReason === 'string' && item.scriptReason.length <= 400 && Array.isArray(item.solutions) && item.solutions.length <= 5 && item.solutions.every(validSolution) &&
+ typeof item.draftId === 'string' && item.draftId.length <= 64 && Number.isSafeInteger(item.issues) && item.issues >= 0;
 const validCStatus = value => keys(value,['helper','node','playwright','chrome','secrets','ai']) && ['helper','node','playwright','chrome'].every(k => typeof value[k] === 'boolean') && keys(value.secrets,['communityUser','communityPassword','openaiKey','anthropicKey']) && Object.values(value.secrets).every(v => typeof v === 'boolean') &&
  (value.ai === null || (keys(value.ai,['provider','model','baseUrl']) && ['openai','anthropic','ollama'].includes(value.ai.provider) && text(value.ai.model,100) && typeof value.ai.baseUrl === 'string' && value.ai.baseUrl.length <= 200));
-const validCJob = value => keys(value,['state','kind','log','drafts','outDir']) && ['idle','running','completed','failed','cancelled'].includes(value.state) && typeof value.kind === 'string' && value.kind.length <= 16 && Array.isArray(value.log) && value.log.length <= 60 && value.log.every(line => typeof line === 'string' && line.length <= 400) && Array.isArray(value.drafts) && value.drafts.length <= 50 && value.drafts.every(validDraft) && typeof value.outDir === 'string' && value.outDir.length <= 1024;
+const validCJob = value => keys(value,['state','kind','log','drafts','articles','runId','outDir']) && ['idle','running','completed','failed','cancelled'].includes(value.state) && typeof value.kind === 'string' && value.kind.length <= 16 && Array.isArray(value.log) && value.log.length <= 60 && value.log.every(line => typeof line === 'string' && line.length <= 400) &&
+ Array.isArray(value.drafts) && value.drafts.length <= 50 && value.drafts.every(validDraft) && Array.isArray(value.articles) && value.articles.length <= 60 && value.articles.every(validArticle) && typeof value.runId === 'string' && /^(?:[0-9]{14})?$/.test(value.runId) && typeof value.outDir === 'string' && value.outDir.length <= 1024;
 const validModels = value => keys(value,['models','current']) && Array.isArray(value.models) && value.models.length <= 300 && value.models.every(item => /^[A-Za-z0-9._:\/-]{1,100}$/.test(item)) && typeof value.current === 'string' && value.current.length <= 100;
+const validAccess = value => keys(value,['ok','articlesOnPage']) && typeof value.ok === 'boolean' && Number.isSafeInteger(value.articlesOnPage) && value.articlesOnPage >= 0;
+const validValidation = value => keys(value,['valid','error','entries']) && typeof value.valid === 'boolean' && typeof value.error === 'string' && value.error.length <= 200 && Array.isArray(value.entries) && value.entries.length <= 50 &&
+ value.entries.every(entry => keys(entry,['id','status','passed','detected','reason']) && typeof entry.id === 'string' && entry.id.length <= 64 && typeof entry.status === 'string' && entry.status.length <= 16 && typeof entry.passed === 'boolean' && typeof entry.detected === 'string' && entry.detected.length <= 32 && typeof entry.reason === 'string' && entry.reason.length <= 64);
 const communityRunning = () => cJob.state === 'running';
 function communityMessage(error) {
  if (error instanceof ApiFailure) return [t(error.key),...error.warnings.map(localized)].join('\n');
@@ -2987,8 +3239,9 @@ async function communityCall(work) {
  if (cBusy) return; cBusy = true; cError = ''; renderCommunity();
  try { await work(); } catch (error) { cError = communityMessage(error); } finally { cBusy = false; renderCommunity(); }
 }
-async function refreshCommunityStatus() {
- await communityCall(async () => {
+const keyAvailable = provider => provider === 'ollama' || !!$('aiKey').value || !!(cStatus && ((provider === 'openai' && cStatus.secrets.openaiKey) || (provider === 'anthropic' && cStatus.secrets.anthropicKey)));
+function setModelSummary() { $('aiModelSummary').textContent = ($('aiModel').value || t('communityModelNone'))+(cModels.length > 1 ? ' ('+cModels.length+')' : ''); }
+async function fetchStatus() {
  const data = await api('community/status'); if (!validCStatus(data)) throw 'invalid';
  cStatus = data;
  if (data.ai && !$('aiModel').children.length) {
@@ -2996,32 +3249,65 @@ async function refreshCommunityStatus() {
  const option = document.createElement('option'); option.value = data.ai.model; option.textContent = data.ai.model; $('aiModel').append(option); $('aiModel').value = data.ai.model; cModels = [data.ai.model];
  }
  const job = await api('community/job'); if (!validCJob(job)) throw 'invalid'; cJob = job;
- });
+ if (communityRunning()) startCommunityPolling();
+ setModelSummary();
 }
-async function loadCommunityModels() {
- await communityCall(async () => {
+async function fetchModels() {
  const body = {provider:$('aiProvider').value}; if ($('aiKey').value) body.apiKey = $('aiKey').value; if ($('aiBase').value) body.baseUrl = $('aiBase').value;
  const wanted = $('aiModel').value || (cStatus && cStatus.ai ? cStatus.ai.model : '');
  const data = await api('community/models',body); if (!validModels(data)) throw 'invalid';
  cModels = data.models; $('aiModel').replaceChildren();
  data.models.forEach(name => { const option = document.createElement('option'); option.value = name; option.textContent = name; $('aiModel').append(option); });
  const pick = data.models.includes(wanted) ? wanted : (data.models.includes(data.current) ? data.current : data.models[0] || '');
- $('aiModel').value = pick; $('aiModelNote').textContent = t('communityModels').replace('{n}',String(data.models.length))+(wanted && pick !== wanted ? ' - '+t('communityModelMissing').replace('{name}',() => safeText(wanted)).replace('{pick}',() => safeText(pick)) : '');
+ $('aiModel').value = pick; setModelSummary();
+ $('aiModelNote').textContent = t('communityModels').replace('{n}',String(data.models.length))+(wanted && pick !== wanted ? ' - '+t('communityModelMissing').replace('{name}',() => safeText(wanted)).replace('{pick}',() => safeText(pick)) : '');
+}
+// Opening Settings loads the status and, when a key is already available (typed, saved or Ollama), the model list by itself.
+async function refreshCommunityStatus() {
+ await communityCall(async () => {
+ await fetchStatus();
+ if (cStatus.helper && cStatus.node && cModels.length <= 1 && keyAvailable($('aiProvider').value)) { try { await fetchModels(); } catch (error) { cError = communityMessage(error); } }
  });
 }
+const loadCommunityModels = () => communityCall(fetchModels);
 async function installCommunityHelper() {
  if (!$('cConsent').checked) { cError = t('consentRequired'); renderCommunity(); return; }
- await communityCall(async () => { await acknowledge('community/setup',{consent:'yes'}); cJob = {state:'running',kind:'setup',log:[],drafts:[],outDir:''}; startCommunityPolling(); });
+ await communityCall(async () => { await acknowledge('community/setup',{consent:'yes'}); cJob = {state:'running',kind:'setup',log:[],drafts:[],articles:[],runId:'',outDir:''}; startCommunityPolling(); });
+}
+async function testCommunityAccess() {
+ if (!$('cConsent').checked) { cError = t('consentRequired'); renderCommunity(); return; }
+ const body = {consent:'yes'}; if ($('cUser').value) body.user = $('cUser').value; if ($('cPass').value) body.password = $('cPass').value;
+ cAccess = t('communityTesting');
+ await communityCall(async () => {
+ try { const data = await api('community/access',body); if (!validAccess(data)) throw 'invalid'; cAccess = data.ok ? t('communityAccessOk').replace('{n}',String(data.articlesOnPage)) : t('communityAccessFail'); }
+ catch (error) { cAccess = ''; throw error; }
+ });
+}
+function aiRequest(extra) {
+ const body = {consent:'yes',provider:$('aiProvider').value,model:$('aiModel').value,...extra};
+ if ($('cUser').value) body.user = $('cUser').value; if ($('cPass').value) body.password = $('cPass').value;
+ if ($('aiKey').value) body.apiKey = $('aiKey').value; if ($('aiBase').value) body.baseUrl = $('aiBase').value;
+ return body;
 }
 async function runCommunity() {
  if (!$('cConsent').checked) { cError = t('consentRequired'); renderCommunity(); return; }
  if (!$('aiModel').value) { cError = t('communityModelNone'); renderCommunity(); return; }
  const max = Number($('cMax').value);
  if (!Number.isInteger(max) || max < 1 || max > 50) { cError = t('communityError'); renderCommunity(); return; }
- const body = {consent:'yes',since:$('cSince').value,max:String(max),provider:$('aiProvider').value,model:$('aiModel').value};
- if ($('cUser').value) body.user = $('cUser').value; if ($('cPass').value) body.password = $('cPass').value;
- if ($('aiKey').value) body.apiKey = $('aiKey').value; if ($('aiBase').value) body.baseUrl = $('aiBase').value;
- await communityCall(async () => { await acknowledge('community/run',body); $('cPass').value = ''; $('aiKey').value = ''; cJob = {state:'running',kind:'run',log:[],drafts:[],outDir:''}; startCommunityPolling(); });
+ await communityCall(async () => { await acknowledge('community/run',aiRequest({since:$('cSince').value,max:String(max)})); $('cPass').value = ''; $('aiKey').value = ''; cValidation = null; cJob = {state:'running',kind:'run',log:[],drafts:[],articles:[],runId:'',outDir:''}; startCommunityPolling(); });
+}
+async function refineCommunityArticle(index) {
+ const form = cForms[index] || {}, hint = (form.hint || '').trim();
+ if (!$('cConsent').checked) { cError = t('consentRequired'); renderCommunity(); return; }
+ if (!hint && !form.research) { cError = t('communityRefineNeeds'); renderCommunity(); return; }
+ if (!$('aiModel').value || !cJob.runId) { cError = t('communityModelNone'); renderCommunity(); return; }
+ await communityCall(async () => {
+ await acknowledge('community/refine',aiRequest({run:cJob.runId,article:String(index),...(hint ? {hint} : {}),...(form.research ? {research:'yes'} : {})}));
+ $('cPass').value = ''; $('aiKey').value = ''; cValidation = null; cJob = {...cJob,state:'running',kind:'refine',log:[]}; startCommunityPolling();
+ });
+}
+async function validateCommunityDrafts() {
+ await communityCall(async () => { const data = await api('community/validate',{run:cJob.runId}); if (!validValidation(data)) throw 'invalid'; cValidation = data; });
 }
 function startCommunityPolling() {
  if (cPolling) return; cPolling = true;
@@ -3032,6 +3318,48 @@ function startCommunityPolling() {
  };
  setTimeout(tick,1000);
 }
+function articleError(item) { return /^ai_http_401/.test(item.error) ? t('communityAi401') : safeText(item.error); }
+function renderArticles() {
+ const key = JSON.stringify([cJob.articles,cJob.drafts,language,cJob.state,cBusy,Object.keys(cForms).map(k => [k,!!cForms[k].open,!!cForms[k].research])]);
+ if (key === cArticlesKey) return; cArticlesKey = key;
+ $('communityArticles').replaceChildren();
+ cJob.articles.forEach(item => {
+ const card = document.createElement('div'), head = document.createElement('h4'), sev = document.createElement('span'), title = document.createElement(item.url ? 'a' : 'span'), date = document.createElement('span');
+ card.className = 'article';
+ sev.className = 'sev'; if (item.severity) { sev.dataset.sev = item.severity; sev.textContent = t('severity_'+item.severity); } else { sev.dataset.sev = 'low'; sev.textContent = t('communityStatus_'+item.status.replace(/-/g,'_')); }
+ title.textContent = safeText(item.title);
+ if (item.url) { title.href = item.url; title.target = '_blank'; title.rel = 'noopener noreferrer'; title.referrerPolicy = 'no-referrer'; }
+ date.className = 'p'; date.textContent = item.date;
+ head.append(sev); head.append(title); head.append(date); card.append(head);
+ if (item.summary) { const p = document.createElement('p'); p.textContent = localized(item.summary); card.append(p); }
+ if (item.severityReason) { const p = document.createElement('p'); p.className = 'p'; p.textContent = t('communityWhySeverity')+': '+safeText(item.severityReason); card.append(p); }
+ if (item.status !== 'error') {
+ const worth = document.createElement('p'), sols = document.createElement('p');
+ worth.className = 'p'; worth.textContent = t('communityScript')+': '+t(item.scriptWorthwhile ? 'yes' : 'no')+(item.scriptReason ? ' - '+safeText(item.scriptReason) : '');
+ sols.className = 'p'; sols.textContent = t('communitySolutionsTitle')+': '+(item.solutions.filter(s => s.kind !== 'none').map(s => t('sol_'+s.kind)+(s.summary ? ' ('+safeText(s.summary)+')' : '')).join('; ') || t('communityNoSolution'));
+ card.append(worth); card.append(sols);
+ }
+ if (item.draftId) {
+ const draft = cJob.drafts.find(d => d.id === item.draftId), p = document.createElement('p');
+ p.className = 'p'; p.textContent = t('communityDraftId')+': '+safeText(item.draftId)+(draft ? ' - '+[t('communitySolution')+': '+t(draft.solutionReported ? 'yes' : 'no'),t('communitySim')+': '+t(draft.simulation ? 'yes' : 'no'),t('communityDetects')+': '+t(draft.detects ? 'yes' : 'no'),t('communityIssues')+': '+draft.issues].join(' · ') : '');
+ card.append(p);
+ }
+ if (item.error) { const p = document.createElement('p'); p.className = 'banner-inline'; p.textContent = t('communityArticleError')+': '+articleError(item); card.append(p); }
+ if (item.status !== 'error' || /^ai_http_401/.test(item.error) === false) {
+ const form = cForms[item.index] || (cForms[item.index] = {open:false,research:false,hint:''}), toggleBtn = document.createElement('button');
+ toggleBtn.className = 'btn'; toggleBtn.setAttribute('type','button'); toggleBtn.textContent = t('communityRefine'); toggleBtn.onclick = () => { form.open = !form.open; cArticlesKey = ''; renderArticles(); };
+ card.append(toggleBtn);
+ if (form.open) {
+ const box = document.createElement('div'), area = document.createElement('textarea'), label = document.createElement('label'), check = document.createElement('input'), tick = document.createElement('span'), run = document.createElement('button');
+ box.className = 'refine'; area.maxLength = 4000; area.value = form.hint || ''; area.setAttribute('aria-label',t('communityRefineHint')); area.placeholder = t('communityRefineHint'); area.oninput = () => { form.hint = area.value; };
+ label.className = 'confirm'; check.setAttribute('type','checkbox'); check.checked = !!form.research; check.onchange = () => { form.research = check.checked; }; tick.textContent = t('communityResearch'); label.append(check); label.append(tick);
+ run.className = 'btn primary'; run.setAttribute('type','button'); run.disabled = cBusy || communityRunning(); run.textContent = t('communityRefineRun'); run.onclick = () => refineCommunityArticle(item.index);
+ box.append(area); box.append(label); box.append(run); card.append(box);
+ }
+ }
+ $('communityArticles').append(card);
+ });
+}
 function renderCommunity() {
  const status = cStatus;
  const ready = !!(status && status.helper && status.node && status.playwright);
@@ -3039,26 +3367,26 @@ function renderCommunity() {
  const saved = status ? [status.secrets.communityUser && 'ELO_COMMUNITY_USER',status.secrets.communityPassword && 'ELO_COMMUNITY_PASSWORD',status.secrets.openaiKey && 'OPENAI_API_KEY',status.secrets.anthropicKey && 'ANTHROPIC_API_KEY'].filter(Boolean) : [];
  if (saved.length) $('communityStatus').textContent += ' '+t('communitySaved').replace('{list}',saved.join(', '));
  $('communityError').textContent = cError;
+ $('cTestResult').textContent = cAccess;
  toggle('communitySetup',!(status && status.helper && status.node && !status.playwright));
- $('communitySetup').disabled = cBusy || communityRunning();
- $('aiLoad').disabled = cBusy || communityRunning() || !(status && status.helper && status.node);
- $('communityRun').disabled = cBusy || communityRunning() || !ready || !$('cConsent').checked || !$('aiModel').value;
+ const idle = !cBusy && !communityRunning();
+ $('communitySetup').disabled = !idle;
+ $('cTest').disabled = !idle || !ready || !$('cConsent').checked;
+ $('aiLoad').disabled = !idle || !(status && status.helper && status.node);
+ $('communityRun').disabled = !idle || !ready || !$('cConsent').checked || !$('aiModel').value;
  toggle('communityCancel',!communityRunning());
  const jobText = {running:'communityJobRunning',completed:'communityJobDone',failed:'communityJobFailed',cancelled:'communityJobCancelled'}[cJob.state];
  $('communityLog').textContent = cJob.log.length ? (jobText ? t(jobText)+'\n' : '')+cJob.log.map(safeText).join('\n') : (jobText ? t(jobText) : '');
- $('communityDrafts').replaceChildren();
- cJob.drafts.forEach(item => {
- const card = document.createElement('div'), head = document.createElement('span'), sev = document.createElement('span'), name = document.createElement('span'), meta = document.createElement('span');
- card.className = 'rt'; head.className = 't'; sev.className = 'sev'; sev.dataset.sev = item.severity; sev.textContent = t('severity_'+item.severity); name.textContent = safeText(item.id)+' - '+safeText(item.title);
- head.append(sev); head.append(name);
- meta.className = 'p'; meta.textContent = [t('communitySolution')+': '+t(item.solutionReported ? 'yes' : 'no'),t('communitySim')+': '+t(item.simulation ? 'yes' : 'no'),t('communityDetects')+': '+t(item.detects ? 'yes' : 'no'),t('communityIssues')+': '+item.issues].join(' · ');
- card.append(head); card.append(meta); $('communityDrafts').append(card);
- });
- const done = cJob.state === 'completed' && cJob.kind === 'run' && cJob.outDir;
+ toggle('communityArticlesTitle',!cJob.articles.length);
+ renderArticles();
+ toggle('communityValidate',!(cJob.runId && cJob.state === 'completed' && cJob.drafts.length));
+ $('communityValidate').disabled = !idle;
+ $('communityValidation').textContent = !cValidation ? '' : cValidation.valid ? cValidation.entries.map(entry => safeText(entry.id)+' ['+safeText(entry.status)+']: '+t(entry.passed ? 'communitySimPassed' : 'communitySimFailed')+(entry.detected ? ' ('+safeText(entry.detected)+')' : '')).join('\n') : t('communityInvalid')+' '+safeText(cValidation.error);
+ const done = cJob.state === 'completed' && (cJob.kind === 'run' || cJob.kind === 'refine') && cJob.outDir;
  toggle('communityNext',!done);
  if (done) {
  const file = safeText(cJob.outDir)+'\\draft-vulndb.json';
- highlightInto($('communityNext'),['# '+t('communityOutDir'),'# '+safeText(cJob.outDir),`ELO-Patch-Tools.bat --cli --catalog-validate "${file}"`,`ELO-Patch-Tools.bat --cli --catalog-simulate "${file}"`,'# '+(language === 'de' ? 'Nach der Prüfung "status": "active" setzen und installieren:' : 'After your review set "status": "active" and install:'),`ELO-Patch-Tools.bat --cli --catalog-install "${file}" --confirm-admin`].join('\n'));
+ highlightInto($('communityNext'),['# '+t('communityOutDir'),'# '+safeText(cJob.outDir),`ELO-Patch-Tools.bat --cli --catalog-validate "${file}"`,`ELO-Patch-Tools.bat --cli --catalog-simulate "${file}"`,'# '+t('communityAfterReview'),`ELO-Patch-Tools.bat --cli --catalog-install "${file}" --confirm-admin`].join('\n'));
  }
 }
 let settingsOpen = false;
@@ -3070,12 +3398,13 @@ $('settingsBtn').onclick = () => setSettings(!settingsOpen);
 $('settingsClose').onclick = () => setSettings(false);
 $('communitySetup').onclick = () => installCommunityHelper();
 $('aiLoad').onclick = () => loadCommunityModels();
+$('cTest').onclick = () => testCommunityAccess();
 $('communityRun').onclick = () => runCommunity();
+$('communityValidate').onclick = () => validateCommunityDrafts();
 $('communityCancel').onclick = () => communityCall(async () => { await acknowledge('community/cancel',{}); const job = await api('community/job'); if (validCJob(job)) cJob = job; });
 $('cConsent').onchange = renderCommunity;
-$('aiModel').onchange = renderCommunity;
-$('aiProvider').onchange = () => { $('aiModel').replaceChildren(); cModels = []; $('aiModelNote').textContent = ''; $('aiBase').value = ''; renderCommunity(); };
-function render() {
+$('aiModel').onchange = () => { setModelSummary(); $('aiModelsBox').open = false; renderCommunity(); };
+$('aiProvider').onchange = () => { $('aiModel').replaceChildren(); cModels = []; $('aiModelNote').textContent = ''; $('aiBase').value = ''; setModelSummary(); renderCommunity(); if (settingsOpen && cStatus && cStatus.helper && cStatus.node && keyAvailable($('aiProvider').value)) void loadCommunityModels(); };function render() {
  document.documentElement.lang = language;
  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
  $('error').textContent = lastError ? [t(lastError),...lastWarnings.map(localized)].join('\n') : '';
@@ -3173,7 +3502,7 @@ async function perform(work, allowRecovery = false) {
  try { await work(); } catch (error) { clearPreview(); fail(error); }
  finally { pending = false; render(); }
 }
-$('language').onchange = () => { language = $('language').value === 'de' ? 'de' : 'en'; render(); };
+$('language').onchange = () => { language = ['de','es'].includes($('language').value) ? $('language').value : 'en'; render(); };
 $('results').onchange = () => { clearPreview(); render(); };
 $('confirm').onchange = render;
 $('searchPath').oninput = () => { clearPreview(); render(); };
@@ -3463,7 +3792,7 @@ function New-EloTechnicalReport {
     @{System=$system;Jvms=$jvms;Actions=$normalized;Elo=$elo;Options=$options;Recovery=$recovery}
 }
 function ConvertTo-EloTechnicalReportHtml {
-    param([Parameter(Mandatory=$true)]$Report, [ValidateSet('en','de')][string]$Language='en')
+    param([Parameter(Mandatory=$true)]$Report, [ValidateSet('en','de','es')][string]$Language='en')
     # Normalize again: renderer never reflects arbitrary DTO fields or messages.
     $r=New-EloTechnicalReport -OptionsCollector { $null } -ResourceCollector { $Report.System }.GetNewClosure() -JvmEvidence @($Report.Jvms | ForEach-Object { @{Version=$_.Version;Verified=($_.Status -ceq 'Proven');ExecutionVerified=($_.ExecutionStatus -ceq 'Proven');Classification=$_.Classification;ClassificationVerified=$_.ClassificationVerified;EvidenceCode=$_.EvidenceCode;Vendor=$_.Vendor;VendorVerified=$_.VendorVerified} }) -Actions $Report.Actions -EloVersionAdapter { @{Version=$Report.Elo.Version;Verified=($Report.Elo.Status -ceq 'Proven')} }.GetNewClosure()
     # DTO contains only bounded states; never re-read environment during rendering.
@@ -3484,7 +3813,12 @@ function ConvertTo-EloTechnicalReportHtml {
         $guidance=@{Vendor='Nachgewiesener JVM-Anbieter';Recommendation='Empfohlener naechster Schritt';Temporary='Nur vorlaeufige Flag-Risikominderung; installiert keine Java-Runtime und ist keine dauerhafte Behebung. Eine Maschinenoption beweist nicht, dass eine neu gestartete JVM oder der aktuelle ELO-Prozess das Flag verwendet.';Upgrade='Vorzugsweise eine neuere, vom Anbieter korrigierte Java-Version nach ELO-Kompatibilitaetsbestaetigung installieren. Keine bestimmte korrigierte Version oder erfolgreiche Installation wird abgeleitet.';VendorUnknown='JVM-Anbieter unbekannt; JVM-Anbieter und ELO konsultieren, um die passende korrigierte Version und offizielle Download-/Installationsanleitungen zu erhalten. Temurin wird nicht als Ersatz desselben Anbieters angenommen.';Download='Offizielle Temurin-Downloads';Install='Offizielle Temurin-Installationsanleitung';MachineOptionSet='Maschinenoption gesetzt';NewlyLaunchedJvmFlagVerified='Flag einer neu gestarteten JVM';RunningEloJvmFlagVerified='Flag des aktuell laufenden ELO-Prozesses';EffectiveJvmFlagObserved='JVM-Flag beobachtet; Umfang unbekannt, aktueller ELO-Prozess nicht nachgewiesen'}
     }
     foreach ($key in $guidance.Keys) { $t[$key]=$guidance[$key] }
-    $lines=New-Object 'System.Collections.Generic.List[string]'
+    if ($Language -eq 'es') {
+        $es=@{Title='Informe técnico';Server='Servidor';Windows='Versión / compilación de Windows';Ram='RAM total';Disk='Disco: total / libre';Jvm='Versiones de JVM detectadas';Execution='Evidencia de ejecución';Elo='Versión de ELO (archivos instalados del Indexserver)';Unknown='Desconocido / no disponible';Failed='Fallido';NotPerformed='No realizado';Proven='Verificado';Update='Actualización del runtime';Mitigation='Mitigación temporal';Backup='Copia de seguridad';Restore='Restauración';From='Versión anterior';To='Versión resultante verificada';BackupVersion='Versión de JVM de la copia verificada';Sources='Fuentes oficiales de información';Notice='Los estados reflejan solo la evidencia verificada aportada. No se deducen la compatibilidad, la vulnerabilidad ni el éxito de la corrección. No se incluyen credenciales ni diagnósticos en bruto.'
+            Classification='Clasificación de vulnerabilidad';Evidence='Evidencia / método';Association='Asociación con el runtime';PotentiallyVulnerable='Potencialmente vulnerable';NotAffected='No afectado por el aviso coincidente';Fixed='Versión corregida según el aviso coincidente';AdvisoryRangeMatch='Coincide con el rango de versiones afectadas del aviso';AdvisoryExcludesVersion='El aviso excluye la versión observada';AdvisoryFixedVersion='La versión observada coincide con la versión corregida del aviso';EffectiveJvmFlagObserved='Opción de JVM observada; ámbito sin especificar, proceso ELO actual no verificado';InstalledRuntimeValidated='Manifiesto del runtime instalado y prueba de versión verificados';BackupManifestMatched='El contenido de la copia coincide con el manifiesto original';OriginalRuntimeRestored='Runtime original restaurado y verificado';DownloadFailed='La descarga falló';ValidationFailed='Falló la validación de la postcondición';RestoreFailed='La restauración falló; hace falta recuperación manual';OperationCancelled='Operación cancelada';Checked='Fecha de verificación de las fuentes';Fetched='Obtenido por el agente principal';Supplied='Texto aportado por el usuario; el acceso al sitio devolvió HTTP 403; no obtenido de forma independiente';Changes='Los avisos pueden cambiar. El acceso a las fuentes no prueba la aplicabilidad ni el éxito de la corrección.'
+            Vendor='Fabricante de JVM verificado';Recommendation='Siguiente paso recomendado';Temporary='Mitigación temporal solo con opción; no instala un runtime de Java y no es una solución permanente. Una opción de máquina no prueba que una JVM recién iniciada o el proceso ELO actual use la opción.';Upgrade='Es preferible instalar una versión de Java más reciente corregida por el fabricante, tras confirmar la compatibilidad con ELO. No se deduce ninguna versión corregida concreta ni una instalación correcta.';VendorUnknown='Fabricante de JVM desconocido; consulta a tu fabricante de JVM y a ELO la versión corregida adecuada y las instrucciones oficiales de descarga e instalación. No se asume que Temurin sea un sustituto del mismo proveedor.';Download='Descargas oficiales de Temurin';Install='Instrucciones oficiales de instalación de Temurin';MachineOptionSet='Opción de máquina establecida';NewlyLaunchedJvmFlagVerified='Opción de una JVM recién iniciada';RunningEloJvmFlagVerified='Opción del proceso ELO en ejecución'}
+        foreach ($key in $es.Keys) { $t[$key]=$es[$key] }
+    }    $lines=New-Object 'System.Collections.Generic.List[string]'
     $lines.Add('<!doctype html><html lang="'+$Language+'"><head><meta charset="utf-8"><title>'+$t.Title+'</title></head><body><h1>'+$t.Title+'</h1>')
     $lines.Add('<p>'+$t.Notice+'</p>')
     # Only what is known is reported: anything unknown / unavailable is left out instead of printed as a placeholder.
@@ -3548,14 +3882,16 @@ function ConvertTo-EloTechnicalReportHtml {
     if ($actionItems.Count -gt 0) { $lines.Add('<h2>'+$t.Update+' / '+$t.Mitigation+' / '+$t.Backup+' / '+$t.Restore+'</h2><ul>'+($actionItems -join '')+'</ul>') }
     $optionLabels=@{Present='Flag present';Absent='Flag absent';Conflict='Conflicting enabling flag present'}
     if ($Language -eq 'de') { $optionLabels=@{Present='Flag vorhanden';Absent='Flag nicht vorhanden';Conflict='Konfligierendes aktivierendes Flag vorhanden'} }
+    if ($Language -eq 'es') { $optionLabels=@{Present='Opción presente';Absent='Opción ausente';Conflict='Hay una opción contradictoria que la activa'} }
     $optionItems=@()
     foreach ($scope in @('Machine','User','Process')) { if ($optionLabels.ContainsKey([string]$r.Options[$scope])) { $optionItems+='<li>'+$scope+': '+$optionLabels[$r.Options[$scope]]+'</li>' } }
     if ($optionItems.Count -gt 0) {
         $lines.Add('<h2>JAVA_TOOL_OPTIONS</h2><ul>'+($optionItems -join '')+'</ul>')
-        if ($Language -eq 'de') { $lines.Add('<p>Umgebungswerte beweisen keinen Schutz bestehender ELO-Prozesse.</p>') } else { $lines.Add('<p>Environment values do not prove protection of existing ELO processes.</p>') }
+        if ($Language -eq 'es') { $lines.Add('<p>Los valores del entorno no prueban la protección de los procesos ELO existentes.</p>') } elseif ($Language -eq 'de') { $lines.Add('<p>Umgebungswerte beweisen keinen Schutz bestehender ELO-Prozesse.</p>') } else { $lines.Add('<p>Environment values do not prove protection of existing ELO processes.</p>') }
     }
     if (@($r.Actions | Where-Object { $_.Kind -eq 'Update' -and $_.Status -eq 'Failed' }).Count -gt 0 -or @($r.Actions | Where-Object { $_.Kind -eq 'Backup' -and $_.Status -eq 'Proven' }).Count -gt 0) {
-        if ($Language -eq 'de') { $lines.Add('<h2>Manuelle Wiederherstellung</h2><p>Falls die Aktualisierung fehlschlaegt oder die alte Java-Version wieder benoetigt wird: ELO-Dienste und Java-Prozesse beenden, neue Runtime entfernen und die gesicherte Version aus dem Backup-ZIP zurueckspielen. Backup-ZIP und alte Runtime werden von diesem Werkzeug nie geloescht.</p>') }
+        if ($Language -eq 'es') { $lines.Add('<h2>Recuperación manual</h2><p>Si la actualización falla o se necesita de nuevo la versión anterior de Java: detén los servicios de ELO y los procesos Java, elimina el runtime nuevo y restaura la versión guardada desde el ZIP de la copia. Esta herramienta nunca borra el ZIP de la copia ni el runtime antiguo.</p>') }
+        elseif ($Language -eq 'de') { $lines.Add('<h2>Manuelle Wiederherstellung</h2><p>Falls die Aktualisierung fehlschlaegt oder die alte Java-Version wieder benoetigt wird: ELO-Dienste und Java-Prozesse beenden, neue Runtime entfernen und die gesicherte Version aus dem Backup-ZIP zurueckspielen. Backup-ZIP und alte Runtime werden von diesem Werkzeug nie geloescht.</p>') }
         else { $lines.Add('<h2>Manual recovery</h2><p>If the update fails, or the previous Java version is needed again: stop the ELO services and Java processes, remove the new runtime and restore the saved version from the backup ZIP. This tool never deletes the backup ZIP or the old runtime.</p>') }
         # Revalidate the trusted evidence against the normalized actions before rendering.
         $rr=New-EloTechnicalReport -ResourceCollector { $null } -OptionsCollector { $null } -JvmEvidence @($Report.Jvms | ForEach-Object { @{Version=$_.Version;Verified=($_.Status -ceq 'Proven')} }) -Actions $Report.Actions -RecoveryEvidence $Report.Recovery
@@ -4754,7 +5090,9 @@ function Test-EloRegex {
 function Test-EloBilingualText {
     param($Value, [int]$Max = 4096)
     if ($null -eq $Value) { return $false }
-    foreach ($lang in @('en','de')) {
+    # English and German are required; Spanish (es) is optional but validated like the others when present.
+    $langs=@('en','de'); if ($null -ne $Value.es) { $langs+='es' }
+    foreach ($lang in $langs) {
         $t = $Value.$lang
         if ($t -isnot [string] -or $t.Trim().Length -lt 1 -or $t.Length -gt $Max -or $t -match '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]') { return $false }
         foreach ($m in [regex]::Matches($t, '\{([A-Za-z]+)\}')) { if ($script:EloVulnPlaceholders -cnotcontains $m.Groups[1].Value) { return $false } }
@@ -4887,8 +5225,9 @@ function Format-EloVulnText {
     })
 }
 function Get-EloVulnText {
-    param($Bilingual, [ValidateSet('en','de')][string]$Language = 'en', [hashtable]$Values = @{})
-    return (Format-EloVulnText ([string]$Bilingual.$Language) $Values)
+    param($Bilingual, [ValidateSet('en','de','es')][string]$Language = 'en', [hashtable]$Values = @{})
+    $text=[string]$Bilingual.$Language; if (-not $text) { $text=[string]$Bilingual.en }
+    return (Format-EloVulnText $text $Values)
 }
 function Get-EloVulnAction {
     param($Vulnerability, [string]$Type)
@@ -5064,13 +5403,16 @@ function Install-EloVulnDb {
   "vulnerabilities": [
     {
       "id": "CVE-2026-114938",
-      "aliases": ["Java4Shell"],
+      "aliases": [
+        "Java4Shell"
+      ],
       "severity": "high",
       "status": "active",
       "origin": "built-in",
       "title": {
         "en": "CVE-2026-114938 (Java4Shell): flawed JIT BASE64 intrinsics",
-        "de": "CVE-2026-114938 (Java4Shell): fehlerhafte JIT-BASE64-Intrinsics"
+        "de": "CVE-2026-114938 (Java4Shell): fehlerhafte JIT-BASE64-Intrinsics",
+        "es": "CVE-2026-114938 (Java4Shell): intrínsecos BASE64 del JIT defectuosos"
       },
       "verifiedOn": "2026-11-23",
       "advisories": [
@@ -5079,7 +5421,8 @@ function Install-EloVulnDb {
           "url": "https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/",
           "title": {
             "en": "Temurin vendor advisory: parent fetched directly (2026-11-23); exact listed Temurin builds only",
-            "de": "Temurin-Herstellerhinweis: Elternagent rief direkt ab (2026-11-23); nur exakt aufgefuehrte Temurin-Builds"
+            "de": "Temurin-Herstellerhinweis: Elternagent rief direkt ab (2026-11-23); nur exakt aufgefuehrte Temurin-Builds",
+            "es": "Aviso del fabricante Temurin: obtenido directamente por el agente principal (2026-11-23); solo las compilaciones de Temurin indicadas exactamente"
           },
           "reportLabel": "Adoptium Temurin November 2026 CSPU",
           "provenanceNote": "Official Adoptium vendor advisory directly fetched by parent.",
@@ -5090,7 +5433,8 @@ function Install-EloVulnDb {
           "url": "https://linux.oracle.com/cve/CVE-2026-114938.html",
           "title": {
             "en": "Oracle Linux CVE-2026-114938: parent fetched directly (2026-11-23); not ELO compatibility verification",
-            "de": "Oracle Linux CVE-2026-114938: Elternagent rief direkt ab (2026-11-23); keine ELO-Kompatibilitaetspruefung"
+            "de": "Oracle Linux CVE-2026-114938: Elternagent rief direkt ab (2026-11-23); keine ELO-Kompatibilitaetspruefung",
+            "es": "Oracle Linux CVE-2026-114938: obtenido directamente por el agente principal (2026-11-23); no es una verificación de compatibilidad con ELO"
           },
           "reportLabel": "Oracle CVE-2026-114938",
           "provenanceNote": "Oracle Linux source directly fetched by parent.",
@@ -5101,7 +5445,8 @@ function Install-EloVulnDb {
           "url": "https://openjdk.org/groups/vulnerability/advisories/2026-11-17",
           "title": {
             "en": "OpenJDK advisory: parent reviewed user-supplied text; not fetched directly (2026-11-23)",
-            "de": "OpenJDK: Elternagent pruefte vom Benutzer gelieferten Text; nicht direkt abgerufen (2026-11-23)"
+            "de": "OpenJDK: Elternagent pruefte vom Benutzer gelieferten Text; nicht direkt abgerufen (2026-11-23)",
+            "es": "Aviso de OpenJDK: el agente principal revisó el texto aportado por el usuario; no se obtuvo directamente (2026-11-23)"
           },
           "reportLabel": "OpenJDK 2026-11-17",
           "provenanceNote": "User-supplied OpenJDK text reviewed by parent; not independently fetched.",
@@ -5113,18 +5458,33 @@ function Install-EloVulnDb {
         "probes": [
           {
             "id": "version",
-            "args": ["-version"],
+            "args": [
+              "-version"
+            ],
             "timeoutSec": 15,
             "expect": [
-              { "id": "vendor-temurin", "pattern": "(?i)\\bTemurin\\b", "meaning": "The runtime is Eclipse Temurin" },
-              { "id": "build-token", "pattern": "\\(build\\s+[^\\s,)]+", "meaning": "A build token is present for the version comparison" }
+              {
+                "id": "vendor-temurin",
+                "pattern": "(?i)\\bTemurin\\b",
+                "meaning": "The runtime is Eclipse Temurin"
+              },
+              {
+                "id": "build-token",
+                "pattern": "\\(build\\s+[^\\s,)]+",
+                "meaning": "A build token is present for the version comparison"
+              }
             ]
           }
         ],
         "vendors": {
           "Temurin": {
             "parser": "temurin-build",
-            "fixed": ["17.0.21.1+2", "21.0.13.1+2", "25.0.5.1+2", "27.0.1.1+4"],
+            "fixed": [
+              "17.0.21.1+2",
+              "21.0.13.1+2",
+              "25.0.5.1+2",
+              "27.0.1.1+4"
+            ],
             "fixedSource": "https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/"
           }
         },
@@ -5132,18 +5492,24 @@ function Install-EloVulnDb {
       },
       "problem": {
         "en": "{n} runtime(s) are before the fixed release: {list}. The JIT BASE64 intrinsics flaw lets this Java produce wrong results; the vendor fixed it in a newer release.",
-        "de": "{n} Runtime(s) liegen vor der behobenen Version: {list}. Der Fehler in den JIT-BASE64-Intrinsics kann falsche Ergebnisse liefern; der Hersteller hat ihn in einer neueren Version behoben."
+        "de": "{n} Runtime(s) liegen vor der behobenen Version: {list}. Der Fehler in den JIT-BASE64-Intrinsics kann falsche Ergebnisse liefern; der Hersteller hat ihn in einer neueren Version behoben.",
+        "es": "{n} runtime(s) son anteriores a la versión corregida: {list}. El fallo de los intrínsecos BASE64 del JIT puede hacer que este Java dé resultados erróneos; el fabricante lo corrigió en una versión posterior."
       },
       "solution": {
         "en": "update Java to the current release of the same branch (step 3, Update Java runtime). The temporary mitigation only reduces the risk until you update.",
-        "de": "Java auf die aktuelle Version desselben Branches aktualisieren (Schritt 3, Java-Runtime aktualisieren). Die vorlaeufige Risikominderung senkt das Risiko nur bis zum Update."
+        "de": "Java auf die aktuelle Version desselben Branches aktualisieren (Schritt 3, Java-Runtime aktualisieren). Die vorlaeufige Risikominderung senkt das Risiko nur bis zum Update.",
+        "es": "actualiza Java a la versión actual de la misma rama (paso 3, Actualizar el runtime de Java). La mitigación temporal solo reduce el riesgo hasta que actualices."
       },
       "actions": [
         {
           "id": "update-runtime",
           "type": "runtime-update",
           "recommended": true,
-          "label": { "en": "Update Java runtime", "de": "Java-Runtime aktualisieren" }
+          "label": {
+            "en": "Update Java runtime",
+            "de": "Java-Runtime aktualisieren",
+            "es": "Actualizar el runtime de Java"
+          }
         },
         {
           "id": "mitigate",
@@ -5152,35 +5518,50 @@ function Install-EloVulnDb {
           "variable": "JAVA_TOOL_OPTIONS",
           "option": "-XX:-UseBASE64Intrinsics",
           "conflictPattern": "UseBASE64Intrinsics",
-          "label": { "en": "Temporary mitigation", "de": "Vorlaeufige Risikominderung" },
+          "label": {
+            "en": "Temporary mitigation",
+            "de": "Vorlaeufige Risikominderung",
+            "es": "Mitigación temporal"
+          },
           "verify": {
-            "args": ["-XX:+PrintFlagsFinal", "-version"],
+            "args": [
+              "-XX:+PrintFlagsFinal",
+              "-version"
+            ],
             "expect": "(?m)^\\s*bool\\s+UseBASE64Intrinsics\\s*(?::=|=)\\s*(true|false)\\b[^\\r\\n]*$",
             "mustBe": "false"
           },
           "summary": {
             "en": "Set exactly one {option} in MACHINE {variable}, removing standalone duplicate/conflicting +/- flags (all future inheriting JVMs, not just ELO). Previous value: {old} (registry type: {kind}). New value: [{new}]. Registry type and all other option bytes are preserved. Backup: exact previous value retained in this session. On verification failure restore it automatically; after success use an approved Registry Editor procedure to restore {variable} under HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment with the previous value AND registry type above (delete it if absent). No ELO files are changed. Confirmation authorizes one disposable java -XX:+PrintFlagsFinal -version probe with the proposed options, followed by registry write, readback and a second probe.",
-            "de": "Genau einmal {option} in der systemweiten Variable {variable} setzen; eigenstaendige doppelte/widerspruechliche +/- Optionen entfernen (alle kuenftig erbenden JVMs, nicht nur ELO). Alter Wert: {old} (Registrierungstyp: {kind}). Neuer Wert: [{new}]. Typ und alle anderen Optionszeichen bleiben erhalten. Sicherung: exakter alter Wert in dieser Sitzung. Bei Prueffehler automatische Wiederherstellung; nach Erfolg per freigegebenem Registrierungseditor {variable} unter HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment mit altem Wert UND Typ wiederherstellen (bei zuvor fehlendem Wert loeschen). Keine ELO-Dateien werden geaendert. Bestaetigung erlaubt einen Test mit java -XX:+PrintFlagsFinal -version, danach Registrierungsaenderung, Ruecklesen und zweiten Test."
+            "de": "Genau einmal {option} in der systemweiten Variable {variable} setzen; eigenstaendige doppelte/widerspruechliche +/- Optionen entfernen (alle kuenftig erbenden JVMs, nicht nur ELO). Alter Wert: {old} (Registrierungstyp: {kind}). Neuer Wert: [{new}]. Typ und alle anderen Optionszeichen bleiben erhalten. Sicherung: exakter alter Wert in dieser Sitzung. Bei Prueffehler automatische Wiederherstellung; nach Erfolg per freigegebenem Registrierungseditor {variable} unter HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment mit altem Wert UND Typ wiederherstellen (bei zuvor fehlendem Wert loeschen). Keine ELO-Dateien werden geaendert. Bestaetigung erlaubt einen Test mit java -XX:+PrintFlagsFinal -version, danach Registrierungsaenderung, Ruecklesen und zweiten Test.",
+            "es": "Establecer exactamente una vez {option} en {variable} de la MÁQUINA, quitando las opciones +/- duplicadas o contradictorias sueltas (todas las JVM que hereden el entorno a partir de ahora, no solo ELO). Valor anterior: {old} (tipo de registro: {kind}). Valor nuevo: [{new}]. Se conservan el tipo de registro y todos los demás caracteres de las opciones. Copia: el valor anterior exacto se conserva en esta sesión. Si la verificación falla, se restaura automáticamente; tras el éxito, restaura {variable} con un procedimiento aprobado del Editor del Registro en HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment con el valor anterior Y el tipo de registro indicados arriba (bórrala si no existía). No se cambia ningún archivo de ELO. La confirmación autoriza una prueba desechable con java -XX:+PrintFlagsFinal -version con las opciones propuestas, seguida de la escritura en el registro, la relectura y una segunda prueba."
           }
         },
         {
           "id": "restore-backup",
           "type": "restore-backup",
-          "label": { "en": "Restore this backup", "de": "Dieses Backup wiederherstellen" }
+          "label": {
+            "en": "Restore this backup",
+            "de": "Dieses Backup wiederherstellen",
+            "es": "Restaurar esta copia"
+          }
         }
       ],
       "messages": {
         "restoreVulnerable": {
           "en": "SECURITY: this backup holds {vendor} {version}, which is BEFORE the fix for {id} ({alias}, BASE64 intrinsics). Restoring brings the vulnerability back. After the restore, apply the temporary mitigation ({option}) or update the runtime again.",
-          "de": "SICHERHEIT: Dieses Backup enthaelt {vendor} {version}, also eine Version VOR dem Fix fuer {id} ({alias}, BASE64-Intrinsics). Die Wiederherstellung bringt die Schwachstelle zurueck. Nach der Wiederherstellung die temporaere Risikominderung ({option}) anwenden oder die Runtime erneut aktualisieren."
+          "de": "SICHERHEIT: Dieses Backup enthaelt {vendor} {version}, also eine Version VOR dem Fix fuer {id} ({alias}, BASE64-Intrinsics). Die Wiederherstellung bringt die Schwachstelle zurueck. Nach der Wiederherstellung die temporaere Risikominderung ({option}) anwenden oder die Runtime erneut aktualisieren.",
+          "es": "SEGURIDAD: esta copia contiene {vendor} {version}, es decir, una versión ANTERIOR a la corrección de {id} ({alias}, intrínsecos BASE64). Restaurar trae de vuelta la vulnerabilidad. Después de restaurar, aplica la mitigación temporal ({option}) o actualiza el runtime de nuevo."
         },
         "restoreFixed": {
           "en": "Security: {vendor} {version} is a build listed as fixed for {id}. This is a narrow advisory classification, not a whole-system safety claim, and ELO compatibility is not verified.",
-          "de": "Sicherheit: {vendor} {version} ist ein fuer {id} als behoben aufgefuehrter Build. Das ist eine enge Advisory-Einstufung, keine Gesamtaussage zur Systemsicherheit; die ELO-Kompatibilitaet ist nicht geprueft."
+          "de": "Sicherheit: {vendor} {version} ist ein fuer {id} als behoben aufgefuehrter Build. Das ist eine enge Advisory-Einstufung, keine Gesamtaussage zur Systemsicherheit; die ELO-Kompatibilitaet ist nicht geprueft.",
+          "es": "Seguridad: {vendor} {version} es una compilación que figura como corregida para {id}. Es una clasificación estrecha según el aviso, no una afirmación de seguridad de todo el sistema, y la compatibilidad con ELO no está verificada."
         },
         "restoreUnknown": {
           "en": "SECURITY: the vulnerability status of {vendor} {version} for {id} cannot be determined from the available evidence. Treat it as potentially vulnerable and apply the temporary mitigation ({option}) after the restore.",
-          "de": "SICHERHEIT: Der Schwachstellenstatus von {vendor} {version} fuer {id} ist mit den vorhandenen Nachweisen nicht bestimmbar. Als potenziell verwundbar behandeln und nach der Wiederherstellung die temporaere Risikominderung ({option}) anwenden."
+          "de": "SICHERHEIT: Der Schwachstellenstatus von {vendor} {version} fuer {id} ist mit den vorhandenen Nachweisen nicht bestimmbar. Als potenziell verwundbar behandeln und nach der Wiederherstellung die temporaere Risikominderung ({option}) anwenden.",
+          "es": "SEGURIDAD: el estado de vulnerabilidad de {vendor} {version} respecto a {id} no puede determinarse con la evidencia disponible. Trátalo como potencialmente vulnerable y aplica la mitigación temporal ({option}) después de restaurar."
         },
         "logRestoreVulnerable": "SECURITY: {runtime} was restored to {version}, which is BEFORE the {id} fix. Update Java again or apply the mitigation ({option}).",
         "logRestoreUnknown": "SECURITY: {runtime} was restored to {version}; its status for {id} is unknown. Treat it as potentially vulnerable.",
@@ -5190,7 +5571,8 @@ function Install-EloVulnDb {
       "report": {
         "headline": {
           "en": "{id} ({alias}): potentially vulnerable runtimes were found",
-          "de": "{id} ({alias}): potenziell verwundbare Runtimes wurden gefunden"
+          "de": "{id} ({alias}): potenziell verwundbare Runtimes wurden gefunden",
+          "es": "{id} ({alias}): se encontraron runtimes potencialmente vulnerables"
         },
         "mitigationDetail": "{option}"
       },
@@ -5200,7 +5582,11 @@ function Install-EloVulnDb {
           "version": "openjdk version \"17.0.2\" 2022-01-18\nOpenJDK Runtime Environment Temurin-17.0.2+8 (build 17.0.2+8)\nOpenJDK 64-Bit Server VM Temurin-17.0.2+8 (build 17.0.2+8, mixed mode, sharing)\n",
           "flags": "     bool UseBASE64Intrinsics                      = true                                   {product} {default}\n"
         },
-        "expected": { "status": "PotentiallyVulnerable", "vendor": "Temurin", "version": "17.0.2+8" }
+        "expected": {
+          "status": "PotentiallyVulnerable",
+          "vendor": "Temurin",
+          "version": "17.0.2+8"
+        }
       }
     }
   ]

@@ -83,6 +83,16 @@ foreach ($case in $cases) {
 $draft = Copy-Db $db; $draft.vulnerabilities[0].status = 'draft'
 Assert (@(Test-EloVulnDb $draft).Count -eq 0 -and @(Get-EloActiveVulnerabilities $draft).Count -eq 0 -and @(Get-EloScanRules $draft).Count -eq 0) 'a draft entry is valid but never active and never used by the scan'
 
+
+# --- Spanish (es) texts are optional but validated like the others
+Assert ((Get-EloVulnText $active[0].problem 'es' @{n=2;list='x'}) -match '^2 runtime\(s\) son anteriores') 'Spanish problem text with placeholders'
+Assert ((Get-EloVulnText ([pscustomobject]@{en='only English';de='nur Deutsch'}) 'es') -ceq 'only English') 'a text without es falls back to English'
+$esBad = Copy-Db $db; $esBad.vulnerabilities[0].problem.es = 'ejecuta {evil}'
+Assert (Has-Problem $esBad 'problem') 'a Spanish text with an unknown placeholder is rejected'
+$esEmpty = Copy-Db $db; $esEmpty.vulnerabilities[0].problem.es = ''
+Assert (Has-Problem $esEmpty 'problem') 'an empty Spanish text is rejected'
+$noEs = Copy-Db $db; $noEs.vulnerabilities[0].problem.PSObject.Properties.Remove('es')
+Assert (@(Test-EloVulnDb $noEs).Count -eq 0) 'a catalog entry without Spanish stays valid'
 # --- file reading limits and fallback
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ('elo-vulndb-test-' + [guid]::NewGuid().ToString('N'))
 $null = [IO.Directory]::CreateDirectory($tmp)

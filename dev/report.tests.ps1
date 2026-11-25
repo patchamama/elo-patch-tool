@@ -232,4 +232,11 @@ foreach ($lang in @('en','de')) {
     Assert ($h -notmatch 'Vulnerability classification|Verwundbarkeitsklassifizierung|Evidence / method|Nachweis / Methode') "no label without a value ($lang)"
     Assert ($h -notmatch '<dl></dl>|<ul></ul>|JAVA_TOOL_OPTIONS') "no empty sections ($lang)"
     Assert ($h.Contains('17.0.10')) "known facts are still reported ($lang)"
-}Write-Output 'PASS: deterministic bilingual report tests (synthetic adapters only)'
+}
+# Spanish (castellano) report: translated labels, still no placeholders for unknown values.
+$esReport = New-EloTechnicalReport -ResourceCollector { @{ServerName='SRV01';WindowsVersion='10.0';WindowsBuild='20348';TotalRamBytes=17179869184;Disks=@(@{Name='C:';TotalBytes=107374182400;FreeBytes=53687091200})} } -OptionsCollector { @{Machine='-XX:-UseBASE64Intrinsics';User=$null;Process=$null} } -JvmEvidence @(@{Version='17.0.10';Verified=$true;ExecutionVerified=$true;Vendor='Temurin';VendorVerified=$true;Classification='PotentiallyVulnerable';ClassificationVerified=$true;EvidenceCode='AdvisoryRangeMatch'}) -Actions @()
+$h = ConvertTo-EloTechnicalReportHtml $esReport es
+Assert ($h.Contains('<html lang="es">') -and $h.Contains('Informe técnico') -and $h.Contains('Versiones de JVM detectadas') -and $h.Contains('Potencialmente vulnerable') -and $h.Contains('Siguiente paso recomendado') -and $h.Contains('RAM total')) 'the Spanish report is translated'
+Assert ($h -notmatch 'Technical report|Recommended next step|Detected JVM versions|Unknown / unavailable|Unbekannt') 'no English or German leftovers in the Spanish report'
+Assert ($h.Contains('Opción presente') -and $h.Contains('Los valores del entorno no prueban')) 'option labels and the environment note are Spanish'
+Write-Output 'PASS: deterministic bilingual report tests (synthetic adapters only)'

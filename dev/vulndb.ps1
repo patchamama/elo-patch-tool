@@ -35,7 +35,9 @@ function Test-EloRegex {
 function Test-EloBilingualText {
     param($Value, [int]$Max = 4096)
     if ($null -eq $Value) { return $false }
-    foreach ($lang in @('en','de')) {
+    # English and German are required; Spanish (es) is optional but validated like the others when present.
+    $langs=@('en','de'); if ($null -ne $Value.es) { $langs+='es' }
+    foreach ($lang in $langs) {
         $t = $Value.$lang
         if ($t -isnot [string] -or $t.Trim().Length -lt 1 -or $t.Length -gt $Max -or $t -match '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]') { return $false }
         foreach ($m in [regex]::Matches($t, '\{([A-Za-z]+)\}')) { if ($script:EloVulnPlaceholders -cnotcontains $m.Groups[1].Value) { return $false } }
@@ -168,8 +170,9 @@ function Format-EloVulnText {
     })
 }
 function Get-EloVulnText {
-    param($Bilingual, [ValidateSet('en','de')][string]$Language = 'en', [hashtable]$Values = @{})
-    return (Format-EloVulnText ([string]$Bilingual.$Language) $Values)
+    param($Bilingual, [ValidateSet('en','de','es')][string]$Language = 'en', [hashtable]$Values = @{})
+    $text=[string]$Bilingual.$Language; if (-not $text) { $text=[string]$Bilingual.en }
+    return (Format-EloVulnText $text $Values)
 }
 function Get-EloVulnAction {
     param($Vulnerability, [string]$Type)

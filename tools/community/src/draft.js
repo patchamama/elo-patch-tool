@@ -23,7 +23,8 @@ const clean = (value, max) => {
 const bilingual = (value, max, fallback) => {
   const en = clean(value && value.en, max) || clean(fallback && fallback.en, max);
   const de = clean(value && value.de, max) || en;
-  return { en: en || 'Not provided', de: de || 'Nicht angegeben' };
+  const es = clean(value && value.es, max);
+  return { en: en || 'Not provided', de: de || 'Nicht angegeben', ...(es ? { es } : {}) };
 };
 const normalizeUrl = value => {
   if (typeof value !== 'string') return null;
@@ -160,7 +161,7 @@ function buildDraftEntry(analysis, article, meta = {}, templates = loadTemplates
     advisories, detection, problem, solution, actions,
     messages: templates.messages || {},
     report: { headline: { en: '{id}: potentially vulnerable runtimes were found', de: '{id}: potenziell verwundbare Runtimes wurden gefunden' } },
-    review: { required: true, severityReason: clean(a.severityReason, 500), issues, provider: meta.provider || null, model: meta.model || null, createdUtc: meta.createdUtc || new Date().toISOString(),
+    review: { required: true, severityReason: clean(a.severityReason, 500), summary: bilingual(a.summary, 900, { en: '' }), scriptWorthwhile: a.scriptWorthwhile === true, scriptReason: clean(a.scriptReason, 400), solutionHints: (Array.isArray(a.solutionHints) ? a.solutionHints : []).map(h => clean(h, 300)).filter(Boolean).slice(0, 6), issues, provider: meta.provider || null, model: meta.model || null, createdUtc: meta.createdUtc || new Date().toISOString(),
       article: { url: article && article.url || null, title: clean(article && article.title, 300), date: article && article.date || null } }
   };
   if (simulation) entry.simulation = simulation;
@@ -187,4 +188,4 @@ function buildDraftDb(entries, sources, today = new Date().toISOString().slice(0
   return { schemaVersion: 1, updated: today, description: 'AI-assisted DRAFT catalog. Review, validate (--catalog-validate), simulate (--catalog-simulate) and only then install.', sources, vulnerabilities: entries };
 }
 
-module.exports = { toJsRegex, safeRegex, buildDraftEntry, validateEntry, buildDraftDb, clean, normalizeUrl, loadTemplates, PROBE_ARG, SEVERITY };
+module.exports = { bilingual, toJsRegex, safeRegex, buildDraftEntry, validateEntry, buildDraftDb, clean, normalizeUrl, loadTemplates, PROBE_ARG, SEVERITY };

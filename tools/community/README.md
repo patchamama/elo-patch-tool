@@ -45,6 +45,9 @@ node tools/community/bin/elo-community.js fetch   --since 1y --max 50           
 node tools/community/bin/elo-community.js analyze --articles C:\q\articles.json --provider openai --model gpt-4o
 node tools/community/bin/elo-community.js check   --draft C:\q\draft-vulndb.json
 node tools/community/bin/elo-community.js models  --provider openai            # list the models of your account
+node tools/community/bin/elo-community.js access  --yes                        # test the ELO Community sign-in (reads no article)
+node tools/community/bin/elo-community.js refine  --run C:\q --article 0 --hint-file hint.txt   # re-draft one article with your solution text
+node tools/community/bin/elo-community.js refine  --run C:\q --article 0 --research             # ... or let the AI research the internet (OpenAI / Anthropic)
 ```
 
 Then follow `report.md`: validate (`--catalog-validate`), simulate (`--catalog-simulate`), review and set `"status": "active"` on the entries you accept, and install with `--catalog-install FILE --confirm-admin`. The previous installed catalog is quarantined first and can be restored with `--catalog-restore`.
@@ -65,10 +68,12 @@ AI configuration: flags, or `config/ai.json` (copy `config/ai.example.json`; git
 - Verified: the sign-in page (`form#eloLoginForm`, `input[name=username]`, `input[name=password]`, button *Anmelden*), all provider request shapes against mocks, the draft sanitizing, the date/count limits, and that generated drafts pass the app's real validator and simulation (Windows PowerShell 5.1) — see `npm test`.
 - Verified against the real services (2026-11): sign-in, the board list (`a.post-list-title-text` inside `.post-list-content`, dates like `18. Nov. 2026`, pages via `&page=N`), article text (`.post-view`), the OpenAI model list and a full run through the web UI (fetch, model list box, analysis, drafts in quarantine).
 - Real-world findings: some newer OpenAI models reject `temperature: 0` (the tool no longer sends it), and `gpt-6.0-sol` is not offered by every account - use **Load available models** (`models` command) to pick an existing one, e.g. `gpt-6-sol`.
+- Verified with a real account and key: sign-in test, 10-article runs, per-article summaries/ratings, `refine` with a solution text (the Java4Shell article became a complete version-table entry with mitigation and a passing simulation) and `refine --research` (OpenAI `web_search`).
+- A rejected key (HTTP 401) is reported in plain language; pasted keys are trimmed, and the web UI's key field is a masked text field so browser password managers do not auto-fill the wrong secret.
 - Treat every draft as a suggestion from a model, not a verified advisory.
 
 ## Tests
 
 ```powershell
-npm test --prefix tools/community        # 35 tests, no network, no browser; the PowerShell cross-check runs on Windows
+npm test --prefix tools/community        # 43 tests, no network, no browser; the PowerShell cross-check runs on Windows
 ```

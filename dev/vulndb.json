@@ -14,13 +14,16 @@
   "vulnerabilities": [
     {
       "id": "CVE-2026-114938",
-      "aliases": ["Java4Shell"],
+      "aliases": [
+        "Java4Shell"
+      ],
       "severity": "high",
       "status": "active",
       "origin": "built-in",
       "title": {
         "en": "CVE-2026-114938 (Java4Shell): flawed JIT BASE64 intrinsics",
-        "de": "CVE-2026-114938 (Java4Shell): fehlerhafte JIT-BASE64-Intrinsics"
+        "de": "CVE-2026-114938 (Java4Shell): fehlerhafte JIT-BASE64-Intrinsics",
+        "es": "CVE-2026-114938 (Java4Shell): intrínsecos BASE64 del JIT defectuosos"
       },
       "verifiedOn": "2026-11-23",
       "advisories": [
@@ -29,7 +32,8 @@
           "url": "https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/",
           "title": {
             "en": "Temurin vendor advisory: parent fetched directly (2026-11-23); exact listed Temurin builds only",
-            "de": "Temurin-Herstellerhinweis: Elternagent rief direkt ab (2026-11-23); nur exakt aufgefuehrte Temurin-Builds"
+            "de": "Temurin-Herstellerhinweis: Elternagent rief direkt ab (2026-11-23); nur exakt aufgefuehrte Temurin-Builds",
+            "es": "Aviso del fabricante Temurin: obtenido directamente por el agente principal (2026-11-23); solo las compilaciones de Temurin indicadas exactamente"
           },
           "reportLabel": "Adoptium Temurin November 2026 CSPU",
           "provenanceNote": "Official Adoptium vendor advisory directly fetched by parent.",
@@ -40,7 +44,8 @@
           "url": "https://linux.oracle.com/cve/CVE-2026-114938.html",
           "title": {
             "en": "Oracle Linux CVE-2026-114938: parent fetched directly (2026-11-23); not ELO compatibility verification",
-            "de": "Oracle Linux CVE-2026-114938: Elternagent rief direkt ab (2026-11-23); keine ELO-Kompatibilitaetspruefung"
+            "de": "Oracle Linux CVE-2026-114938: Elternagent rief direkt ab (2026-11-23); keine ELO-Kompatibilitaetspruefung",
+            "es": "Oracle Linux CVE-2026-114938: obtenido directamente por el agente principal (2026-11-23); no es una verificación de compatibilidad con ELO"
           },
           "reportLabel": "Oracle CVE-2026-114938",
           "provenanceNote": "Oracle Linux source directly fetched by parent.",
@@ -51,7 +56,8 @@
           "url": "https://openjdk.org/groups/vulnerability/advisories/2026-11-17",
           "title": {
             "en": "OpenJDK advisory: parent reviewed user-supplied text; not fetched directly (2026-11-23)",
-            "de": "OpenJDK: Elternagent pruefte vom Benutzer gelieferten Text; nicht direkt abgerufen (2026-11-23)"
+            "de": "OpenJDK: Elternagent pruefte vom Benutzer gelieferten Text; nicht direkt abgerufen (2026-11-23)",
+            "es": "Aviso de OpenJDK: el agente principal revisó el texto aportado por el usuario; no se obtuvo directamente (2026-11-23)"
           },
           "reportLabel": "OpenJDK 2026-11-17",
           "provenanceNote": "User-supplied OpenJDK text reviewed by parent; not independently fetched.",
@@ -63,18 +69,33 @@
         "probes": [
           {
             "id": "version",
-            "args": ["-version"],
+            "args": [
+              "-version"
+            ],
             "timeoutSec": 15,
             "expect": [
-              { "id": "vendor-temurin", "pattern": "(?i)\\bTemurin\\b", "meaning": "The runtime is Eclipse Temurin" },
-              { "id": "build-token", "pattern": "\\(build\\s+[^\\s,)]+", "meaning": "A build token is present for the version comparison" }
+              {
+                "id": "vendor-temurin",
+                "pattern": "(?i)\\bTemurin\\b",
+                "meaning": "The runtime is Eclipse Temurin"
+              },
+              {
+                "id": "build-token",
+                "pattern": "\\(build\\s+[^\\s,)]+",
+                "meaning": "A build token is present for the version comparison"
+              }
             ]
           }
         ],
         "vendors": {
           "Temurin": {
             "parser": "temurin-build",
-            "fixed": ["17.0.21.1+2", "21.0.13.1+2", "25.0.5.1+2", "27.0.1.1+4"],
+            "fixed": [
+              "17.0.21.1+2",
+              "21.0.13.1+2",
+              "25.0.5.1+2",
+              "27.0.1.1+4"
+            ],
             "fixedSource": "https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/"
           }
         },
@@ -82,18 +103,24 @@
       },
       "problem": {
         "en": "{n} runtime(s) are before the fixed release: {list}. The JIT BASE64 intrinsics flaw lets this Java produce wrong results; the vendor fixed it in a newer release.",
-        "de": "{n} Runtime(s) liegen vor der behobenen Version: {list}. Der Fehler in den JIT-BASE64-Intrinsics kann falsche Ergebnisse liefern; der Hersteller hat ihn in einer neueren Version behoben."
+        "de": "{n} Runtime(s) liegen vor der behobenen Version: {list}. Der Fehler in den JIT-BASE64-Intrinsics kann falsche Ergebnisse liefern; der Hersteller hat ihn in einer neueren Version behoben.",
+        "es": "{n} runtime(s) son anteriores a la versión corregida: {list}. El fallo de los intrínsecos BASE64 del JIT puede hacer que este Java dé resultados erróneos; el fabricante lo corrigió en una versión posterior."
       },
       "solution": {
         "en": "update Java to the current release of the same branch (step 3, Update Java runtime). The temporary mitigation only reduces the risk until you update.",
-        "de": "Java auf die aktuelle Version desselben Branches aktualisieren (Schritt 3, Java-Runtime aktualisieren). Die vorlaeufige Risikominderung senkt das Risiko nur bis zum Update."
+        "de": "Java auf die aktuelle Version desselben Branches aktualisieren (Schritt 3, Java-Runtime aktualisieren). Die vorlaeufige Risikominderung senkt das Risiko nur bis zum Update.",
+        "es": "actualiza Java a la versión actual de la misma rama (paso 3, Actualizar el runtime de Java). La mitigación temporal solo reduce el riesgo hasta que actualices."
       },
       "actions": [
         {
           "id": "update-runtime",
           "type": "runtime-update",
           "recommended": true,
-          "label": { "en": "Update Java runtime", "de": "Java-Runtime aktualisieren" }
+          "label": {
+            "en": "Update Java runtime",
+            "de": "Java-Runtime aktualisieren",
+            "es": "Actualizar el runtime de Java"
+          }
         },
         {
           "id": "mitigate",
@@ -102,35 +129,50 @@
           "variable": "JAVA_TOOL_OPTIONS",
           "option": "-XX:-UseBASE64Intrinsics",
           "conflictPattern": "UseBASE64Intrinsics",
-          "label": { "en": "Temporary mitigation", "de": "Vorlaeufige Risikominderung" },
+          "label": {
+            "en": "Temporary mitigation",
+            "de": "Vorlaeufige Risikominderung",
+            "es": "Mitigación temporal"
+          },
           "verify": {
-            "args": ["-XX:+PrintFlagsFinal", "-version"],
+            "args": [
+              "-XX:+PrintFlagsFinal",
+              "-version"
+            ],
             "expect": "(?m)^\\s*bool\\s+UseBASE64Intrinsics\\s*(?::=|=)\\s*(true|false)\\b[^\\r\\n]*$",
             "mustBe": "false"
           },
           "summary": {
             "en": "Set exactly one {option} in MACHINE {variable}, removing standalone duplicate/conflicting +/- flags (all future inheriting JVMs, not just ELO). Previous value: {old} (registry type: {kind}). New value: [{new}]. Registry type and all other option bytes are preserved. Backup: exact previous value retained in this session. On verification failure restore it automatically; after success use an approved Registry Editor procedure to restore {variable} under HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment with the previous value AND registry type above (delete it if absent). No ELO files are changed. Confirmation authorizes one disposable java -XX:+PrintFlagsFinal -version probe with the proposed options, followed by registry write, readback and a second probe.",
-            "de": "Genau einmal {option} in der systemweiten Variable {variable} setzen; eigenstaendige doppelte/widerspruechliche +/- Optionen entfernen (alle kuenftig erbenden JVMs, nicht nur ELO). Alter Wert: {old} (Registrierungstyp: {kind}). Neuer Wert: [{new}]. Typ und alle anderen Optionszeichen bleiben erhalten. Sicherung: exakter alter Wert in dieser Sitzung. Bei Prueffehler automatische Wiederherstellung; nach Erfolg per freigegebenem Registrierungseditor {variable} unter HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment mit altem Wert UND Typ wiederherstellen (bei zuvor fehlendem Wert loeschen). Keine ELO-Dateien werden geaendert. Bestaetigung erlaubt einen Test mit java -XX:+PrintFlagsFinal -version, danach Registrierungsaenderung, Ruecklesen und zweiten Test."
+            "de": "Genau einmal {option} in der systemweiten Variable {variable} setzen; eigenstaendige doppelte/widerspruechliche +/- Optionen entfernen (alle kuenftig erbenden JVMs, nicht nur ELO). Alter Wert: {old} (Registrierungstyp: {kind}). Neuer Wert: [{new}]. Typ und alle anderen Optionszeichen bleiben erhalten. Sicherung: exakter alter Wert in dieser Sitzung. Bei Prueffehler automatische Wiederherstellung; nach Erfolg per freigegebenem Registrierungseditor {variable} unter HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment mit altem Wert UND Typ wiederherstellen (bei zuvor fehlendem Wert loeschen). Keine ELO-Dateien werden geaendert. Bestaetigung erlaubt einen Test mit java -XX:+PrintFlagsFinal -version, danach Registrierungsaenderung, Ruecklesen und zweiten Test.",
+            "es": "Establecer exactamente una vez {option} en {variable} de la MÁQUINA, quitando las opciones +/- duplicadas o contradictorias sueltas (todas las JVM que hereden el entorno a partir de ahora, no solo ELO). Valor anterior: {old} (tipo de registro: {kind}). Valor nuevo: [{new}]. Se conservan el tipo de registro y todos los demás caracteres de las opciones. Copia: el valor anterior exacto se conserva en esta sesión. Si la verificación falla, se restaura automáticamente; tras el éxito, restaura {variable} con un procedimiento aprobado del Editor del Registro en HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment con el valor anterior Y el tipo de registro indicados arriba (bórrala si no existía). No se cambia ningún archivo de ELO. La confirmación autoriza una prueba desechable con java -XX:+PrintFlagsFinal -version con las opciones propuestas, seguida de la escritura en el registro, la relectura y una segunda prueba."
           }
         },
         {
           "id": "restore-backup",
           "type": "restore-backup",
-          "label": { "en": "Restore this backup", "de": "Dieses Backup wiederherstellen" }
+          "label": {
+            "en": "Restore this backup",
+            "de": "Dieses Backup wiederherstellen",
+            "es": "Restaurar esta copia"
+          }
         }
       ],
       "messages": {
         "restoreVulnerable": {
           "en": "SECURITY: this backup holds {vendor} {version}, which is BEFORE the fix for {id} ({alias}, BASE64 intrinsics). Restoring brings the vulnerability back. After the restore, apply the temporary mitigation ({option}) or update the runtime again.",
-          "de": "SICHERHEIT: Dieses Backup enthaelt {vendor} {version}, also eine Version VOR dem Fix fuer {id} ({alias}, BASE64-Intrinsics). Die Wiederherstellung bringt die Schwachstelle zurueck. Nach der Wiederherstellung die temporaere Risikominderung ({option}) anwenden oder die Runtime erneut aktualisieren."
+          "de": "SICHERHEIT: Dieses Backup enthaelt {vendor} {version}, also eine Version VOR dem Fix fuer {id} ({alias}, BASE64-Intrinsics). Die Wiederherstellung bringt die Schwachstelle zurueck. Nach der Wiederherstellung die temporaere Risikominderung ({option}) anwenden oder die Runtime erneut aktualisieren.",
+          "es": "SEGURIDAD: esta copia contiene {vendor} {version}, es decir, una versión ANTERIOR a la corrección de {id} ({alias}, intrínsecos BASE64). Restaurar trae de vuelta la vulnerabilidad. Después de restaurar, aplica la mitigación temporal ({option}) o actualiza el runtime de nuevo."
         },
         "restoreFixed": {
           "en": "Security: {vendor} {version} is a build listed as fixed for {id}. This is a narrow advisory classification, not a whole-system safety claim, and ELO compatibility is not verified.",
-          "de": "Sicherheit: {vendor} {version} ist ein fuer {id} als behoben aufgefuehrter Build. Das ist eine enge Advisory-Einstufung, keine Gesamtaussage zur Systemsicherheit; die ELO-Kompatibilitaet ist nicht geprueft."
+          "de": "Sicherheit: {vendor} {version} ist ein fuer {id} als behoben aufgefuehrter Build. Das ist eine enge Advisory-Einstufung, keine Gesamtaussage zur Systemsicherheit; die ELO-Kompatibilitaet ist nicht geprueft.",
+          "es": "Seguridad: {vendor} {version} es una compilación que figura como corregida para {id}. Es una clasificación estrecha según el aviso, no una afirmación de seguridad de todo el sistema, y la compatibilidad con ELO no está verificada."
         },
         "restoreUnknown": {
           "en": "SECURITY: the vulnerability status of {vendor} {version} for {id} cannot be determined from the available evidence. Treat it as potentially vulnerable and apply the temporary mitigation ({option}) after the restore.",
-          "de": "SICHERHEIT: Der Schwachstellenstatus von {vendor} {version} fuer {id} ist mit den vorhandenen Nachweisen nicht bestimmbar. Als potenziell verwundbar behandeln und nach der Wiederherstellung die temporaere Risikominderung ({option}) anwenden."
+          "de": "SICHERHEIT: Der Schwachstellenstatus von {vendor} {version} fuer {id} ist mit den vorhandenen Nachweisen nicht bestimmbar. Als potenziell verwundbar behandeln und nach der Wiederherstellung die temporaere Risikominderung ({option}) anwenden.",
+          "es": "SEGURIDAD: el estado de vulnerabilidad de {vendor} {version} respecto a {id} no puede determinarse con la evidencia disponible. Trátalo como potencialmente vulnerable y aplica la mitigación temporal ({option}) después de restaurar."
         },
         "logRestoreVulnerable": "SECURITY: {runtime} was restored to {version}, which is BEFORE the {id} fix. Update Java again or apply the mitigation ({option}).",
         "logRestoreUnknown": "SECURITY: {runtime} was restored to {version}; its status for {id} is unknown. Treat it as potentially vulnerable.",
@@ -140,7 +182,8 @@
       "report": {
         "headline": {
           "en": "{id} ({alias}): potentially vulnerable runtimes were found",
-          "de": "{id} ({alias}): potenziell verwundbare Runtimes wurden gefunden"
+          "de": "{id} ({alias}): potenziell verwundbare Runtimes wurden gefunden",
+          "es": "{id} ({alias}): se encontraron runtimes potencialmente vulnerables"
         },
         "mitigationDetail": "{option}"
       },
@@ -150,7 +193,11 @@
           "version": "openjdk version \"17.0.2\" 2022-01-18\nOpenJDK Runtime Environment Temurin-17.0.2+8 (build 17.0.2+8)\nOpenJDK 64-Bit Server VM Temurin-17.0.2+8 (build 17.0.2+8, mixed mode, sharing)\n",
           "flags": "     bool UseBASE64Intrinsics                      = true                                   {product} {default}\n"
         },
-        "expected": { "status": "PotentiallyVulnerable", "vendor": "Temurin", "version": "17.0.2+8" }
+        "expected": {
+          "status": "PotentiallyVulnerable",
+          "vendor": "Temurin",
+          "version": "17.0.2+8"
+        }
       }
     }
   ]

@@ -12,7 +12,8 @@
 ![Zulu](https://img.shields.io/badge/Azul-Zulu-0033A0)
 ![Temurin](https://img.shields.io/badge/Eclipse-Temurin-FF1472?logo=eclipseadoptium&logoColor=white)
 ![Tests](https://img.shields.io/badge/tests-PowerShell%20·%20Node%20·%20Playwright-2EAD33?logo=playwright&logoColor=white)
-![Languages](https://img.shields.io/badge/UI-EN%20·%20DE-informational)
+![Languages](https://img.shields.io/badge/UI-EN%20·%20DE%20·%20ES-informational)
+![License](https://img.shields.io/badge/license-MIT-green)
 
 </div>
 
@@ -146,9 +147,22 @@ node tools/community/bin/elo-community.js run --since 3m --max 20 --provider ant
 node tools/community/bin/elo-community.js check      # validate + simulate the draft with the app
 ```
 
-**In the web UI** the **Settings** button in the header (available at every step) opens *Settings: ELO Community + AI (optional)*: it shows what is needed (credentials, extra software), offers *Install the helper* only after you tick the consent box, takes your ELO Community user/password and the AI key (used for that one run, never stored, fields cleared afterwards), lists the models your account offers in a list box (**Load available models**), runs the analysis and shows one card per draft with its severity, whether a solution was reported, whether a simulation exists and whether it detects anything. The same commands are available from the terminal.
+**In the web UI** the **Settings** button in the header (available at every step) opens *Settings: ELO Community + AI (optional)*:
+
+- shows what is needed (credentials, extra software) and offers *Install the helper* only after you tick the consent box;
+- takes your ELO Community user/password and the AI key (used for that one run, never stored, fields cleared afterwards) and has a **Test ELO Community access** button;
+- lists the models your account offers in a collapsible list box, loaded automatically when a key is already saved (or with **Load available models**);
+- runs the analysis and lists every **article found** with the AI's severity (high / medium / low) and why, a short summary, whether a **script is worthwhile** (and why not, e.g. it needs a vendor hotfix), the solutions the article reports and the draft it produced;
+- lets you **improve one article** by pasting a solution text, notes or links and/or letting the AI **research the internet** (OpenAI / Anthropic), which re-drafts the catalog entry;
+- **Check the drafts** validates them and replays their simulation inside the app.
+
+The same commands are available from the terminal (ccess, models, efine).
 
 Limits: `--since 30d|8w|3m|1y|YYYY-MM-DD` and `--max N`. Details, safety rules and the unverified parts are in [`tools/community/README.md`](tools/community/README.md).
+
+## Languages and license
+
+The web UI, the technical report and the catalog texts are available in **English, German and Spanish** (the Spanish selector is next to the language list; backend messages that have no Spanish version fall back to English). The project is released under the [MIT License](LICENSE).
 
 ## Safety and limitations
 

@@ -528,80 +528,120 @@ function boot(hash = '#token=test-session-token', storage = null) {
  changeLocale(byHand,'de'); assert(flat(byHand.el('behindUpdate')).includes('Nichts wird gelöscht') && !flat(byHand.el('behindUpdate')).includes('Nothing here is deleted')); changeLocale(byHand,'en');
  byHand.vulns([vuln()]); await byHand.poll();
  assert.equal(byHand.el('behindMitigateBox').attrs.hidden,'','no mitigation block when the catalog has no mitigation action');
- for (const bad of [mit(), {...mit(),variable:'PATH'}, {...mit(),option:'-javaagent:x.jar'}, {...mit(),verifyArgs:['C:\\evil.exe']}, {...mit(),extra:1}]) { byHand.vulns([vuln({mitigation:bad})]); await byHand.poll(); if (bad === undefined || JSON.stringify(bad) === JSON.stringify(mit())) assert.equal(byHand.el('error').textContent,''); else assert(byHand.el('error').textContent.includes('invalid response'),'invalid mitigation info rejected: '+JSON.stringify(bad)); } // ---- optional ELO Community + AI panel
- const cs = (over={}) => ({helper:true,node:true,playwright:false,chrome:true,secrets:{communityUser:true,communityPassword:false,openaiKey:true,anthropicKey:false},ai:{provider:'openai',model:'gpt-x',baseUrl:'https://api.openai.com/v1'},...over});
- const idleJob = () => ({state:'idle',kind:'',log:[],drafts:[],outDir:''});
- const draftItem = (over={}) => ({id:'CVE-2026-1',severity:'high',title:'Draft title',solutionReported:true,simulation:false,issues:2,detects:true,...over});
- const calls = []; let status = cs(), job = idleJob(), polls = 0, models = {models:['gpt-5','gpt-6-sol','o3'],current:'gpt-x'};
+ for (const bad of [mit(), {...mit(),variable:'PATH'}, {...mit(),option:'-javaagent:x.jar'}, {...mit(),verifyArgs:['C:\\evil.exe']}, {...mit(),extra:1}]) { byHand.vulns([vuln({mitigation:bad})]); await byHand.poll(); if (bad === undefined || JSON.stringify(bad) === JSON.stringify(mit())) assert.equal(byHand.el('error').textContent,''); else assert(byHand.el('error').textContent.includes('invalid response'),'invalid mitigation info rejected: '+JSON.stringify(bad)); } // ---- optional ELO Community + AI panel (opened from the Settings button)
+ const cs = (over={}) => ({helper:true,node:true,playwright:true,chrome:true,secrets:{communityUser:true,communityPassword:true,openaiKey:true,anthropicKey:false},ai:{provider:'openai',model:'gpt-x',baseUrl:'https://api.openai.com/v1'},...over});
+ const idleJob = () => ({state:'idle',kind:'',log:[],drafts:[],articles:[],runId:'',outDir:''});
+ const art = (over={}) => ({index:0,url:'https://community.elo.com/community/x/#/post/(A)',title:'Java4Shell (CVE-2026-114938)',date:'2026-11-18',status:'drafted',error:'',severity:'high',severityReason:'Remote code execution',summary:{en:'English summary',de:'Deutsche Zusammenfassung',es:'Resumen en espanol'},javaRelated:true,scriptWorthwhile:true,scriptReason:'A version check detects it',solutions:[{kind:'update',summary:'Update Java'},{kind:'none',summary:''}],draftId:'CVE-2026-1',issues:1,...over});
+ const draftItem = (over={}) => ({id:'CVE-2026-1',severity:'high',title:'Draft title',solutionReported:true,simulation:true,issues:1,detects:true,...over});
+ const doneJob = (over={}) => ({state:'completed',kind:'run',log:['Fetched 2 article(s)','Drafted 1 entry'],drafts:[draftItem()],articles:[art(),art({index:1,url:'',title:'Jackson Databind',status:'drafted',severity:'medium',summary:null,scriptWorthwhile:false,scriptReason:'Needs a vendor hotfix',solutions:[],draftId:'',issues:0}),art({index:2,status:'error',error:'ai_http_401: the AI rejected the API key',severity:'',summary:null,severityReason:'',draftId:'',solutions:[]})],runId:'20261125120227',outDir:'C:\\ProgramData\\ELO-Patch-Tools\\quarantine\\drafts\\20261125120227',...over});
+ const calls = []; let status = cs(), job = idleJob(), polls = 0, models = {models:['gpt-5','gpt-6-sol','o3'],current:'gpt-x'}, access = {ok:true,articlesOnPage:27}, accessFail = false;
  const backend = (path, body) => {
    calls.push({path,body});
    if (path === 'community/status') return status;
-   if (path === 'community/job') { if (job.state === 'running' && ++polls > 2) job = {state:'completed',kind:'run',log:['Fetched 2 article(s)','Drafted 1 entry'],drafts:[draftItem(),draftItem({id:'CVE-2026-2',severity:'medium',title:'Second',solutionReported:false,detects:false})],outDir:'C:\\ProgramData\\ELO-Patch-Tools\\quarantine\\drafts\\20261125'}; return job; }
+   if (path === 'community/job') { if (job.state === 'running' && ++polls > 2) job = doneJob({kind:job.kind}); return job; }
    if (path === 'community/models') return models;
-   if (path === 'community/setup') { job = {state:'running',kind:'setup',log:[],drafts:[],outDir:''}; polls = 99; return {ok:true}; }
-   if (path === 'community/run') { job = {state:'running',kind:'run',log:['starting'],drafts:[],outDir:''}; polls = 0; return {ok:true}; }
-   if (path === 'community/cancel') { job = {state:'cancelled',kind:'run',log:[],drafts:[],outDir:''}; return {ok:true}; }
+   if (path === 'community/access') return accessFail ? {__status:502,body:{error:'community_failed',warnings:[both('The ELO Community rejected the user name or password.','Die ELO Community hat Benutzername oder Passwort abgelehnt.')]}} : access;
+   if (path === 'community/setup') { job = {...idleJob(),state:'running',kind:'setup'}; polls = 99; return {ok:true}; }
+   if (path === 'community/run') { job = {...idleJob(),state:'running',kind:'run',log:['starting']}; polls = 0; return {ok:true}; }
+   if (path === 'community/refine') { job = {...job,state:'running',kind:'refine',log:['refining']}; polls = 0; return {ok:true}; }
+   if (path === 'community/validate') return {valid:true,error:'',entries:[{id:'CVE-2026-1',status:'draft',passed:true,detected:'PotentiallyVulnerable',reason:''}]};
+   if (path === 'community/cancel') { job = {...idleJob(),state:'cancelled',kind:'run'}; return {ok:true}; }
    throw Error('unexpected '+path);
  };
  assert(/<section class="panel community" id="communityBox"[^>]*\bhidden\b/.test(html) && /<button id="settingsBtn"/.test(html) && html.indexOf('id="communityBox"') < html.indexOf('id="step1"'),'a Settings button in the header opens the community panel, which sits above every step and is hidden by default');
- // opens the Settings panel (closing it first when it is already open, so the status is loaded again)
- const openSettings = async ui => { if (ui.el('settingsBtn').attrs['aria-expanded'] === 'true') await ui.el('settingsBtn').onclick(); await ui.el('settingsBtn').onclick(); };
- for (const key of ['cUser','cPass','aiProvider','aiKey','aiBase','aiModel','cSince','cMax','cConsent','communityRun']) assert(html.includes('id="'+key+'"'),'panel has '+key);
- assert(/id="cPass" type="password"/.test(html) && /id="aiKey" type="password"/.test(html) && /<select id="aiModel" size="8"/.test(html),'secrets are password fields and the model is a list box');
+ for (const key of ['cUser','cPass','cTest','aiProvider','aiKey','aiBase','aiModel','aiModelsBox','aiLoad','cSince','cMax','cConsent','communityRun','communityArticles','communityValidate']) assert(html.includes('id="'+key+'"'),'panel has '+key);
+ assert(/id="cPass" type="password"/.test(html) && /id="aiKey" class="masked" type="text"/.test(html) && /autocomplete="off"[^>]*data-lpignore/.test(html.slice(html.indexOf('id="aiKey"'))),'the API key is a masked text field that password managers do not auto-fill');
+ assert(/<details id="aiModelsBox"[^>]*><summary id="aiModelSummary">/.test(html) && /<select id="aiModel" size="8"/.test(html),'the models are a collapsible list box');
  assert(html.includes('data-i18n="communityNeed1"') && html.includes('data-i18n="communityNeed3"'),'the panel states the credentials and the extra software up front');
+ const openSettings = async ui => { if (ui.el('settingsBtn').attrs['aria-expanded'] === 'true') await ui.el('settingsBtn').onclick(); await ui.el('settingsBtn').onclick(); await tick(); await tick(); await tick(); };
  const cm = boot(); await tick(); cm.community(backend);
- await openSettings(cm); await tick();
+ await openSettings(cm);
  assert.equal(cm.el('communityBox').attrs.hidden,undefined,'the Settings button shows the panel'); assert.equal(cm.el('settingsBtn').attrs['aria-expanded'],'true');
  assert.equal(calls.filter(c => c.path === 'community/status').length,1,'status is loaded when the panel opens');
- assert(cm.el('communityStatus').textContent.includes('Helper not installed yet') && cm.el('communityStatus').textContent.includes('OPENAI_API_KEY') && !cm.el('communityStatus').textContent.includes('sk-'),'status shows what is missing and which secrets exist (names only)');
- assert.equal(cm.el('communitySetup').attrs.hidden,undefined,'install button shown when playwright is missing');
- assert.equal(cm.el('communityRun').disabled,true,'analysis is disabled until the helper is installed');
- assert.equal(cm.el('aiProvider').value,'openai'); assert.equal(cm.el('aiModel').value,'gpt-x','the configured model is preselected');
- await cm.el('communitySetup').onclick(); await tick();
- assert(cm.el('error').textContent === '' && cm.el('communityError').textContent.includes('consent box'),'install needs the consent checkbox'); assert.equal(calls.filter(c => c.path === 'community/setup').length,0);
- cm.el('cConsent').checked = true; cm.el('cConsent').onchange();
- await cm.el('communitySetup').onclick(); await tick(); await tick();
- assert.deepEqual(calls.find(c => c.path === 'community/setup').body,{consent:'yes'},'install sends the explicit consent');
- status = cs({playwright:true}); job = idleJob(); await openSettings(cm); await tick(); await tick(); await tick();
- await cm.el('settingsClose').onclick(); assert.equal(cm.el('communityBox').attrs.hidden,'','the panel closes again'); await openSettings(cm); await tick(); await tick(); await tick();
- // model list box
- cm.el('aiKey').value = 'sk-typed-secret'; await cm.el('aiLoad').onclick(); await tick();
- const mcall = calls.filter(c => c.path === 'community/models').at(-1);
- assert.deepEqual(mcall.body,{provider:'openai',apiKey:'sk-typed-secret',baseUrl:'https://api.openai.com/v1'});
- assert.deepEqual(cm.el('aiModel').children.map(o => o.value),['gpt-5','gpt-6-sol','o3'],'available models fill the list box');
- assert.equal(cm.el('aiModel').value,'gpt-5','keeps a configured model that is not in the list out and picks the first');
- cm.el('aiModel').value = 'gpt-6-sol'; cm.el('aiModel').onchange();
- assert(cm.el('aiModelNote').textContent.includes('3 models'));
- assert.doesNotMatch(JSON.stringify([cm.el('communityLog').textContent,cm.el('communityStatus').textContent,cm.el('communityError').textContent]),/sk-typed-secret/);
- // run
- cm.el('cUser').value = 'me@example.org'; cm.el('cPass').value = 'pw-typed-secret'; cm.el('cSince').value = '90d'; cm.el('cMax').value = '7'; cm.el('cConsent').checked = false; cm.el('cConsent').onchange();
- assert.equal(cm.el('communityRun').disabled,true,'run needs the consent checkbox');
- cm.el('cConsent').checked = true; cm.el('cConsent').onchange(); assert.equal(cm.el('communityRun').disabled,false);
+ const auto = calls.filter(c => c.path === 'community/models');
+ assert.equal(auto.length,1,'a saved key loads the model list automatically'); assert.deepEqual(auto[0].body,{provider:'openai',baseUrl:'https://api.openai.com/v1'},'without sending any typed secret');
+ assert.deepEqual(cm.el('aiModel').children.map(o => o.value),['gpt-5','gpt-6-sol','o3']); assert.equal(cm.el('aiModel').value,'gpt-5');
+ assert(cm.el('aiModelNote').textContent.includes('3 models') && cm.el('aiModelNote').textContent.includes('not offered by this account'),'the page says when the configured model does not exist');
+ assert(cm.el('aiModelSummary').textContent.startsWith('gpt-5') && cm.el('aiModelSummary').textContent.includes('(3)'),'the collapsed list shows the selected model');
+ assert(cm.el('communityStatus').textContent.includes('Ready') && cm.el('communityStatus').textContent.includes('OPENAI_API_KEY') && !cm.el('communityStatus').textContent.includes('sk-'),'status shows readiness and which secrets exist (names only)');
+ cm.el('aiModel').value = 'gpt-6-sol'; cm.el('aiModel').onchange(); assert(cm.el('aiModelSummary').textContent.startsWith('gpt-6-sol')); assert.equal(cm.el('aiModelsBox').open,false,'choosing a model folds the list');
+ // test the ELO Community access
+ assert.equal(cm.el('cTest').disabled,true,'testing the access needs the consent checkbox');
+ await cm.el('cTest').onclick(); await tick(); assert(cm.el('communityError').textContent.includes('consent box')); assert.equal(calls.filter(c => c.path === 'community/access').length,0);
+ cm.el('cConsent').checked = true; cm.el('cConsent').onchange(); cm.el('cUser').value = 'me@example.org'; cm.el('cPass').value = 'pw-typed-secret';
+ await cm.el('cTest').onclick(); await tick(); await tick();
+ assert.deepEqual(calls.find(c => c.path === 'community/access').body,{consent:'yes',user:'me@example.org',password:'pw-typed-secret'},'the access test sends the consent and the typed credentials');
+ assert(cm.el('cTestResult').textContent.includes('Signed in') && cm.el('cTestResult').textContent.includes('27'),'the result shows the sign-in and the number of visible articles');
+ accessFail = true; await cm.el('cTest').onclick(); await tick(); await tick();
+ assert(cm.el('communityError').textContent.includes('rejected the user name or password') && cm.el('cTestResult').textContent === '' && cm.el('error').textContent === '','a failed sign-in is explained inside the panel'); accessFail = false;
+ // run + articles
+ cm.el('cSince').value = '90d'; cm.el('cMax').value = '7'; cm.el('cPass').value = 'pw-typed-secret'; cm.el('aiKey').value = 'sk-typed-secret';
  polls = 0; await cm.el('communityRun').onclick(); await tick(); await tick(); await tick();
  const run = calls.find(c => c.path === 'community/run');
- assert.deepEqual(run.body,{consent:'yes',since:'90d',max:'7',provider:'openai',model:'gpt-6-sol',user:'me@example.org',password:'pw-typed-secret',apiKey:'sk-typed-secret',baseUrl:'https://api.openai.com/v1'},'the run sends flat strings: limits, provider, model and the typed secrets');
- assert.equal(cm.el('cPass').value,'','the password is cleared after sending'); assert.equal(cm.el('aiKey').value,'','the API key is cleared after sending');
- assert(cm.el('communityLog').textContent.includes('Finished.') && cm.el('communityLog').textContent.includes('Drafted 1 entry'),'job log is shown');
- assert.equal(cm.el('communityDrafts').children.length,2,'one card per draft');
- const d0 = cm.el('communityDrafts').children[0];
- assert(d0.children[0].children[0].dataset.sev === 'high' && d0.children[0].children[1].textContent === 'CVE-2026-1 - Draft title' && d0.children[1].textContent.includes('solution reported: yes') && d0.children[1].textContent.includes('simulation: no') && d0.children[1].textContent.includes('open issues: 2'),'draft card shows severity, solution, simulation and open issues');
- assert(cm.el('communityDrafts').children[1].children[1].textContent.includes('solution reported: no') && cm.el('communityDrafts').children[1].children[1].textContent.includes('detects: no'));
- assert.equal(cm.el('communityNext').attrs.hidden,undefined,'next steps are shown after a finished run');
- const nextText = cm.el('communityNext').children.map(r => r.children.length ? r.children.map(x => x.textContent).join('') : r.textContent).join('\n');
- assert(nextText.includes('--catalog-validate "C:\\ProgramData\\ELO-Patch-Tools\\quarantine\\drafts\\20261125\\draft-vulndb.json"') && nextText.includes('--catalog-install') && nextText.includes('--confirm-admin'),'the commands to validate, simulate and install the draft use the real folder');
- assert.doesNotMatch(JSON.stringify(calls.filter(c => c.path !== 'community/run' && c.path !== 'community/models')),/pw-typed-secret|sk-typed-secret/,'secrets are sent only with the run and the model request');
- // cancel + errors + validation of backend answers
- job = {state:'running',kind:'run',log:[],drafts:[],outDir:''}; polls = -99; await cm.el('communityRun').onclick(); await tick();
- await cm.el('communityCancel').onclick(); await tick();
- assert.equal(calls.at(-2).path === 'community/cancel' || calls.at(-1).path === 'community/job' || true,true);
+ assert.deepEqual(run.body,{consent:'yes',provider:'openai',model:'gpt-6-sol',since:'90d',max:'7',user:'me@example.org',password:'pw-typed-secret',apiKey:'sk-typed-secret',baseUrl:'https://api.openai.com/v1'},'the run sends flat strings');
+ assert.equal(cm.el('cPass').value,''); assert.equal(cm.el('aiKey').value,'','secrets are cleared after sending');
+ assert(cm.el('communityLog').textContent.includes('Finished.'));
+ const cards = cm.el('communityArticles').children;
+ assert.equal(cards.length,3,'one card per article found'); assert.equal(cm.el('communityArticlesTitle').attrs.hidden,undefined);
+ const c0 = cards[0], head0 = c0.children[0];
+ assert(head0.children[0].dataset.sev === 'high' && head0.children[0].textContent === 'High' && head0.children[1].textContent === 'Java4Shell (CVE-2026-114938)' && head0.children[1].href.startsWith('https://community.elo.com/') && head0.children[1].rel === 'noopener noreferrer' && head0.children[2].textContent === '2026-11-18','the card shows the severity, the title as a safe link and the date');
+ assert.equal(c0.children[1].textContent,'English summary','the AI summary is shown in the current language');
+ const text0 = c0.children.map(x => x.textContent).join('\n');
+ assert(text0.includes('Why this level: Remote code execution') && text0.includes('A script is worthwhile: yes - A version check detects it') && text0.includes('Solutions in the article: update (Update Java)') && text0.includes('Draft: CVE-2026-1') && text0.includes('simulation: yes') && text0.includes('detects: yes'),'rating reason, script verdict, solutions and the draft line');
+ assert(cards[1].children.map(x => x.textContent).join('\n').includes('A script is worthwhile: no - Needs a vendor hotfix') && cards[1].children[0].children[1].href === undefined,'an article without a script says why; a missing link is not a link');
+ assert(cards[2].children.map(x => x.textContent).join('\n').includes('Could not analyze: The AI rejected the API key (401)') && cards[2].children[0].children[0].textContent === 'error','an article the AI could not analyze shows a plain-language cause');
+ changeLocale(cm,'de'); assert.equal(cm.el('communityArticles').children[0].children[1].textContent,'Deutsche Zusammenfassung','summaries follow the language'); changeLocale(cm,'en');
+ // improve with a solution / research
+ const refineBtn = c0.children.find(x => x.textContent === 'Improve with a solution or research');
+ await refineBtn.onclick(); await tick();
+ const box = cm.el('communityArticles').children[0].children.at(-1);
+ assert(box.className === 'refine' && box.children[0].maxLength === 4000,'the refine form has a solution box');
+ box.children[2].onclick(); await tick(); assert(cm.el('communityError').textContent.includes('Paste a solution text'),'refining needs a solution text or the research box');
+ const live = cm.el('communityArticles').children[0].children.at(-1); live.children[0].value = 'Fix: update to 17.0.21.1+2'; live.children[0].oninput(); live.children[1].children[0].checked = true; live.children[1].children[0].onchange();
+ cm.el('aiKey').value = 'sk-typed-secret'; polls = 0; await live.children[2].onclick(); await tick(); await tick(); await tick();
+ const refine = calls.find(c => c.path === 'community/refine');
+ assert.deepEqual(refine.body,{consent:'yes',provider:'openai',model:'gpt-6-sol',run:'20261125120227',article:'0',hint:'Fix: update to 17.0.21.1+2',research:'yes',user:'me@example.org',apiKey:'sk-typed-secret',baseUrl:'https://api.openai.com/v1'},'refining sends the run, the article, the solution text and the research flag');
+ // validate drafts
+ assert.equal(cm.el('communityValidate').attrs.hidden,undefined,'drafts can be checked once a run finished');
+ await cm.el('communityValidate').onclick(); await tick();
+ assert.deepEqual(calls.at(-1),{path:'community/validate',body:{run:'20261125120227'}}); assert(cm.el('communityValidation').textContent.includes('CVE-2026-1 [draft]: simulation passed (PotentiallyVulnerable)'),'the app validates and simulates the draft');
+ assert.doesNotMatch(JSON.stringify(calls.filter(c => !['community/run','community/models','community/refine','community/access'].includes(c.path))),/pw-typed-secret|sk-typed-secret/,'secrets travel only with the requests that need them');
+ // no key available: no automatic model request
+ status = cs({secrets:{communityUser:false,communityPassword:false,openaiKey:false,anthropicKey:false}}); const noKey = boot(); await tick(); const before = calls.length; noKey.community(backend); await openSettings(noKey);
+ assert.equal(calls.slice(before).filter(c => c.path === 'community/models').length,0,'without a key nothing is requested automatically'); status = cs();
+ // invalid backend answers are rejected
  const bad = boot(); await tick();
- for (const wrong of [cs({extra:1}),cs({helper:'yes'}),cs({secrets:{communityUser:true}}),cs({ai:{provider:'evil',model:'m',baseUrl:''}})]) { bad.community((p) => p === 'community/status' ? wrong : idleJob()); await openSettings(bad); await tick(); assert(bad.el('communityError').textContent.length > 0,'invalid status rejected: '+JSON.stringify(wrong).slice(0,60)); }
- const fail = boot(); await tick(); status = cs({playwright:true}); fail.community((p) => { if (p === 'community/models') return {__status:502,body:{error:'community_failed',warnings:[both('The community helper failed. ai_http_401','Der Community-Helfer ist fehlgeschlagen. ai_http_401')]}}; return p === 'community/status' ? status : idleJob(); });
- await openSettings(fail); await tick(); await fail.el('aiLoad').onclick(); await tick();
- assert(fail.el('communityError').textContent.includes('The community helper failed') && fail.el('communityError').textContent.includes('ai_http_401') && fail.el('error').textContent === '','a helper failure is shown inside the panel with its code, not as a page error');
- changeLocale(fail,'de'); assert(fail.translated.find(el => el.dataset.i18n === 'communityRun').textContent === 'Neueste Sicherheitsartikel analysieren' && fail.translated.find(el => el.dataset.i18n === 'communityConsent').textContent.includes('Zugangsdaten'),'German labels'); changeLocale(fail,'en');
- const noHelper = boot(); await tick(); noHelper.community((p) => p === 'community/status' ? cs({helper:false,node:false}) : idleJob()); await openSettings(noHelper); await tick();
- assert(noHelper.el('communityStatus').textContent.includes('tools/community was not found') && noHelper.el('communityRun').disabled === true && noHelper.el('communitySetup').attrs.hidden === '','without the helper the feature explains itself and the patch tool is unaffected'); // ---- the temporary mitigation is always available for a scanned runtime
+ for (const wrong of [cs({extra:1}),cs({helper:'yes'}),cs({secrets:{communityUser:true}}),cs({ai:{provider:'evil',model:'m',baseUrl:''}})]) { bad.community((p) => p === 'community/status' ? wrong : idleJob()); await openSettings(bad); assert(bad.el('communityError').textContent.length > 0,'invalid status rejected: '+JSON.stringify(wrong).slice(0,60)); }
+ for (const wrongJob of [doneJob({articles:[art({url:'https://evil.example/x'})]}),doneJob({articles:[art({severity:'extreme'})]}),doneJob({articles:[art({solutions:[{kind:'x',summary:''}]})]}),doneJob({articles:[art({summary:{en:'only'}})]}),doneJob({runId:'../x'}),doneJob({articles:[art({extra:1})]})]) {
+   const badJob = boot(); await tick(); badJob.community((p) => p === 'community/status' ? cs({secrets:{communityUser:false,communityPassword:false,openaiKey:false,anthropicKey:false}}) : wrongJob); await openSettings(badJob);
+   assert(badJob.el('communityError').textContent.length > 0 && badJob.el('communityArticles').children.length === 0,'an invalid job payload is rejected: '+JSON.stringify(wrongJob.articles[0] || wrongJob.runId).slice(0,70));
+ }
+ const fail = boot(); await tick(); fail.community((p) => { if (p === 'community/models') return {__status:502,body:{error:'community_failed',warnings:[both('The AI provider rejected the API key (HTTP 401).','Der KI-Anbieter hat den API-Schluessel abgelehnt (HTTP 401).')]}}; return p === 'community/status' ? cs() : idleJob(); });
+ await openSettings(fail);
+ assert(fail.el('communityError').textContent.includes('rejected the API key') && fail.el('error').textContent === '','a rejected key is explained inside the panel, not as a page error');
+ changeLocale(fail,'de'); assert(fail.translated.find(el => el.dataset.i18n === 'communityRun').textContent === 'Neueste Sicherheitsartikel analysieren' && fail.translated.find(el => el.dataset.i18n === 'communityTest').textContent === 'ELO-Community-Zugang testen','German labels'); changeLocale(fail,'en');
+ const noHelper = boot(); await tick(); noHelper.community((p) => p === 'community/status' ? cs({helper:false,node:false,playwright:false}) : idleJob()); await openSettings(noHelper);
+ assert(noHelper.el('communityStatus').textContent.includes('tools/community was not found') && noHelper.el('communityRun').disabled === true && noHelper.el('communitySetup').attrs.hidden === '','without the helper the feature explains itself and the patch tool is unaffected'); // ---- Spanish (castellano) next to English and German
+ assert(html.includes('<option value="es">Español</option>'),'the language selector offers Spanish');
+ { const src = scripts[0][1], start = src.indexOf('const messages = {'), end = src.indexOf('const $ = id');
+   const ctx = {}; vm.runInNewContext(src.slice(start,end)+';this.messages=messages;',ctx);
+   const en = Object.keys(ctx.messages.en), de = Object.keys(ctx.messages.de), es = Object.keys(ctx.messages.es);
+   assert.deepEqual(en.filter(k => !es.includes(k)),[],'every English message has a Spanish translation'); assert.deepEqual(es.filter(k => !en.includes(k)),[],'no stray Spanish keys'); assert.deepEqual(en.filter(k => !de.includes(k)),[]);
+   assert.equal(ctx.messages.es.manual.length,ctx.messages.en.manual.length,'same number of manual steps');
+   for (const k of en) if (typeof ctx.messages.en[k] === 'string') { const placeholders = s => (s.match(/\{[a-z]+\}/g) || []).sort().join(','); assert.equal(placeholders(ctx.messages.es[k]),placeholders(ctx.messages.en[k]),'same placeholders in '+k); }
+ }
+ const spUi = boot(); await tick(); spUi.community(backend);
+ spUi.el('language').value = 'es'; spUi.el('language').onchange();
+ assert.equal(spUi.translated.find(el => el.dataset.i18n === 'step1').textContent,'Escaneo'); assert.equal(spUi.translated.find(el => el.dataset.i18n === 'communityRun').textContent,'Analizar los últimos artículos de seguridad'); assert.equal(spUi.translated.find(el => el.dataset.i18n === 'settings').textContent,'Ajustes');
+ assert.equal(spUi.el('status').textContent,'Escaneo completado','state labels are translated');
+ job = doneJob(); status = cs(); await openSettings(spUi);
+ assert.equal(spUi.el('communityArticles').children[0].children[1].textContent,'Resumen en espanol','the AI summary is shown in Spanish');
+ assert.equal(spUi.el('communityArticles').children[1].children.map(x => x.textContent).join(' ').includes('Vale la pena un script: no'),true,'an article without a Spanish text still renders (fallback), labels are Spanish');
+ spUi.results([row({vendor:'Eclipse Temurin',version:'17.0.2+8',architecture:'x64',runtimeRoot:'C:\\ELO\\java',path:'C:\\ELO\\java\\bin\\java.exe',findings:[finding()]})]); spUi.vulns([vuln()]); await spUi.poll();
+ assert(flat(spUi.el('behindUpdate')).includes('Ejecuta en una PowerShell de ADMINISTRADOR') && flat(spUi.el('behindUpdate')).includes('Haz una copia del runtime') && !flat(spUi.el('behindUpdate')).includes('Nothing here is deleted'),'the by-hand command comments are in Spanish');
+ assert(spUi.el('vulnList').children.length === 1 && spUi.el('vulnList').children[0].children[0].children[1].textContent === 'CVE title','catalog/server texts without a Spanish version fall back to English');
+ spUi.preview({previewId:'preview_1',summary:{en:'English summary',de:'Deutsche Zusammenfassung',es:'Resumen en español'},warnings:[both('Check compatibility','Kompatibilität prüfen'),{en:'Only EN',de:'Nur DE',es:'Solo ES'}]});
+ spUi.el('language').value = 'en'; spUi.el('language').onchange(); assert.equal(spUi.translated.find(el => el.dataset.i18n === 'step1').textContent,'Scan'); // ---- the temporary mitigation is always available for a scanned runtime
  const mitUi = boot(); await tick();
  mitUi.results([row({status:'inconclusive',vendor:'Azul Zulu',version:'21.0.1+12-LTS'})]); await mitUi.poll();
  assert.equal(mitUi.el('mitigate').disabled,false,'the temporary mitigation stays available for a runtime that is not classified vulnerable');

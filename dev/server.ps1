@@ -164,7 +164,7 @@ function Get-EloSecurityMetadata {
     $items=@(); $verified=@()
     foreach ($v in (Get-EloActiveVulnerabilities)) {
         if ($v.verifiedOn) { $verified+=[string]$v.verifiedOn }
-        foreach ($a in @($v.advisories)) { $items+=@{id=[string]$a.id;url=[string]$a.url;title=@{en=[string]$a.title.en;de=[string]$a.title.de}} }
+        foreach ($a in @($v.advisories)) { $advTitle=@{en=[string]$a.title.en;de=[string]$a.title.de}; if ($a.title.es) { $advTitle.es=[string]$a.title.es }; $items+=@{id=[string]$a.id;url=[string]$a.url;title=$advTitle} }
     }
     if ($items.Count -eq 0) { return @{verifiedOn=$null;advisories=@()} }
     return @{verifiedOn=[string]($verified | Sort-Object -Descending | Select-Object -First 1);advisories=$items}
@@ -173,8 +173,9 @@ function Get-EloVulnerabilityInfo {
     # What the UI needs per active vulnerability: severity, problem and solution texts, and the action ids.
     $list=@()
     foreach ($v in (Get-EloActiveVulnerabilities)) {
+        $tri={ param($x) $o=@{en=[string]$x.en;de=[string]$x.de}; if ($x.es) { $o.es=[string]$x.es }; $o }
         $list+=@{id=[string]$v.id;alias=[string](@($v.aliases) | Select-Object -First 1);severity=[string]$v.severity
-            title=@{en=[string]$v.title.en;de=[string]$v.title.de};problem=@{en=[string]$v.problem.en;de=[string]$v.problem.de};solution=@{en=[string]$v.solution.en;de=[string]$v.solution.de}
+            title=(& $tri $v.title);problem=(& $tri $v.problem);solution=(& $tri $v.solution)
             actions=@(@($v.actions) | ForEach-Object { [string]$_.id })}
         $m=Get-EloVulnAction $v 'jvm-option'
         if ($m) { $list[-1].mitigation=@{variable=[string]$m.variable;option=[string]$m.option;verifyArgs=@(@($m.verify.args) | ForEach-Object { [string]$_ })} }
@@ -427,10 +428,11 @@ function New-EloMitigationPreview {
     $values=@{option=[string]$spec.Action.option;variable=[string]$spec.Action.variable;old=$old;kind=[string]$before.Kind;new=[string]$after.Value}
     $summaryEn=Format-EloVulnText ([string]$spec.Action.summary.en) $values
     $summaryDe=Format-EloVulnText ([string]$spec.Action.summary.de) $values
+    $summaryAll=@{en=$summaryEn;de=$summaryDe}; if ($spec.Action.summary.es) { $summaryAll.es=Format-EloVulnText ([string]$spec.Action.summary.es) $values }
     $Session.Preview=$preview
     $notice=@()
     if ($target.Status -cne 'PotentiallyVulnerable') { $notice=@(@{en='This runtime is not classified as vulnerable by the catalog (for example another vendor). The temporary mitigation is allowed anyway: the option is probed with this exact java.exe first and nothing is written if that fails. It still applies machine-wide.';de='Diese Runtime wird vom Katalog nicht als verwundbar eingestuft (z. B. anderer Hersteller). Die vorlaeufige Risikominderung ist trotzdem erlaubt: die Option wird zuerst mit genau dieser java.exe geprueft; schlaegt das fehl, wird nichts geschrieben. Sie gilt weiterhin systemweit.'}) }
-    return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe};warnings=@($notice)+@(
+    return @{previewId=$preview.Id;summary=$summaryAll;warnings=@($notice)+@(
         @{en='Existing JVMs are NOT protected. No restart is performed. Windows services may retain an old environment even after restart; a verified PrintFlagsFinal probe is not proof of service protection. Coordinate supported ELO configuration with your administrator.';de='Bestehende JVMs sind NICHT geschuetzt. Kein Neustart. Windows-Dienste koennen alte Umgebungswerte behalten. Der PrintFlagsFinal-Test beweist keinen Schutz des Dienstes. Unterstuetzte ELO-Konfiguration mit Administrator klaeren.'},
         @{en='Global options can break unrelated JVMs. Advisory source verification does not establish ELO or JVM-option compatibility. Session-only backup is lost on exit: save the previous value from this preview before confirmation. No runtime update is available.';de='Globale Optionen koennen andere JVMs stoeren. Quellenpruefung beweist keine ELO- oder JVM-Optionskompatibilitaet. Sitzungssicherung geht beim Beenden verloren: alten Wert vor Bestaetigung sichern. Laufzeit-Update nicht verfuegbar.'})}
 }
@@ -567,7 +569,9 @@ function Get-EloRestoreSecurityWarning {
     $m=$Vulnerability.messages.$name
     if (-not $m) { return @() }
     $values=Get-EloVulnMessageValues $Vulnerability $Vendor $Version
-    return @(@{en=(Format-EloVulnText ([string]$m.en) $values);de=(Format-EloVulnText ([string]$m.de) $values)})
+    $warning=@{en=(Format-EloVulnText ([string]$m.en) $values);de=(Format-EloVulnText ([string]$m.de) $values)}
+    if ($m.es) { $warning.es=Format-EloVulnText ([string]$m.es) $values }
+    return @($warning)
 }function Get-EloBackupList {
     # Backup ZIPs written by this tool (<runtime>.backup-<yyyyMMddHHmmss>.zip) next to a runtime, on every
     # drive at level 1 (X:\) and level 2 (X:\<folder>\). Read-only, bounded, cached for 30 s. The ids are
@@ -662,6 +666,7 @@ function New-EloRuntimeUpdatePreview {
     $vendor=$package.Vendor; $kind=$package.ImageType.ToUpperInvariant()
     $summaryEn="Replace the $vendor $kind $($package.Branch) runtime in $runtime ($from) with the newest release of the same branch, $to ($($package.Architecture), SHA256 $($package.Sha256)). Steps: verified ZIP backup $($paths.Backup); HTTPS download from the vendor; extraction to $($paths.Stage); Java self-test; rename the old runtime to $($paths.Old); install; re-test. Any failure restores the old runtime. The old runtime and the backup are kept; nothing is deleted."
     $summaryDe="Die $vendor-$kind-$($package.Branch)-Runtime in $runtime ($from) durch die neueste Version desselben Branches ersetzen: $to ($($package.Architecture), SHA256 $($package.Sha256)). Schritte: geprueftes ZIP-Backup $($paths.Backup); HTTPS-Download beim Hersteller; Entpacken nach $($paths.Stage); Java-Selbsttest; alte Runtime nach $($paths.Old) umbenennen; installieren; erneut testen. Bei jedem Fehler wird die alte Runtime wiederhergestellt. Alte Runtime und Backup bleiben erhalten; es wird nichts geloescht."
+    $summaryEs="Sustituir el runtime $vendor $kind $($package.Branch) en $runtime ($from) por la última versión de la misma rama, $to ($($package.Architecture), SHA256 $($package.Sha256)). Pasos: copia ZIP verificada $($paths.Backup); descarga HTTPS del fabricante; extracción en $($paths.Stage); prueba de Java; renombrar el runtime antiguo a $($paths.Old); instalar; probar de nuevo. Cualquier fallo restaura el runtime antiguo. El runtime antiguo y la copia se conservan; no se borra nada."
     $warnings=@(
         @{en='ELO compatibility with this runtime is NOT verified; the update can affect ELO support. Confirming accepts this risk.';de='Die ELO-Kompatibilitaet dieser Runtime ist NICHT geprueft; das Update kann den ELO-Support beeintraechtigen. Mit der Bestaetigung wird dieses Risiko akzeptiert.'}
         @{en='The download is limited to the vendor''s official release host and its published SHA256. Installing the vendor package with its installer remains the preferred long-term fix.';de='Der Download ist auf den offiziellen Herstellerhost und die veroeffentlichte SHA256 beschraenkt. Die Installation des Herstellerpakets mit dem Installer bleibt die bevorzugte langfristige Loesung.'})
@@ -669,7 +674,7 @@ function New-EloRuntimeUpdatePreview {
         $list=Format-EloServiceList $services
         $warnings=@(@{en="These services use the runtime and will be STOPPED before the replacement and started again afterwards: $list. ELO is unavailable meanwhile. Confirming accepts this.";de="Diese Dienste verwenden die Runtime und werden vor dem Austausch BEENDET und danach wieder gestartet: $list. ELO ist in dieser Zeit nicht verfuegbar. Mit der Bestaetigung wird dies akzeptiert."})+$warnings
     }
-    return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe};warnings=$warnings}
+    return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe;es=$summaryEs};warnings=$warnings}
 }
 function Add-EloUpdateReportActions {
     param($Session,[string]$Outcome,$Preview,[int]$RuntimeIndex,[string]$FailureCode)
@@ -753,6 +758,7 @@ function New-EloRestorePreview {
     $Session.Preview=$preview
     $summaryEn="Restore the runtime ($($preview.ToVersion)) of $($source.Runtime) from the backup ZIP $($source.Backup). Every file is hash-checked before the swap; the current runtime (if any) is renamed to $($source.Runtime).replaced-$($preview.Stamp) and kept; nothing is deleted."
     $summaryDe="Die Runtime ($($preview.ToVersion)) von $($source.Runtime) aus dem Backup-ZIP $($source.Backup) wiederherstellen. Jede Datei wird vor dem Austausch per Hash geprueft; die aktuelle Runtime (falls vorhanden) wird nach $($source.Runtime).replaced-$($preview.Stamp) umbenannt und bleibt erhalten; es wird nichts geloescht."
+    $summaryEs="Restaurar el runtime ($($preview.ToVersion)) de $($source.Runtime) desde el ZIP de copia $($source.Backup). Cada archivo se comprueba por hash antes del cambio; el runtime actual (si existe) se renombra a $($source.Runtime).replaced-$($preview.Stamp) y se conserva; no se borra nada."
     $ver=[string]$preview.ToVersion; $vend=[string]$source.Vendor
     $assessment=Get-EloBackupAssessment $vend $ver
     $warnings=@(Get-EloRestoreSecurityWarning ([string]$source.Risk) $assessment.Vulnerability $vend $ver)
@@ -762,7 +768,7 @@ function New-EloRestorePreview {
     } else {
         $warnings=@(@{en='No running service or process uses this runtime right now. If the ELO Tomcat services run on it, stop them first (ELO will be unavailable) or the restore is refused.';de='Zurzeit verwendet kein laufender Dienst oder Prozess diese Runtime. Laufen die ELO-Tomcat-Dienste darauf, diese zuerst beenden (ELO ist dann nicht verfuegbar), sonst wird die Wiederherstellung abgelehnt.'})+$warnings
     }
-    return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe};warnings=$warnings}
+    return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe;es=$summaryEs};warnings=$warnings}
 }
 function Invoke-EloRestoreAction {
     param($Session,$Body)
@@ -800,7 +806,7 @@ function Invoke-EloRestoreAction {
     $Session.LastUpdate=$null; $Session.BackupsCache=$null
     return @{ok=$true}
 }function Get-EloSessionReportHtml {
-    param($Session,[ValidateSet('en','de')][string]$Language)
+    param($Session,[ValidateSet('en','de','es')][string]$Language)
     # ELO version: only from the installed Indexserver files below the parent of a scanned runtime.
     $eloRoots=@($Session.Targets.Values | ForEach-Object { try { [IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName([string]$_.Location))) } catch { $null } } | Where-Object { $_ } | Select-Object -Unique)
     $eloVersion=$null; if ($Session.Adapters.EloVersion -is [scriptblock] -and $eloRoots.Count -gt 0) { try { $eloVersion=& $Session.Adapters.EloVersion $eloRoots } catch { $eloVersion=$null } }
@@ -812,6 +818,10 @@ function Invoke-EloRestoreAction {
     if ($Language -eq 'de') {
         $states=@{idle='Bereit';scanning='Scan laeuft';cancelling='Abbruch angefordert';completed='Abgeschlossen';cancelled='Abgebrochen';error='Fehlgeschlagen'}
         $notice='Scanstatus der Sitzung: '; $scope='Sitzungsnachweise (auch fruehere Scans); nur ein abgeschlossener Scan ist eine vollstaendige Momentaufnahme. Ein Runtime-Update erfolgt nur nach ausdruecklicher Bestaetigung. ELO-API-Unterstuetzung und Risikominderung im laufenden ELO-Prozess sind nicht nachgewiesen.'
+    }
+    if ($Language -eq 'es') {
+        $states=@{idle='Listo';scanning='Escaneando';cancelling='Cancelacion solicitada';completed='Completado';cancelled='Cancelado';error='Fallido'}
+        $notice='Estado del escaneo de la sesion: '; $scope='Observaciones de la sesion (tambien de escaneos anteriores); solo un escaneo completado es una instantanea completa. Una actualizacion del runtime se realiza solo tras confirmacion explicita. El soporte de la API de ELO y la mitigacion en procesos ELO en ejecucion no estan verificados.'
     }
     $state=$states[$Session.State]; if (-not $state) { $state='Unknown / Unbekannt' }
     # A failed rollback can invalidate earlier machine-option evidence. Do not
@@ -866,8 +876,8 @@ function Get-EloCommunityEnvironment {
     param($Body)
     $env2=@{}
     $map=@{user='ELO_COMMUNITY_USER';password='ELO_COMMUNITY_PASSWORD'}
-    foreach ($k in $map.Keys) { $v=Assert-EloCommunityText $Body.$k $null 300 'invalid_parameters'; if ($v) { $env2[$map[$k]]=$v } }
-    $key=Assert-EloCommunityText $Body.apiKey $null 400 'invalid_parameters'
+    foreach ($k in $map.Keys) { $v=Assert-EloCommunityText ([string]$Body.$k).Trim() $null 300 'invalid_parameters'; if ($v) { $env2[$map[$k]]=$v } }
+    $key=Assert-EloCommunityText ([string]$Body.apiKey).Trim() $null 400 'invalid_parameters'
     if ($key) { $prov=[string]$Body.provider; if ($prov -ceq 'openai') { $env2['OPENAI_API_KEY']=$key } elseif ($prov -ceq 'anthropic') { $env2['ANTHROPIC_API_KEY']=$key } }
     return $env2
 }
@@ -927,7 +937,8 @@ function Start-EloCommunityJob {
     if ($job -and $job.Process -and -not $job.Process.HasExited) { Stop-EloRequest 409 'community_busy' }
     $tool=Get-EloCommunityTool $Session
     $stamp=(& $Session.Adapters.Clock).ToString('yyyyMMddHHmmss')
-    $outDir=Join-Path (Join-Path (Get-EloQuarantineRoot) 'drafts') $stamp
+    if ($Kind -ceq 'refine') { $outDir=Resolve-EloCommunityRunDir ([string]$Body.run) }
+    else { $outDir=Join-Path (Join-Path (Get-EloQuarantineRoot) 'drafts') $stamp }
     $null=[IO.Directory]::CreateDirectory($outDir)
     $logFile=Join-Path $outDir 'run.log'
     $environment=@{}
@@ -938,19 +949,88 @@ function Start-EloCommunityJob {
         $max=[int]$Body.max; if ($max -lt 1 -or $max -gt 50) { Stop-EloRequest 400 'invalid_parameters' }
         $arguments=@(('"'+$tool.Cli+'"'),'run','--since',$since,'--max',[string]$max)+(Get-EloCommunityAiArguments $Body $true)
         $environment=Get-EloCommunityEnvironment $Body
+    } elseif ($Kind -ceq 'refine') {
+        if ([string]$Body.article -cnotmatch '^[0-9]{1,2}$') { Stop-EloRequest 400 'invalid_parameters' }
+        $hint=[string]$Body.hint; if ($hint.Length -gt 4000 -or $hint -match '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]') { Stop-EloRequest 400 'invalid_parameters' }
+        $research=([string]$Body.research -ceq 'yes')
+        if (-not $research -and -not $hint.Trim()) { Stop-EloRequest 400 'missing_parameter' }
+        $arguments=@(('"'+$tool.Cli+'"'),'refine','--run',('"'+$outDir+'"'),'--article',[string][int]$Body.article)+(Get-EloCommunityAiArguments $Body $true)
+        if ($hint.Trim()) { $hintFile=Join-Path $outDir ('hint-'+$stamp+'.txt'); [IO.File]::WriteAllText($hintFile,$hint,(New-Object Text.UTF8Encoding($false))); $arguments+=@('--hint-file',('"'+$hintFile+'"')) }
+        if ($research) { $arguments+='--research' }
+        $environment=Get-EloCommunityEnvironment $Body
     } else {
         $arguments=@(('"'+$tool.Cli+'"'),'setup')
     }
-    $arguments+=@('--yes','--out',('"'+$outDir+'"'),'--log',('"'+$logFile+'"'))
+    $arguments+=@('--yes')
+    if ($Kind -cne 'refine') { $arguments+=@('--out',('"'+$outDir+'"')) }
+    $arguments+=@('--log',('"'+$logFile+'"'))
     Write-EloLog $Session "Community: starting '$Kind' (output in $outDir)."
     try { $process=& $Session.Adapters.StartProcess $tool.Node ($arguments -join ' ') $environment $tool.Root }
     catch { Stop-EloRequestDetail 502 'community_failed' 'process_start_failed' }
     $Session.CommunityJob=@{Kind=$Kind;Process=$process;OutDir=$outDir;LogFile=$logFile;Started=(& $Session.Adapters.Clock);Environment=$environment;Reported=$false}
 }
+function Get-EloCommunityFailureHint {
+    # Plain-language cause for the codes the helper reports (never contains a credential).
+    param([string]$Code)
+    switch -Regex ($Code) {
+        '^ai_http_401$' { return @{en='The AI provider rejected the API key (HTTP 401). Check the key typed in the field, or empty the field to use the key saved in secrets.local.env or the environment.';de='Der KI-Anbieter hat den API-Schluessel abgelehnt (HTTP 401). Den eingegebenen Schluessel pruefen oder das Feld leeren, um den in secrets.local.env bzw. der Umgebung gespeicherten zu verwenden.';es='El proveedor de IA rechazo la clave de API (HTTP 401). Revisa la clave escrita en el campo o vacia el campo para usar la guardada en secrets.local.env o en el entorno.'} }
+        '^ai_http_429$' { return @{en='The AI provider limits the requests (HTTP 429). Wait a moment and try again.';de='Der KI-Anbieter begrenzt die Anfragen (HTTP 429). Kurz warten und erneut versuchen.';es='El proveedor de IA limita las peticiones (HTTP 429). Espera un momento y reintenta.'} }
+        '^ai_http_(400|404)$' { return @{en='The AI provider does not accept the request or the model. Load the model list and choose one your account offers.';de='Der KI-Anbieter akzeptiert Anfrage oder Modell nicht. Modellliste laden und ein Modell Ihres Kontos waehlen.';es='El proveedor de IA no acepta la peticion o el modelo. Carga la lista de modelos y elige uno de tu cuenta.'} }
+        '^ai_key_missing$' { return @{en='No API key: type one in the field or save it as OPENAI_API_KEY / ANTHROPIC_API_KEY in secrets.local.env.';de='Kein API-Schluessel: im Feld eingeben oder als OPENAI_API_KEY / ANTHROPIC_API_KEY in secrets.local.env speichern.';es='Falta la clave de API: escribela en el campo o guardala como OPENAI_API_KEY / ANTHROPIC_API_KEY en secrets.local.env.'} }
+        '^ai_network_error$' { return @{en='The AI provider could not be reached. Check the network, the proxy and the base URL.';de='Der KI-Anbieter ist nicht erreichbar. Netzwerk, Proxy und Basis-URL pruefen.';es='No se pudo contactar con el proveedor de IA. Revisa la red, el proxy y la URL base.'} }
+        'login_failed' { return @{en='The ELO Community rejected the user name or password.';de='Die ELO Community hat Benutzername oder Passwort abgelehnt.';es='La ELO Community rechazo el usuario o la contrasena.'} }
+        'credentials_missing' { return @{en='Type your ELO Community user and password, or save them in secrets.local.env.';de='ELO-Community-Benutzer und -Passwort eingeben oder in secrets.local.env speichern.';es='Escribe tu usuario y contrasena de ELO Community o guardalos en secrets.local.env.'} }
+        '^dependency_missing$' { return @{en='The helper is not installed yet: confirm and press Install the helper first.';de='Der Helfer ist noch nicht installiert: zuerst bestaetigen und Helfer installieren.';es='El asistente aun no esta instalado: confirma y pulsa Instalar el asistente.'} }
+        '^research_unsupported$' { return @{en='Web research needs OpenAI or Anthropic. With Ollama paste a solution text instead.';de='Webrecherche braucht OpenAI oder Anthropic. Mit Ollama stattdessen einen Loesungstext einfuegen.';es='La investigacion web necesita OpenAI o Anthropic. Con Ollama pega un texto con la solucion.'} }
+    }
+    return $null
+}
+function ConvertTo-EloCommunitySummary {
+    # Reads analysis-summary.json written by the helper and returns a bounded, sanitized list for the UI.
+    param([string]$RunDir)
+    $file=Join-Path $RunDir 'analysis-summary.json'
+    $out=@()
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return @() }
+    # Windows PowerShell 5.1 returns a JSON array as ONE object: enumerate it explicitly.
+    try { $parsed=[IO.File]::ReadAllText($file) | ConvertFrom-Json; $items=@($parsed | ForEach-Object { $_ }) } catch { return @() }
+    $clip={ param($v,[int]$n) $s=[string]$v; $s=($s -replace '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]',' '); if ($s.Length -gt $n) { $s.Substring(0,$n) } else { $s } }
+    foreach ($a in @($items | Select-Object -First 60)) {
+        $url=[string]$a.url; if ($url -cnotmatch '^https://community\.elo\.com/[^\s"<>]{0,380}$') { $url='' }
+        $status=[string]$a.status; if (@('drafted','not-a-report','rejected','error') -cnotcontains $status) { $status='error' }
+        $sev=[string]$a.severity; if (@('high','medium','low') -cnotcontains $sev) { $sev='' }
+        $summary=$null
+        if ($a.summary -and $a.summary.en) { $summary=@{en=(& $clip $a.summary.en 900);de=(& $clip $(if ($a.summary.de) { $a.summary.de } else { $a.summary.en }) 900)}; if ($a.summary.es) { $summary.es=(& $clip $a.summary.es 900) } }
+        $solutions=@(@($a.solutionsReported) | Where-Object { $_ } | Select-Object -First 5 | ForEach-Object { $k=[string]$_.kind; if (@('update','mitigation','workaround','none') -cnotcontains $k) { $k='none' }; @{kind=$k;summary=(& $clip $_.summary 300)} })
+        $out+=@{index=[int]$a.index;url=$url;title=(& $clip $a.title 300);date=(& $clip $a.date 10);status=$status;error=(& $clip $a.error 200);severity=$sev;severityReason=(& $clip $a.severityReason 500)
+            summary=$summary;javaRelated=[bool]($a.javaRelated -eq $true);scriptWorthwhile=[bool]($a.scriptWorthwhile -eq $true);scriptReason=(& $clip $a.scriptReason 400);solutions=@($solutions);draftId=(& $clip $a.draftId 64);issues=[int]$a.issues}
+    }
+    return $out
+}
+function Test-EloCommunityDraft {
+    # Validates a draft catalog with the app's own validator and replays its simulations (never touches the machine).
+    param([string]$RunDir)
+    $file=Join-Path $RunDir 'draft-vulndb.json'
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return @{valid=$false;error='draft_missing';entries=@()} }
+    try { $db=Read-EloVulnDbFile $file } catch { return @{valid=$false;error=(ConvertTo-EloUpdateCode ([string]$_.Exception.Message));entries=@()} }
+    $entries=@()
+    foreach ($v in @($db.vulnerabilities | Select-Object -First 50)) {
+        $sim=$null; try { $sim=Invoke-EloVulnSimulation $v $db } catch { $sim=@{Passed=$false;Reason='simulation_failed'} }
+        $entries+=@{id=[string]$v.id;status=[string]$v.status;passed=[bool]$sim.Passed;detected=[string]$sim.Status;reason=[string]$sim.Reason}
+    }
+    return @{valid=$true;error='';entries=@($entries)}
+}
+function Resolve-EloCommunityRunDir {
+    # A run folder is only ever one of the timestamped folders below the quarantine drafts folder.
+    param([string]$Stamp)
+    if ($Stamp -cnotmatch '^[0-9]{14}$') { Stop-EloRequest 400 'invalid_parameters' }
+    $dir=Join-Path (Join-Path (Get-EloQuarantineRoot) 'drafts') $Stamp
+    if (-not (Test-Path -LiteralPath (Join-Path $dir 'articles.json') -PathType Leaf)) { Stop-EloRequest 409 'community_run_missing' }
+    return $dir
+}
 function Get-EloCommunityJobState {
     param($Session)
     $job=$Session.CommunityJob
-    if (-not $job) { return @{state='idle';kind='';log=@();drafts=@();outDir=''} }
+    if (-not $job) { return @{state='idle';kind='';log=@();drafts=@();articles=@();runId='';outDir=''} }
     $state='running'
     if ($job.Process.HasExited) {
         if ($job.Cancelled) { $state='cancelled' } elseif ($job.Process.ExitCode -eq 0) { $state='completed' } else { $state='failed' }
@@ -966,7 +1046,8 @@ function Get-EloCommunityJobState {
     }
     $drafts=@()
     $draftFile=Join-Path $job.OutDir 'draft-vulndb.json'
-    if ($state -ceq 'completed' -and $job.Kind -ceq 'run' -and (Test-Path -LiteralPath $draftFile -PathType Leaf)) {
+    $articles=@(); if (($state -ceq 'completed' -or $state -ceq 'failed') -and $job.Kind -cin @('run','refine')) { $articles=@(ConvertTo-EloCommunitySummary $job.OutDir) }
+    if ($state -ceq 'completed' -and $job.Kind -cin @('run','refine') -and (Test-Path -LiteralPath $draftFile -PathType Leaf)) {
         try {
             $db=[IO.File]::ReadAllText($draftFile) | ConvertFrom-Json
             foreach ($e in @($db.vulnerabilities | Select-Object -First 50)) {
@@ -976,7 +1057,7 @@ function Get-EloCommunityJobState {
             }
         } catch { $drafts=@() }
     }
-    return @{state=$state;kind=[string]$job.Kind;log=@($log);drafts=@($drafts);outDir=[string]$job.OutDir}
+    return @{state=$state;kind=[string]$job.Kind;log=@($log);drafts=@($drafts);articles=@($articles);runId=(Split-Path -Leaf ([string]$job.OutDir));outDir=[string]$job.OutDir}
 }
 function Invoke-EloCommunityApi {
     param($Session,$Request)
@@ -997,6 +1078,33 @@ function Invoke-EloCommunityApi {
             Start-EloCommunityJob $Session 'run' $body
             return @{ok=$true}
         }
+        '/api/community/access' {
+            $body=ConvertFrom-EloBody $Request.Body -Required @('consent') -Optional @('user','password')
+            if ([string]$body.consent -cne 'yes') { Stop-EloRequest 400 'consent_required' }
+            $tool=Get-EloCommunityTool $Session
+            $environment=Get-EloCommunityEnvironment $body
+            Write-EloLog $Session 'Community: testing the sign-in.'
+            try { $r=& $Session.Adapters.RunProcess $tool.Node ((@(('"'+$tool.Cli+'"'),'access','--yes')) -join ' ') $environment $tool.Root 120 }
+            catch { Stop-EloRequestDetail 502 'community_failed' (ConvertTo-EloUpdateCode ([string]$_.Exception.Message)) }
+            $msg=Remove-EloCommunitySecrets (([string]$r.Error+[string]$r.Output)) $environment
+            if ($r.ExitCode -ne 0) {
+                $code='access_failed'; if ($msg -match 'login_failed') { $code='login_failed' } elseif ($msg -match 'credentials_missing') { $code='credentials_missing' } elseif ($msg -match 'dependency_missing') { $code='dependency_missing' }
+                Stop-EloRequestDetail 502 'community_failed' $code
+            }
+            $json=@(([string]$r.Output -split "`r?`n") | Where-Object { $_ -match '^\{.*\}\s*$' } | Select-Object -Last 1)
+            if ($json.Count -ne 1) { Stop-EloRequestDetail 502 'community_failed' 'access_unreadable' }
+            try { $parsed=$json[0] | ConvertFrom-Json } catch { Stop-EloRequestDetail 502 'community_failed' 'access_unreadable' }
+            return @{ok=[bool]($parsed.ok -eq $true);articlesOnPage=[int]$parsed.articlesOnPage}
+        }
+        '/api/community/refine' {
+            $body=ConvertFrom-EloBody $Request.Body -Required @('consent','run','article','provider','model') -Optional @('hint','research','apiKey','baseUrl')
+            Start-EloCommunityJob $Session 'refine' $body
+            return @{ok=$true}
+        }
+        '/api/community/validate' {
+            $body=ConvertFrom-EloBody $Request.Body -Required @('run')
+            return (Test-EloCommunityDraft (Resolve-EloCommunityRunDir ([string]$body.run)))
+        }
         '/api/community/cancel' {
             $null=ConvertFrom-EloBody $Request.Body
             $job=$Session.CommunityJob
@@ -1010,7 +1118,7 @@ function Invoke-EloApi {
     param($Session,$Request)
     Assert-EloBoundary $Session $Request
     if (-not (Test-EloSecret ([string]$Request.Headers['X-Session-Token']) $Session.Token)) { Stop-EloRequest 401 'authentication_required' }
-    $get=@('/api/status','/api/results','/api/community/status','/api/community/job'); $post=@('/api/scan','/api/cancel','/api/preview','/api/action','/api/report','/api/community/models','/api/community/setup','/api/community/run','/api/community/cancel')
+    $get=@('/api/status','/api/results','/api/community/status','/api/community/job'); $post=@('/api/scan','/api/cancel','/api/preview','/api/action','/api/report','/api/community/models','/api/community/setup','/api/community/run','/api/community/cancel','/api/community/access','/api/community/refine','/api/community/validate')
     if ($Request.Target -cnotin ($get+$post)) { Stop-EloRequest 404 'unknown_route' }
     if (($Request.Target -cin $get -and $Request.Method -cne 'GET') -or ($Request.Target -cin $post -and $Request.Method -cne 'POST')) { Stop-EloRequest 405 'method_rejected' }
     Update-EloScanWorker $Session
@@ -1030,7 +1138,7 @@ function Invoke-EloApi {
     switch -CaseSensitive ($Request.Target) {
         '/api/report' {
             $body=ConvertFrom-EloBody $Request.Body -Required @('language')
-            if ($body.language -cnotin @('en','de')) { Stop-EloRequest 400 'invalid_language' }
+            if ($body.language -cnotin @('en','de','es')) { Stop-EloRequest 400 'invalid_language' }
             return @{html=(Get-EloSessionReportHtml $Session $body.language)}
         }
         '/api/scan' {
@@ -1066,6 +1174,7 @@ function Invoke-EloApi {
             if ($body.actionId -ceq 'update-runtime') { if ($preview) { $result=New-EloRuntimeUpdatePreview $Session $body.resultId } else { $result=Invoke-EloRuntimeUpdateAction $Session $body } }
             elseif ($body.actionId -ceq 'restore-backup') { if ($preview) { $result=New-EloRestorePreview $Session $body.resultId } else { $result=Invoke-EloRestoreAction $Session $body } }
             else { if ($preview) { $result=New-EloMitigationPreview $Session $body.resultId } else { $result=Invoke-EloMitigation $Session $body } }
+            if ($preview -and $result.warnings) { $result.warnings=@(@($result.warnings) | ForEach-Object { Add-EloSpanish $_ }) }
             Write-EloLog $Session "$phase '$($body.actionId)' OK."
             return $result
             } catch {
@@ -1121,6 +1230,36 @@ function Write-EloHttpResponse {
     $head=[Text.Encoding]::ASCII.GetBytes($headers)
     $Stream.Write($head,0,$head.Length); $Stream.Write($bytes,0,$bytes.Length); $Stream.Flush()
 }
+# Spanish (castellano) for messages the backend builds in English and German. Static texts are looked up by their
+# English text; the dynamic ones (service lists) are matched by pattern. The UI falls back to English when a text has no es.
+$script:EloSpanishStatic=@{
+    'This runtime is not classified as vulnerable by the catalog (for example another vendor). The temporary mitigation is allowed anyway: the option is probed with this exact java.exe first and nothing is written if that fails. It still applies machine-wide.'='Este runtime no está clasificado como vulnerable por el catálogo (por ejemplo, otro fabricante). La mitigación temporal se permite igualmente: la opción se prueba antes con este java.exe exacto y no se escribe nada si falla. Sigue aplicándose a toda la máquina.'
+    'Existing JVMs are NOT protected. No restart is performed. Windows services may retain an old environment even after restart; a verified PrintFlagsFinal probe is not proof of service protection. Coordinate supported ELO configuration with your administrator.'='Las JVM existentes NO quedan protegidas. No se reinicia nada. Los servicios de Windows pueden conservar un entorno antiguo incluso tras reiniciar; una prueba PrintFlagsFinal verificada no demuestra la protección del servicio. Coordina con tu administrador la configuración compatible de ELO.'
+    'ELO compatibility with this runtime is NOT verified; the update can affect ELO support. Confirming accepts this risk.'='La compatibilidad de ELO con este runtime NO está verificada; la actualización puede afectar al soporte de ELO. Al confirmar aceptas este riesgo.'
+    'The download is limited to the vendor''s official release host and its published SHA256. Installing the vendor package with its installer remains the preferred long-term fix.'='La descarga se limita al host oficial de versiones del fabricante y a su SHA256 publicado. Instalar el paquete del fabricante con su instalador sigue siendo la solución preferible a largo plazo.'
+    'No running service or process uses this runtime right now. If the ELO Tomcat services run on it, stop them first (ELO will be unavailable) or the restore is refused.'='Ningún servicio ni proceso en ejecución usa ahora este runtime. Si los servicios Tomcat de ELO lo usan, deténlos antes (ELO no estará disponible) o la restauración se rechaza.'
+    'Access was denied. Check elevation and filesystem/registry permissions; no protection is claimed. Do not bypass access controls.'='Acceso denegado. Revisa la elevación y los permisos de archivos/registro; no se afirma ninguna protección. No eludas los controles de acceso.'
+    'Mitigation requires an elevated administrator session. Read-only scans do not require elevation; inaccessible locations can make assessment incomplete.'='La mitigación requiere una sesión de administrador elevada. Los escaneos de solo lectura no la necesitan; las ubicaciones inaccesibles pueden dejar la valoración incompleta.'
+    'Manual recovery is required before another change. Restore the preview backup and verify it; opening a new session alone does not restore the environment.'='Hace falta recuperación manual antes de otro cambio. Restaura la copia de la vista previa y verifícala; abrir una sesión nueva por sí solo no restaura el entorno.'
+    'Verification failed; the exact previous environment value and type were restored and read back. No protection is claimed.'='La verificación falló; se restauraron y releyeron el valor anterior exacto del entorno y su tipo. No se afirma ninguna protección.'
+    'The scan encountered inaccessible/skipped locations or traversal limits. Results are not a complete assessment. Select a narrower accessible local root; review permissions without bypassing access controls.'='El escaneo encontró ubicaciones inaccesibles u omitidas o límites de recorrido. Los resultados no son una valoración completa. Elige una carpeta local accesible más estrecha y revisa los permisos sin eludir los controles de acceso.'
+    'The selected local directory is missing or inaccessible. Select an accessible directory and check permissions.'='La carpeta local seleccionada no existe o no es accesible. Elige una carpeta accesible y revisa los permisos.'
+    'Automatic runtime update is unavailable: provenance, ELO compatibility, validated backups, reversible replacement and rollback guarantees are not implemented and verified. Nothing was downloaded or replaced.'='La actualización automática del runtime no está disponible: no están implementadas ni verificadas la procedencia, la compatibilidad con ELO, las copias validadas, la sustitución reversible ni las garantías de reversión. No se descargó ni sustituyó nada.'
+    'The ELO Community helper is not available here (it needs the tools\community folder next to the tool and Node.js). The patch tool itself is unaffected.'='El asistente de ELO Community no está disponible aquí (necesita la carpeta tools\community junto a la herramienta y Node.js). La herramienta de parches no se ve afectada.'
+    'A community job is already running. Wait for it or cancel it.'='Ya hay un trabajo de la comunidad en curso. Espera a que termine o cancélalo.'
+    'Confirm that extra software may be installed and that your ELO Community credentials are used.'='Confirma que puede instalarse software adicional y que se usan tus credenciales de ELO Community.'
+    'This runtime is already the newest release of its branch. Nothing to update.'='Este runtime ya es la última versión de su rama. No hay nada que actualizar.'
+    'No backup from this session exists for this runtime. Restore manually from a backup ZIP using the commands in the technical report.'='No existe una copia de esta sesión para este runtime. Restaura manualmente desde un ZIP de copia con los comandos del informe técnico.'
+}
+function Add-EloSpanish {
+    param($Item)
+    if ($Item -isnot [hashtable] -or -not $Item.ContainsKey('en') -or $Item.ContainsKey('es')) { return $Item }
+    $en=[string]$Item.en
+    if ($script:EloSpanishStatic.ContainsKey($en)) { $Item.es=$script:EloSpanishStatic[$en]; return $Item }
+    if ($en -cmatch '^These services use the runtime and will be STOPPED before the replacement and started again afterwards: (.+)\. ELO is unavailable meanwhile\. Confirming accepts this\.$') { $Item.es='Estos servicios usan el runtime y se DETENDRÁN antes de la sustitución y se volverán a arrancar después: '+$Matches[1]+'. ELO no está disponible mientras tanto. Al confirmar aceptas esto.'; return $Item }
+    if ($en -cmatch '^The restore requires STOPPING the ELO services \(Tomcat\) that use this runtime: (.+)\. ELO is unavailable while the runtime is swapped; they are started again afterwards\. Confirming accepts this\.$') { $Item.es='La restauración exige DETENER los servicios de ELO (Tomcat) que usan este runtime: '+$Matches[1]+'. ELO no está disponible mientras se cambia el runtime; después se vuelven a arrancar. Al confirmar aceptas esto.'; return $Item }
+    return $Item
+}
 function ConvertTo-EloErrorResponse {
     param([Exception]$Exception)
     $status=500; $code='operation_failed'; $cursor=$Exception
@@ -1147,7 +1286,12 @@ function ConvertTo-EloErrorResponse {
     }
     $detail=''; if ($cursor -and $cursor.Data.Contains('Detail')) { $detail=' ['+[string]$cursor.Data['Detail']+']' }
     switch ($code) {
-        'community_failed' { $warnings+=@{en="The community helper failed.$detail Check the backend window for details; credentials are never shown.";de="Der Community-Helfer ist fehlgeschlagen.$detail Details im Backend-Fenster pruefen; Zugangsdaten werden nie angezeigt."} }
+        'community_failed' {
+            $hint=Get-EloCommunityFailureHint ([string]$cursor.Data['Detail'])
+            if ($hint) { $warnings+=$hint }
+            else { $warnings+=@{en="The community helper failed.$detail Check the backend window for details; credentials are never shown.";de="Der Community-Helfer ist fehlgeschlagen.$detail Details im Backend-Fenster pruefen; Zugangsdaten werden nie angezeigt."} }
+        }
+        'community_run_missing' { $warnings+=@{en='That run folder no longer exists. Run the analysis again.';de='Dieser Lauf-Ordner existiert nicht mehr. Analyse erneut ausfuehren.';es='Esa carpeta de ejecucion ya no existe. Vuelve a ejecutar el analisis.'} }
         'update_not_needed' { $warnings+=@{en='This runtime is already the newest release of its branch. Nothing to update.';de='Diese Runtime ist bereits die neueste Version ihres Branches. Nichts zu aktualisieren.'} }
         'no_backup_for_target' { $warnings+=@{en='No backup from this session exists for this runtime. Restore manually from a backup ZIP using the commands in the technical report.';de='Fuer diese Runtime existiert in dieser Sitzung kein Backup. Manuell aus einem Backup-ZIP wiederherstellen; Befehle stehen im technischen Bericht.'} }
         'restore_failed_no_change' { $warnings+=@{en="The restore was rejected before the runtime was swapped.$detail The current runtime is unchanged.";de="Die Wiederherstellung wurde abgelehnt, bevor die Runtime getauscht wurde.$detail Die aktuelle Runtime ist unveraendert."} }
@@ -1156,7 +1300,7 @@ function ConvertTo-EloErrorResponse {
         'update_failed_rolled_back' { $warnings+=@{en="The new runtime failed validation.$detail The original runtime was restored and verified; the failed runtime and the backup ZIP were kept.";de="Die neue Runtime bestand die Pruefung nicht.$detail Die urspruengliche Runtime wurde wiederhergestellt und geprueft; fehlgeschlagene Runtime und Backup-ZIP bleiben erhalten."} }
         'update_manual_recovery_required' { $warnings+=@{en="Automatic restore failed.$detail Further actions are locked. Restore manually from the backup ZIP using the commands in the technical report.";de="Automatische Wiederherstellung fehlgeschlagen.$detail Weitere Aktionen sind gesperrt. Manuell aus dem Backup-ZIP wiederherstellen; Befehle stehen im technischen Bericht."} }
     }
-    return @{Status=$status;Body=@{error=$code;warnings=@($warnings)}}
+    return @{Status=$status;Body=@{error=$code;warnings=@($warnings | ForEach-Object { Add-EloSpanish $_ })}}
 }
 function New-EloLoopbackListener {
     param([ValidateRange(0,65535)][int]$Port=0)
