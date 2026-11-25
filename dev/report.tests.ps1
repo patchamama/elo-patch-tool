@@ -264,4 +264,48 @@ Assert (-not (ConvertTo-EloTechnicalReportHtml $fixedReport en).Contains('This p
 Assert (-not (ConvertTo-EloTechnicalReportHtml (New-EloTechnicalReport -ResourceCollector $res2 -JvmEvidence @($oldJvm) -Actions @()) en).Contains('<h2>Result</h2>')) 'no result statement without a verified update'
 $ramReport = New-EloTechnicalReport -ResourceCollector { @{ServerName='S';TotalRamBytes=1073741824} } -JvmEvidence @()
 Assert ((ConvertTo-EloTechnicalReportHtml $ramReport en) -notmatch 'GiB \(Unknown') 'a known RAM size is not followed by an "unknown" status'
+# ---- hostname, timestamps, by-hand commands and PDF
+$stamp=[DateTime]::new(2026,11,25,12,30,5,[DateTimeKind]::Utc)
+$timedActions=@(
+    @{At=$stamp;RuntimeIndex=1;Kind='Backup';Status='Proven';Verified=$true;BackupVerified=$true;EvidenceVerified=$true;EvidenceCode='BackupManifestMatched';BackupVersion='17.0.10'},
+    @{At=$stamp;RuntimeIndex=1;Kind='Update';Status='Proven';Verified=$true;EvidenceVerified=$true;EvidenceCode='InstalledRuntimeValidated';FromVersion='17.0.10';ToVersion='17.0.20'},
+    @{At=$stamp;RuntimeIndex=1;Kind='Mitigation';Status='Proven';Verified=$true;EvidenceVerified=$true;EvidenceCode='MachineOptionSet'})
+$timedRecovery=@{Validated=$true;RuntimeIndex=1;Archive='C:\Backups\java.zip';Original='C:\ELO\java';Destination='C:\ELO\java.restore'}
+$timed=New-EloTechnicalReport -ResourceCollector $resources -OptionsCollector { $null } -JvmEvidence @(@{Version='17.0.10';Verified=$true}) -Actions $timedActions -RecoveryEvidence $timedRecovery
+$local=Format-EloReportTime '2026-11-25T12:30:05Z'
+Assert ($local -match '^2026-11-25 \d{2}:\d{2}:05 \(UTC[+-]\d{2}:\d{2}\)$') 'the moment is shown as server local time with its UTC offset'
+foreach ($case in @(@('en','Server (hostname): TEST-SERVER','Report generated: ','Date and time: ',' Performed on ','Mitigation applied on '),
+                    @('de','Server (Hostname): TEST-SERVER','Bericht erstellt: ','Datum und Uhrzeit: ',' Ausgefuehrt am ','Risikominderung angewendet am '),
+                    @('es','Equipo (hostname): TEST-SERVER','Informe generado: ','Fecha y hora: ',' Realizada el ','Mitigación aplicada el '))) {
+    $h=ConvertTo-EloTechnicalReportHtml $timed $case[0] -GeneratedAt $stamp
+    Assert ($h -match '<body><header><h1>[^<]+ - TEST-SERVER</h1><p><strong>') 'the hostname opens the report'
+    foreach ($part in $case[1..5]) { Assert ($h.Contains($part)) "timed report $($case[0]) shows '$part'" }
+    Assert ($h.Contains($case[2]+$local) -and $h.Contains($case[3]+$local) -and $h.Contains($case[4].TrimStart()+$local) -and $h.Contains($case[5]+$local)) "the recorded time appears in every place ($($case[0]))"
+}
+$es=ConvertTo-EloTechnicalReportHtml $timed es -GeneratedAt $stamp
+Assert ($es.Contains('Actualización del runtime: Verificada') -and $es.Contains('Restauración: No realizada') -and $es -notmatch 'Verificado;|No realizado|agente principal|run as administrator') 'Spanish states agree in gender and no English or internal wording remains'
+$untimed=ConvertTo-EloTechnicalReportHtml (New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='17.0.10';Verified=$true}) -Actions @(@{At='yesterday';RuntimeIndex=1;Kind='Update';Status='Proven';Verified=$true;EvidenceVerified=$true;EvidenceCode='InstalledRuntimeValidated';FromVersion='17.0.10';ToVersion='17.0.20'})) en
+Assert (-not $untimed.Contains('Date and time') -and -not $untimed.Contains('Performed on') -and -not $untimed.Contains('yesterday')) 'an invalid or missing time is left out'
+$plain=[Net.WebUtility]::HtmlDecode([regex]::Match($es,'(?s)<pre># PowerShell.*?</pre>').Value) -replace '</?pre>',''
+$commands=@($plain -split "\r?\n")
+foreach ($command in @("Remove-Item -LiteralPath 'C:\ELO\java' -Recurse -Force",
+    "Expand-Archive -LiteralPath 'C:\Backups\java.zip' -DestinationPath 'C:\ELO\java.restore'",
+    "Move-Item -LiteralPath 'C:\ELO\java.restore\tree' -Destination 'C:\ELO\java'",
+    'rmdir /s /q "C:\ELO\java"','mkdir "C:\ELO\java.restore"','tar -xf "C:\Backups\java.zip" -C "C:\ELO\java.restore"','move "C:\ELO\java.restore\tree" "C:\ELO\java"')) {
+    Assert ($commands -ccontains $command) "each recovery command is one complete line: $command"
+}
+$bytes=ConvertTo-EloReportPdf $es -Footer 'TEST-SERVER'
+$latin=[Text.Encoding]::GetEncoding(1252); $pdfText=$latin.GetString($bytes)
+Assert ($bytes -is [byte[]] -and $pdfText.StartsWith('%PDF-1.4') -and $pdfText.TrimEnd().EndsWith('%%EOF')) 'a PDF file is produced'
+$xrefAt=[int][regex]::Match($pdfText,'startxref\s+(\d+)').Groups[1].Value
+Assert ($pdfText.Substring($xrefAt,4) -ceq 'xref') 'startxref points at the cross reference table'
+$entries=[regex]::Matches($pdfText.Substring($xrefAt),'(\d{10}) 00000 n ')
+for ($i=0; $i -lt $entries.Count; $i++) { $at=[int]$entries[$i].Groups[1].Value; Assert ($pdfText.Substring($at).StartsWith([string]($i+1)+' 0 obj')) "object $($i+1) offset" }
+foreach ($m in [regex]::Matches($pdfText,'(?s)<< /Length (\d+) >>\nstream\n(.*?)\nendstream')) { Assert ($m.Groups[2].Value.Length -eq [int]$m.Groups[1].Value) 'stream length' }
+Assert ($pdfText.Contains('(Equipo \(hostname\): TEST-SERVER) Tj') -and $pdfText.Contains('Informe ') -and $pdfText.Contains('Mitigaci') -and $pdfText.Contains('(TEST-SERVER   1 / ')) 'hostname, text and page footer are in the PDF'
+Assert ($pdfText.IndexOf('(Equipo \(hostname\)') -lt $pdfText.IndexOf('Versiones de JVM')) 'the hostname comes before the findings'
+Assert ($pdfText.Contains('https://adoptium.net') -or $pdfText.Contains('https://linux.oracle.com')) 'source links stay readable in the PDF'
+$long=ConvertTo-EloReportPdf ('<body><h1>T</h1>'+(('<p>'+('word '*60)+'</p>')*60)+'<pre>'+('x'*400)+'</pre></body>')
+Assert ([regex]::Matches($latin.GetString($long),'/Type /Page ').Count -gt 2) 'long reports continue on further pages'
+foreach ($m in [regex]::Matches($latin.GetString($long),'/F3 8 Tf [\d.]+ ([\d.]+) Td \(([^)]*)\)')) { Assert ($m.Groups[2].Value.Length -le 102 -and [double]$m.Groups[1].Value -ge 50) 'long lines are cut inside the page' }
 Write-Output 'PASS: deterministic bilingual report tests (synthetic adapters only)'

@@ -177,6 +177,8 @@ function Get-EloVulnerabilityInfo {
         $list+=@{id=[string]$v.id;alias=[string](@($v.aliases) | Select-Object -First 1);severity=[string]$v.severity
             title=(& $tri $v.title);problem=(& $tri $v.problem);solution=(& $tri $v.solution)
             actions=@(@($v.actions) | ForEach-Object { [string]$_.id })}
+        # What can be done about it, in the catalog's own words, so new actions appear without UI changes (a restore is not a fix).
+        $list[-1].actionLabels=@(@($v.actions) | Where-Object { $_ -and [string]$_.type -cne 'restore-backup' -and $_.label } | ForEach-Object { & $tri $_.label })
         $m=Get-EloVulnAction $v 'jvm-option'
         if ($m) { $list[-1].mitigation=@{variable=[string]$m.variable;option=[string]$m.option;verifyArgs=@(@($m.verify.args) | ForEach-Object { [string]$_ })} }
     }
@@ -454,7 +456,7 @@ function Invoke-EloMitigation {
     foreach ($action in $Session.ReportActions) {
         if ($action.Kind -ceq 'Mitigation') { $action.Status='Unknown'; $action.Verified=$false }
     }
-    $Session.ReportActions+=@{Kind='Mitigation';Status='Unknown';RuntimeIndex=$Session.ReportIndexes[$Body.resultId]}
+    $Session.ReportActions+=@{At=(& $Session.Adapters.Clock);Kind='Mitigation';Status='Unknown';RuntimeIndex=$Session.ReportIndexes[$Body.resultId]}
     $Session.Backup=$preview.Before
     try {
         & $Session.Adapters.WriteOptions $preview.After
@@ -476,7 +478,7 @@ function Invoke-EloMitigation {
     $attempt=$Session.ReportActions[-1]
     $attempt.Status='Proven'; $attempt.Verified=$true
     $attempt.EvidenceCode='MachineOptionSet'; $attempt.EvidenceVerified=$true
-    $Session.ReportActions+=@{Kind='Mitigation';Status='Proven';Verified=$true;RuntimeIndex=$index
+    $Session.ReportActions+=@{At=(& $Session.Adapters.Clock);Kind='Mitigation';Status='Proven';Verified=$true;RuntimeIndex=$index
         EvidenceCode='NewlyLaunchedJvmFlagVerified';EvidenceVerified=$true}
     return @{ok=$true}
 }
@@ -680,7 +682,7 @@ function Add-EloUpdateReportActions {
     param($Session,[string]$Outcome,$Preview,[int]$RuntimeIndex,[string]$FailureCode)
     $from=$Preview.FromVersion; $to=$Preview.Package.Version
     if ($Outcome -in @('Success','SimulatedSuccess','RolledBack','ManualRecoveryRequired')) {
-        $Session.ReportActions+=@{Kind='Backup';Status='Proven';Verified=$true;BackupVerified=$true;RuntimeIndex=$RuntimeIndex;EvidenceCode='BackupManifestMatched';EvidenceVerified=$true;FromVersion=$from;BackupVersion=$from}
+        $Session.ReportActions+=@{At=(& $Session.Adapters.Clock);Kind='Backup';Status='Proven';Verified=$true;BackupVerified=$true;RuntimeIndex=$RuntimeIndex;EvidenceCode='BackupManifestMatched';EvidenceVerified=$true;FromVersion=$from;BackupVersion=$from}
         $Session.ReportRecovery=@{Validated=$true;RuntimeIndex=$RuntimeIndex;Archive=$Preview.Paths.Backup;Original=$Preview.Paths.Runtime;Destination=($Preview.Paths.Runtime+'.restore')}
         $Session.BackupsCache=$null
         $Session.LastUpdate=@{Runtime=$Preview.Paths.Runtime;Root=$Preview.Root;Backup=$Preview.Paths.Backup;FromVersion=$from;ToVersion=$to;RuntimeIndex=$RuntimeIndex;Services=$Preview.Services}
@@ -695,18 +697,18 @@ function Add-EloUpdateReportActions {
             if ($assessment.Risk -ceq 'patched') { $cls='Fixed'; $clsCode='AdvisoryFixedVersion' } elseif ($assessment.Risk -ceq 'vulnerable') { $cls='PotentiallyVulnerable'; $clsCode='AdvisoryRangeMatch' }
             $Session.ReportJvms+=@{Version=[string]$to;Verified=$true;ExecutionVerified=$true;Vendor=$vendorName;VendorVerified=($vendorName -cne 'Unknown');Classification=$cls;ClassificationVerified=($cls -cne 'Unknown');EvidenceCode=$clsCode}
         }
-        { $_ -in @('Success','SimulatedSuccess') } { $Session.ReportActions+=@{Kind='Update';Status='Proven';Verified=$true;RuntimeIndex=$RuntimeIndex;EvidenceCode='InstalledRuntimeValidated';EvidenceVerified=$true;FromVersion=$from;ToVersion=$to} }
+        { $_ -in @('Success','SimulatedSuccess') } { $Session.ReportActions+=@{At=(& $Session.Adapters.Clock);Kind='Update';Status='Proven';Verified=$true;RuntimeIndex=$RuntimeIndex;EvidenceCode='InstalledRuntimeValidated';EvidenceVerified=$true;FromVersion=$from;ToVersion=$to} }
         'RolledBack' {
-            $Session.ReportActions+=@{Kind='Update';Status='Failed';RuntimeIndex=$RuntimeIndex;EvidenceCode='ValidationFailed';EvidenceVerified=$true}
-            $Session.ReportActions+=@{Kind='Restore';Status='Proven';Verified=$true;RuntimeIndex=$RuntimeIndex;EvidenceCode='OriginalRuntimeRestored';EvidenceVerified=$true;FromVersion=$to;ToVersion=$from}
+            $Session.ReportActions+=@{At=(& $Session.Adapters.Clock);Kind='Update';Status='Failed';RuntimeIndex=$RuntimeIndex;EvidenceCode='ValidationFailed';EvidenceVerified=$true}
+            $Session.ReportActions+=@{At=(& $Session.Adapters.Clock);Kind='Restore';Status='Proven';Verified=$true;RuntimeIndex=$RuntimeIndex;EvidenceCode='OriginalRuntimeRestored';EvidenceVerified=$true;FromVersion=$to;ToVersion=$from}
         }
         'ManualRecoveryRequired' {
-            $Session.ReportActions+=@{Kind='Update';Status='Failed';RuntimeIndex=$RuntimeIndex;EvidenceCode='ValidationFailed';EvidenceVerified=$true}
-            $Session.ReportActions+=@{Kind='Restore';Status='Failed';RuntimeIndex=$RuntimeIndex;EvidenceCode='RestoreFailed';EvidenceVerified=$true}
+            $Session.ReportActions+=@{At=(& $Session.Adapters.Clock);Kind='Update';Status='Failed';RuntimeIndex=$RuntimeIndex;EvidenceCode='ValidationFailed';EvidenceVerified=$true}
+            $Session.ReportActions+=@{At=(& $Session.Adapters.Clock);Kind='Restore';Status='Failed';RuntimeIndex=$RuntimeIndex;EvidenceCode='RestoreFailed';EvidenceVerified=$true}
         }
         default {
             $code='ValidationFailed'; if ($FailureCode -cmatch '^(download|package_verification|unverified_https|unverified_response|truncated|redirect)') { $code='DownloadFailed' }
-            $Session.ReportActions+=@{Kind='Update';Status='Failed';RuntimeIndex=$RuntimeIndex;EvidenceCode=$code;EvidenceVerified=$true}
+            $Session.ReportActions+=@{At=(& $Session.Adapters.Clock);Kind='Update';Status='Failed';RuntimeIndex=$RuntimeIndex;EvidenceCode=$code;EvidenceVerified=$true}
         }
     }
 }
@@ -795,7 +797,7 @@ function Invoke-EloRestoreAction {
         $restored=& $Session.Adapters.Identity $preview.Runtime
         if ([string]$preview.ToVersion -and [string]$preview.ToVersion -cne 'unknown' -and -not (Test-EloSameJavaRelease ([string]$restored.Version) ([string]$preview.ToVersion))) { throw 'restored_version_mismatch' }
     } catch {
-        if ($index -gt 0) { $Session.ReportActions+=@{Kind='Restore';Status='Failed';RuntimeIndex=$index;EvidenceCode='RestoreFailed';EvidenceVerified=$true} }
+        if ($index -gt 0) { $Session.ReportActions+=@{At=(& $Session.Adapters.Clock);Kind='Restore';Status='Failed';RuntimeIndex=$index;EvidenceCode='RestoreFailed';EvidenceVerified=$true} }
         Stop-EloRequestDetail 422 'restore_failed_no_change' (ConvertTo-EloUpdateCode $_.Exception.Message)
     }
     # The restored runtime is new evidence for the report: its classification (vulnerable or fixed) is recorded
@@ -807,21 +809,33 @@ function Invoke-EloRestoreAction {
     $Session.ReportJvms+=@{Version=[string]$restored.Version;Verified=$true;ExecutionVerified=$true;Vendor=$restoredVendor;VendorVerified=($restoredVendor -cne 'Unknown')
         Classification=$classification;ClassificationVerified=($classification -cne 'Unknown');EvidenceCode=$code}
     $newIndex=$Session.ReportJvms.Count
-    $Session.ReportActions+=@{Kind='Restore';Status='Proven';Verified=$true;RuntimeIndex=$newIndex;EvidenceCode='OriginalRuntimeRestored';EvidenceVerified=$true;FromVersion=$preview.FromVersion;ToVersion=$preview.ToVersion}
+    $Session.ReportActions+=@{At=(& $Session.Adapters.Clock);Kind='Restore';Status='Proven';Verified=$true;RuntimeIndex=$newIndex;EvidenceCode='OriginalRuntimeRestored';EvidenceVerified=$true;FromVersion=$preview.FromVersion;ToVersion=$preview.ToVersion}
     $logAssessment=Get-EloBackupAssessment ([string]$preview.Vendor) ([string]$restored.Version)
     $logValues=Get-EloVulnMessageValues $logAssessment.Vulnerability ([string]$preview.Vendor) ([string]$restored.Version) ([string]$preview.Runtime)
     $logName='logRestoreFixed'; if ($classification -ceq 'PotentiallyVulnerable') { $logName='logRestoreVulnerable' } elseif ($classification -ceq 'Unknown') { $logName='logRestoreUnknown' }
     if ($logAssessment.Vulnerability -and $logAssessment.Vulnerability.messages.$logName) { Write-EloLog $Session (Format-EloVulnText ([string]$logAssessment.Vulnerability.messages.$logName) $logValues) }
     $Session.LastUpdate=$null; $Session.BackupsCache=$null
     return @{ok=$true}
-}function Get-EloSessionReportHtml {
+}function Get-EloSessionReportBundle {
+    # One report in both formats, named after the server it describes.
+    param($Session,[ValidateSet('en','de','es')][string]$Language)
+    $html=Get-EloSessionReportHtml $Session $Language
+    $hostName=''
+    $title=[regex]::Match($html,'<title>[^<]* - ([A-Za-z0-9._-]{1,63})</title>')
+    if ($title.Success) { $hostName=$title.Groups[1].Value }
+    $fileName='elo-technical-'+$Language
+    if ($hostName) { $fileName='elo-technical-'+$hostName+'-'+$Language }
+    $pdf=[Convert]::ToBase64String((ConvertTo-EloReportPdf $html -Footer $hostName))
+    return @{html=$html;pdf=$pdf;fileName=$fileName}
+}
+function Get-EloSessionReportHtml {
     param($Session,[ValidateSet('en','de','es')][string]$Language)
     # ELO version: only from the installed Indexserver files below the parent of a scanned runtime.
     $eloRoots=@($Session.Targets.Values | ForEach-Object { try { [IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName([string]$_.Location))) } catch { $null } } | Where-Object { $_ } | Select-Object -Unique)
     $eloVersion=$null; if ($Session.Adapters.EloVersion -is [scriptblock] -and $eloRoots.Count -gt 0) { try { $eloVersion=& $Session.Adapters.EloVersion $eloRoots } catch { $eloVersion=$null } }
     $eloAdapter={ @{Verified=(-not [string]::IsNullOrWhiteSpace([string]$eloVersion));Version=[string]$eloVersion} }.GetNewClosure()
     $report=New-EloTechnicalReport -EloVersionAdapter $eloAdapter -ResourceCollector $Session.Adapters.Resources -OptionsCollector $Session.Adapters.ReportOptions -JvmEvidence $Session.ReportJvms -Actions $Session.ReportActions -RecoveryEvidence $Session.ReportRecovery
-    $html=ConvertTo-EloTechnicalReportHtml $report -Language $Language
+    $html=ConvertTo-EloTechnicalReportHtml $report -Language $Language -GeneratedAt (& $Session.Adapters.Clock)
     $states=@{idle='Ready';scanning='Scanning';cancelling='Cancelling';completed='Completed';cancelled='Cancelled';error='Failed'}
     $notice='Session scan state: '; $scope='Session observations (including earlier scans); only a completed scan is a complete snapshot. A runtime update is performed only after explicit confirmation. ELO API support and running ELO process mitigation are not verified.'
     if ($Language -eq 'de') {
@@ -829,14 +843,14 @@ function Invoke-EloRestoreAction {
         $notice='Scanstatus der Sitzung: '; $scope='Sitzungsnachweise (auch fruehere Scans); nur ein abgeschlossener Scan ist eine vollstaendige Momentaufnahme. Ein Runtime-Update erfolgt nur nach ausdruecklicher Bestaetigung. ELO-API-Unterstuetzung und Risikominderung im laufenden ELO-Prozess sind nicht nachgewiesen.'
     }
     if ($Language -eq 'es') {
-        $states=@{idle='Listo';scanning='Escaneando';cancelling='Cancelacion solicitada';completed='Completado';cancelled='Cancelado';error='Fallido'}
-        $notice='Estado del escaneo de la sesion: '; $scope='Observaciones de la sesion (tambien de escaneos anteriores); solo un escaneo completado es una instantanea completa. Una actualizacion del runtime se realiza solo tras confirmacion explicita. El soporte de la API de ELO y la mitigacion en procesos ELO en ejecucion no estan verificados.'
+        $states=@{idle='Listo';scanning='Escaneando';cancelling='Cancelación solicitada';completed='Completado';cancelled='Cancelado';error='Fallido'}
+        $notice='Estado del escaneo de la sesión: '; $scope='Observaciones de la sesión (también de escaneos anteriores); solo un escaneo completado es una instantánea completa. Una actualización del runtime se realiza solo tras una confirmación explícita. La compatibilidad con la API de ELO y la mitigación en los procesos de ELO en ejecución no están verificadas.'
     }
-    $state=$states[$Session.State]; if (-not $state) { $state='Unknown / Unbekannt' }
+    $state=$states[$Session.State]; if (-not $state) { $state=@{en='Unknown';de='Unbekannt';es='Desconocido'}[$Language] }
     # A failed rollback can invalidate earlier machine-option evidence. Do not
     # present a historical success as the current environment's postcondition.
-    $recovery=''; if ($Session.RecoveryRequired) { $recovery='Manual recovery required / Manuelle Wiederherstellung erforderlich.' }
-    return $html.Replace('<head>','<head><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; base-uri &#39;none&#39;; form-action &#39;none&#39;">').Replace('<body>','<body><p>'+ $notice+$state+'. '+$scope+' '+$recovery+'</p>')
+    $recovery=''; if ($Session.RecoveryRequired) { $recovery=@{en='Manual recovery required.';de='Manuelle Wiederherstellung erforderlich.';es='Se requiere recuperación manual.'}[$Language] }
+    return $html.Replace('<head>','<head><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; base-uri &#39;none&#39;; form-action &#39;none&#39;">').Replace('</header>','</header><p>'+ $notice+$state+'. '+$scope+' '+$recovery+'</p>')
 }
 # ---- ELO Community helper (optional Node tool in tools\community): status, model list, setup and analysis jobs.
 # Credentials and API keys arrive in a request body, are handed to the child process through its environment for
@@ -1148,7 +1162,7 @@ function Invoke-EloApi {
         '/api/report' {
             $body=ConvertFrom-EloBody $Request.Body -Required @('language')
             if ($body.language -cnotin @('en','de','es')) { Stop-EloRequest 400 'invalid_language' }
-            return @{html=(Get-EloSessionReportHtml $Session $body.language)}
+            return (Get-EloSessionReportBundle $Session $body.language)
         }
         '/api/scan' {
             $body=ConvertFrom-EloBody $Request.Body -Optional @('searchPath')

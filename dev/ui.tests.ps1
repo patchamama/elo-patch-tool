@@ -61,7 +61,7 @@ function boot(hash = '#token=test-session-token', storage = null, local = memory
  if(path.endsWith('/report')) {
  const language=JSON.parse(options.body).language;
  assert.deepEqual(Object.keys(JSON.parse(options.body)),['language'],'no client-provided evidence');
- return new Response(JSON.stringify({html:'<!doctype html><html lang="'+language+'"><body>safe report</body></html>'}));
+ return new Response(JSON.stringify({html:'<!doctype html><html lang="'+language+'"><body>safe report</body></html>',pdf:btoa('%PDF-1.4 safe'),fileName:'elo-technical-SRV01-'+language}));
  }
  const body=path.endsWith('/status') ? status : path.endsWith('/results') ? {results,security,...(backups === null ? {} : {backups}),...(vulns === null ? {} : {vulnerabilities:vulns})} : path.endsWith('/preview') ? preview : ack;
  return new Response(JSON.stringify(body));
@@ -82,7 +82,14 @@ function boot(hash = '#token=test-session-token', storage = null, local = memory
  assert.deepEqual(JSON.parse(request.options.body),{language});
  assert((await technical.downloads.at(-1).text()).includes('<html lang="'+language+'">'));
  assert.equal(technical.downloads.at(-1).type,'text/html;charset=utf-8');
+ await technical.el('exportPdf').click();
+ assert.equal(technical.downloads.at(-1).type,'application/pdf');
+ assert.equal(await technical.downloads.at(-1).text(),'%PDF-1.4 safe','the PDF bytes are decoded from base64');
  }
+ // the interface shows the version that is released
+ const released = require('node:fs').readFileSync(process.env.ELO_VERSION_FILE,'utf8').trim();
+ assert(/^\d+\.\d+\.\d+$/.test(released),'dev/VERSION holds the release version');
+ assert(html.includes('<span id="appVersion" class="version">v'+released+'</span>'),'the interface shows version v'+released);
  technical.failure(401); const downloadCount=technical.downloads.length;
  await technical.el('exportTechnical').click();
  assert.equal(technical.downloads.length,downloadCount,'authentication failure never downloads');
@@ -497,6 +504,26 @@ function boot(hash = '#token=test-session-token', storage = null, local = memory
  const vuln=(over={}) => ({id:'CVE-2026-114938',alias:'Java4Shell',severity:'high',title:both('CVE title','CVE Titel'),problem:both('{n} runtime(s) are affected: {list}.','{n} Runtime(s) betroffen: {list}.'),solution:both('update Java now','Java jetzt aktualisieren'),actions:['update-runtime','mitigate','restore-backup'],...over});
  const finding=(over={}) => ({id:'CVE-2026-114938',severity:'high',status:'vulnerable',...over});
  const catUi=boot(); await tick();
+ // ---- the scan itself reports in red what was found, one block per catalog vulnerability with its actions
+ {
+ const found = boot(); await tick();
+ assert(html.includes('id="scanAlert" class="alert" role="alert"'),'the scan warning uses the red alert style');
+ assert(html.indexOf('id="scanAlert"') > html.indexOf('id="step1"') && html.indexOf('id="scanAlert"') < html.indexOf('id="step2"'),'the warning is shown on the scan step');
+ found.results([]); await found.poll(); assert.equal(found.el('scanAlert').attrs.hidden,'','no findings, no warning');
+ const labels=[both('Update Java runtime','Java-Runtime aktualisieren'),both('Temporary mitigation','Risikominderung')];
+ found.vulns([vuln({actionLabels:labels}),vuln({id:'CVE-2027-0001',alias:'',severity:'medium',title:both('Second flaw','Zweite Luecke'),actions:['patch-b'],actionLabels:[both('Apply patch B','Patch B')]}),vuln({id:'CVE-2027-0002',title:both('Not here','Nicht hier')})]);
+ found.results([row({findings:[finding(),finding({id:'CVE-2027-0001',severity:'medium'})]})]); await found.poll();
+ const list=found.el('scanAlertList').children;
+ assert.equal(found.el('scanAlert').attrs.hidden,undefined);
+ assert.equal(list.length,2,'one block per vulnerability that was actually found');
+ assert(found.el('scanAlertTitle').textContent.includes('WARNING: 2 vulnerability(ies) found'));
+ assert(list[0].children[0].children[1].textContent.startsWith(finding().id) && list[1].children[0].children[1].textContent.startsWith('CVE-2027-0001 — Second flaw'),'each block names the vulnerability');
+ assert(list[0].children[1].textContent.startsWith('Affected runtimes: 1 —'),'affected runtimes are listed');
+ assert.equal(list[0].children[2].textContent,'Available actions: Update Java runtime · Temporary mitigation');
+ assert.equal(list[1].children[2].textContent,'Available actions: Apply patch B','a new catalog action appears without UI changes');
+ changeLocale(found,'es'); assert(found.el('scanAlertTitle').textContent.startsWith('ADVERTENCIA')); changeLocale(found,'en');
+ found.vulns([vuln({actionLabels:[{en:'x'}]})]); await found.poll(); assert(found.el('error').textContent.includes('invalid response'),'invalid action labels are rejected');
+ }
  catUi.vulns([vuln(),vuln({id:'CVE-2027-0001',alias:'',severity:'medium',title:both('Second flaw','Zweite Luecke'),problem:both('{n} affected','{n} betroffen'),solution:both('apply patch B','Patch B einspielen'),actions:['update-runtime']})]);
  catUi.results([row({findings:[finding(),finding({id:'CVE-2027-0001',severity:'medium'})]})]); await catUi.poll();
  const blocks=catUi.el('vulnList').children;
@@ -700,6 +727,7 @@ function boot(hash = '#token=test-session-token', storage = null, local = memory
  console.log('PASS: JVM evidence/export, exact advisory allowlist, bounded errors/warnings, admin/access denial, rollback/recovery lock, unavailable update, locales and token security');
 })().catch(error => { console.error(error); process.exitCode=1; });
 '@
+$env:ELO_VERSION_FILE=Join-Path $PSScriptRoot 'VERSION'
 $tests | & node - $htmlPath
 if ($LASTEXITCODE -ne 0) { throw "UI tests failed (Node exit $LASTEXITCODE)" }
 Write-Output 'PASS: dev/ui.tests.ps1'

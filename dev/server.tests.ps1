@@ -589,6 +589,8 @@ Assert ($applied.ok -and $script:Fake.Writes -eq 1) 'the mitigation is applied f
 # Spanish: the catalog and the backend warnings carry es; the report endpoint accepts it.
 $s.Adapters.BackupRoots = { @() }; $s.BackupsCache = $null; $s.LastError = $null; $s.RecoveryRequired = $false
 $resultsEs = Invoke-EloApi $s (Request -Path /api/results)
+$labels = @($resultsEs.vulnerabilities[0].actionLabels)
+Assert ($labels.Count -eq 2 -and $labels[0].en -ceq 'Update Java runtime' -and $labels[1].es -match 'Mitigaci') 'the results name the actions of each vulnerability, without the restore'
 Assert ($resultsEs.vulnerabilities[0].title.es -match 'Java4Shell' -and $resultsEs.vulnerabilities[0].problem.es -match 'runtime' -and $resultsEs.security.advisories[0].title.es) 'the catalog texts reach the UI with a Spanish version'
 $esErr = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/preview '{"actionId":"mitigate","resultId":"nope"}') }
 $warn = Add-EloSpanish @{en='This runtime is already the newest release of its branch. Nothing to update.';de='x'}
@@ -599,7 +601,12 @@ $other = Add-EloSpanish @{en='A text nobody translated';de='x'}
 Assert (-not $other.ContainsKey('es')) 'an untranslated text simply has no es (the UI falls back to English)'
 $evidenceSession.Adapters.Resources={ @{ServerName='SRV01';WindowsVersion='10.0';WindowsBuild='20348';Disks=@()} }; $evidenceSession.State='completed'
 $repEs = Get-EloSessionReportHtml $evidenceSession es
-Assert ($repEs.Contains('<html lang="es">') -and $repEs.Contains('Estado del escaneo de la sesion: Completado')) 'the session report can be produced in Spanish'
+Assert ($repEs.Contains('<html lang="es">') -and $repEs.Contains('</header><p>Estado del escaneo de la ') -and $repEs -match 'Estado del escaneo de la sesi.{1,2}n: Completado') 'the session report can be produced in Spanish, after the hostname header'
+$bundle = Get-EloSessionReportBundle $evidenceSession es
+Assert ($bundle.fileName -ceq 'elo-technical-SRV01-es' -and $bundle.html -ceq $bundle.html.Trim()) 'the file name carries the hostname'
+Assert ([Text.Encoding]::ASCII.GetString([Convert]::FromBase64String($bundle.pdf),0,8) -ceq '%PDF-1.4') 'the same report is delivered as PDF'
+$evidenceSession.Adapters.Resources={ $null }
+Assert ((Get-EloSessionReportBundle $evidenceSession en).fileName -ceq 'elo-technical-en') 'without a known hostname the name stays generic'
 $e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/report '{"language":"fr"}') }
 Assert ($e.Status -eq 400) 'other languages are still rejected'
 

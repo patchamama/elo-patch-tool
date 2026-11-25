@@ -71,7 +71,7 @@ function Get-EloReportWindowsResources {
     $disks = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction Stop | ForEach-Object {
         @{Name=$_.DeviceID;TotalBytes=$_.Size;FreeBytes=$_.FreeSpace}
     })
-    @{ServerName=$computer.Name;WindowsVersion=$os.Version;WindowsBuild=$os.BuildNumber;TotalRamBytes=$computer.TotalPhysicalMemory;Disks=$disks}
+    @{ServerName=$(if ($computer.DNSHostName) { $computer.DNSHostName } else { $computer.Name });WindowsVersion=$os.Version;WindowsBuild=$os.BuildNumber;TotalRamBytes=$computer.TotalPhysicalMemory;Disks=$disks}
 }
 # Collectors and recovery evidence are trusted backend-only inputs, never HTTP input.
 # Recovery paths require a validated archive matched to the original runtime, and
@@ -131,6 +131,130 @@ function Get-EloInstalledIndexserverVersion {
     }
     return $best
 }
+function Get-EloReportTimestamp {
+    # Accepts a UTC DateTime or the normalized ISO text; anything else is not evidence of a time.
+    param($Value)
+    if ($Value -is [DateTime]) { return $Value.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ',[Globalization.CultureInfo]::InvariantCulture) }
+    if ($Value -is [string] -and $Value -cmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$') { return $Value }
+    return $null
+}
+function Format-EloReportTime {
+    # Server local time with its UTC offset, so the moment is unambiguous outside the server.
+    param([string]$Utc)
+    $styles=[Globalization.DateTimeStyles]'AssumeUniversal'
+    $local=[DateTimeOffset]::Parse($Utc,[Globalization.CultureInfo]::InvariantCulture,$styles).ToLocalTime()
+    return $local.ToString("yyyy-MM-dd HH:mm:ss '(UTC'zzz')'",[Globalization.CultureInfo]::InvariantCulture)
+}
+# ---- Minimal PDF writer for the technical report. No external program or library: ELO servers may have no browser
+# or printer driver. Standard PDF fonts with Windows-1252 text (covers English, German and Spanish).
+$script:EloPdfWidths=@(278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,
+    667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611,278,278,278,469,556,333,
+    556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,334,260,334,584)
+function Get-EloPdfTextWidth {
+    param([string]$Text,[double]$Size,[string]$Font)
+    if ($Font -ceq 'F3') { return $Text.Length*$Size*0.6 }
+    $units=0
+    foreach ($ch in $Text.ToCharArray()) {
+        $code=[int]$ch
+        # An accented letter is as wide as its base letter.
+        if ($code -gt 126) { $code=[int]([string]$ch).Normalize([Text.NormalizationForm]::FormD)[0] }
+        if ($code -ge 32 -and $code -le 126) { $units+=$script:EloPdfWidths[$code-32] } else { $units+=600 }
+    }
+    if ($Font -ceq 'F2') { $units*=1.09 }
+    return $units*$Size/1000
+}
+function Split-EloPdfLine {
+    param([string]$Text,[double]$Size,[string]$Font,[double]$Width)
+    $result=New-Object 'System.Collections.Generic.List[string]'
+    if ($Font -ceq 'F3') {
+        # Commands keep their spacing; only lines wider than the page are cut.
+        $max=[int][Math]::Floor($Width/($Size*0.6))
+        $rest=$Text
+        while ($rest.Length -gt $max) { $result.Add($rest.Substring(0,$max)); $rest=$rest.Substring($max) }
+        $result.Add($rest)
+        return $result.ToArray()
+    }
+    $line=''
+    foreach ($word in @($Text -split ' +' | Where-Object { $_ })) {
+        $candidate=$word; if ($line) { $candidate=$line+' '+$word }
+        if ((Get-EloPdfTextWidth $candidate $Size $Font) -le $Width) { $line=$candidate; continue }
+        if ($line) { $result.Add($line); $line='' }
+        $part=$word
+        while ((Get-EloPdfTextWidth $part $Size $Font) -gt $Width) {
+            # Paths and URLs without spaces are cut where the page ends.
+            $take=$part.Length-1
+            while ($take -gt 1 -and (Get-EloPdfTextWidth $part.Substring(0,$take) $Size $Font) -gt $Width) { $take-- }
+            $result.Add($part.Substring(0,$take)); $part=$part.Substring($take)
+        }
+        $line=$part
+    }
+    if ($line) { $result.Add($line) }
+    return $result.ToArray()
+}
+function ConvertTo-EloPdfString {
+    param([string]$Text)
+    return $Text.Replace('\','\\').Replace('(','\(').Replace(')','\)')
+}
+function ConvertTo-EloReportPdf {
+    # Renders the report HTML produced by this module (h1, h2, p, dt/dd, li, pre, a) into PDF bytes.
+    param([Parameter(Mandatory=$true)][string]$Html,[string]$Footer='')
+    $body=[regex]::Match($Html,'(?s)<body>(.*)</body>').Groups[1].Value
+    $body=[regex]::Replace($body,'(?s)<dt>(.*?)</dt>\s*<dd>(.*?)</dd>','<p>$1: $2</p>')
+    $body=[regex]::Replace($body,'(?s)<a href="([^"]*)">(.*?)</a>','$2 ($1)')
+    $styles=@{h1=@{Font='F2';Size=16.0;Before=0.0;Indent=0.0};h2=@{Font='F2';Size=12.0;Before=10.0;Indent=0.0};p=@{Font='F1';Size=10.0;Before=4.0;Indent=0.0}
+        li=@{Font='F1';Size=10.0;Before=2.0;Indent=12.0};pre=@{Font='F3';Size=8.0;Before=4.0;Indent=6.0}}
+    $pageWidth=595.0; $pageHeight=842.0; $margin=50.0
+    $pages=New-Object 'System.Collections.Generic.List[object]'
+    $current=New-Object 'System.Collections.Generic.List[string]'
+    $pages.Add($current); $y=$pageHeight-$margin
+    $invariant=[Globalization.CultureInfo]::InvariantCulture
+    foreach ($block in [regex]::Matches($body,'(?s)<(h1|h2|p|li|pre)\b[^>]*>(.*?)</\1>')) {
+        $tag=$block.Groups[1].Value; $style=$styles[$tag]
+        $text=[Net.WebUtility]::HtmlDecode([regex]::Replace($block.Groups[2].Value,'<[^>]+>',''))
+        $source=@($text)
+        if ($tag -ceq 'pre') { $source=@($text -split "\r?\n") } else { $source=@(($text -replace '\s+',' ').Trim()) }
+        if ($tag -ceq 'li') { $source=@('- '+$source[0]) }
+        $leading=$style.Size*1.35
+        $y-=$style.Before
+        # A heading is never left alone at the bottom of a page.
+        if ($tag -ceq 'h2' -and $y -lt ($margin+60)) { $current=New-Object 'System.Collections.Generic.List[string]'; $pages.Add($current); $y=$pageHeight-$margin }
+        foreach ($raw in $source) {
+            $wrapped=@(Split-EloPdfLine $raw $style.Size $style.Font ($pageWidth-2*$margin-$style.Indent))
+            if ($wrapped.Count -eq 0) { $y-=$leading; continue }
+            foreach ($line in $wrapped) {
+                if (($y-$leading) -lt $margin) { $current=New-Object 'System.Collections.Generic.List[string]'; $pages.Add($current); $y=$pageHeight-$margin }
+                $y-=$leading
+                $current.Add([string]::Format($invariant,'BT /{0} {1} Tf {2:0.##} {3:0.##} Td ({4}) Tj ET',$style.Font,$style.Size,($margin+$style.Indent),$y,(ConvertTo-EloPdfString $line)))
+            }
+        }
+    }
+    $number=0
+    foreach ($page in $pages) {
+        $number++
+        $label=(($Footer+'   '+$number+' / '+$pages.Count).Trim())
+        $page.Add([string]::Format($invariant,'BT /F1 8 Tf {0:0.##} 28 Td ({1}) Tj ET',$margin,(ConvertTo-EloPdfString $label)))
+    }
+    $latin=[Text.Encoding]::GetEncoding(1252)
+    $stream=New-Object IO.MemoryStream
+    $offsets=New-Object 'System.Collections.Generic.List[long]'
+    $write={ param([string]$s) $bytes=$latin.GetBytes($s); $stream.Write($bytes,0,$bytes.Length) }
+    $object={ param([string]$content) $offsets.Add($stream.Position); & $write ([string]($offsets.Count)+" 0 obj"+[char]10+$content+[char]10+"endobj"+[char]10) }
+    & $write ("%PDF-1.4"+[char]10)
+    $kids=@(0..($pages.Count-1) | ForEach-Object { [string](6+2*$_)+' 0 R' }) -join ' '
+    & $object '<< /Type /Catalog /Pages 2 0 R >>'
+    & $object ('<< /Type /Pages /Kids ['+$kids+'] /Count '+$pages.Count+' >>')
+    foreach ($font in @('Helvetica','Helvetica-Bold','Courier')) { & $object ('<< /Type /Font /Subtype /Type1 /BaseFont /'+$font+' /Encoding /WinAnsiEncoding >>') }
+    for ($i=0; $i -lt $pages.Count; $i++) {
+        & $object ('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents '+(7+2*$i)+' 0 R >>')
+        $content=$pages[$i] -join [string][char]10
+        & $object ('<< /Length '+$latin.GetByteCount($content)+' >>'+[char]10+'stream'+[char]10+$content+[char]10+'endstream')
+    }
+    $xref=$stream.Position
+    & $write ('xref'+[char]10+'0 '+($offsets.Count+1)+[char]10+'0000000000 65535 f '+[char]10)
+    foreach ($offset in $offsets) { & $write ($offset.ToString('D10')+' 00000 n '+[char]10) }
+    & $write ('trailer'+[char]10+'<< /Size '+($offsets.Count+1)+' /Root 1 0 R >>'+[char]10+'startxref'+[char]10+$xref+[char]10+'%%EOF'+[char]10)
+    return ,$stream.ToArray()
+}
 function New-EloTechnicalReport {
     param(
         [scriptblock]$ResourceCollector = { Get-EloReportWindowsResources },
@@ -144,7 +268,7 @@ function New-EloTechnicalReport {
     try {
         $raw = & $ResourceCollector
         if ($null -ne $raw) {
-            if ($raw.ServerName -is [string] -and $raw.ServerName -cmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$') { $system.ServerName=$raw.ServerName }
+            if ($raw.ServerName -is [string] -and $raw.ServerName -cmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$') { $system.ServerName=$raw.ServerName }
             $system.WindowsVersion=Get-EloReportVersion $raw.WindowsVersion
             if ([string]$raw.WindowsBuild -cmatch '^\d{1,10}$') { $system.WindowsBuild=[string]$raw.WindowsBuild }
             $system.TotalRamBytes=Get-EloReportBytes $raw.TotalRamBytes
@@ -194,7 +318,7 @@ function New-EloTechnicalReport {
             if ($state -eq 'Proven' -and ($null -eq $index -or -not $matchingProof)) { $state='Unknown' }
             # Never attach positive postcondition evidence to a non-proven outcome.
             if ($state -ne 'Proven' -and ($proofCodes.Values -ccontains $evidence -or $mitigationCodes -ccontains $evidence)) { $evidence='Unknown' }
-            $action=@{RuntimeIndex=$index;Kind=$kind;Status=$state;Verified=($state -eq 'Proven');EvidenceCode=$evidence;EvidenceVerified=($evidence -ne 'Unknown');BackupVerified=($state -eq 'Proven' -and $kind -eq 'Backup');FromVersion=$null;ToVersion=$null;BackupVersion=$null}
+            $action=@{RuntimeIndex=$index;Kind=$kind;Status=$state;Verified=($state -eq 'Proven');EvidenceCode=$evidence;EvidenceVerified=($evidence -ne 'Unknown');BackupVerified=($state -eq 'Proven' -and $kind -eq 'Backup');FromVersion=$null;ToVersion=$null;BackupVersion=$null;At=(Get-EloReportTimestamp $entry.At)}
             if ($state -eq 'Proven') {
                 $action.FromVersion=Get-EloReportVersion $entry.FromVersion
                 if ($kind -eq 'Update' -or $kind -eq 'Restore') { $action.ToVersion=Get-EloReportVersion $entry.ToVersion }
@@ -226,7 +350,7 @@ function New-EloTechnicalReport {
     @{System=$system;Jvms=$jvms;Actions=$normalized;Elo=$elo;Options=$options;Recovery=$recovery}
 }
 function ConvertTo-EloTechnicalReportHtml {
-    param([Parameter(Mandatory=$true)]$Report, [ValidateSet('en','de','es')][string]$Language='en')
+    param([Parameter(Mandatory=$true)]$Report, [ValidateSet('en','de','es')][string]$Language='en', [DateTime]$GeneratedAt=[DateTime]::UtcNow)
     # Normalize again: renderer never reflects arbitrary DTO fields or messages.
     $r=New-EloTechnicalReport -OptionsCollector { $null } -ResourceCollector { $Report.System }.GetNewClosure() -JvmEvidence @($Report.Jvms | ForEach-Object { @{Version=$_.Version;Verified=($_.Status -ceq 'Proven');ExecutionVerified=($_.ExecutionStatus -ceq 'Proven');Classification=$_.Classification;ClassificationVerified=$_.ClassificationVerified;EvidenceCode=$_.EvidenceCode;Vendor=$_.Vendor;VendorVerified=$_.VendorVerified} }) -Actions $Report.Actions -EloVersionAdapter { @{Version=$Report.Elo.Version;Verified=($Report.Elo.Status -ceq 'Proven')} }.GetNewClosure()
     # DTO contains only bounded states; never re-read environment during rendering.
@@ -248,19 +372,29 @@ function ConvertTo-EloTechnicalReportHtml {
     }
     foreach ($key in $guidance.Keys) { $t[$key]=$guidance[$key] }
     if ($Language -eq 'es') {
-        $es=@{Title='Informe técnico';Server='Servidor';Windows='Versión / compilación de Windows';Ram='RAM total';Disk='Disco: total / libre';Jvm='Versiones de JVM detectadas';Execution='Evidencia de ejecución';Elo='Versión de ELO (archivos instalados del Indexserver)';Unknown='Desconocido / no disponible';Failed='Fallido';NotPerformed='No realizado';Proven='Verificado';Update='Actualización del runtime';Mitigation='Mitigación temporal';Backup='Copia de seguridad';Restore='Restauración';From='Versión anterior';To='Versión resultante verificada';BackupVersion='Versión de JVM de la copia verificada';Sources='Fuentes oficiales de información';Notice='Los estados reflejan solo la evidencia verificada aportada. No se deducen la compatibilidad, la vulnerabilidad ni el éxito de la corrección. No se incluyen credenciales ni diagnósticos en bruto.'
-            Classification='Clasificación de vulnerabilidad';Evidence='Evidencia / método';Association='Asociación con el runtime';PotentiallyVulnerable='Potencialmente vulnerable';NotAffected='No afectado por el aviso coincidente';Fixed='Versión corregida según el aviso coincidente';AdvisoryRangeMatch='Coincide con el rango de versiones afectadas del aviso';AdvisoryExcludesVersion='El aviso excluye la versión observada';AdvisoryFixedVersion='La versión observada coincide con la versión corregida del aviso';EffectiveJvmFlagObserved='Opción de JVM observada; ámbito sin especificar, proceso ELO actual no verificado';InstalledRuntimeValidated='Manifiesto del runtime instalado y prueba de versión verificados';BackupManifestMatched='El contenido de la copia coincide con el manifiesto original';OriginalRuntimeRestored='Runtime original restaurado y verificado';DownloadFailed='La descarga falló';ValidationFailed='Falló la validación de la postcondición';RestoreFailed='La restauración falló; hace falta recuperación manual';OperationCancelled='Operación cancelada';Checked='Fecha de verificación de las fuentes';Fetched='Obtenido por el agente principal';Supplied='Texto aportado por el usuario; el acceso al sitio devolvió HTTP 403; no obtenido de forma independiente';Changes='Los avisos pueden cambiar. El acceso a las fuentes no prueba la aplicabilidad ni el éxito de la corrección.'
-            Vendor='Fabricante de JVM verificado';Recommendation='Siguiente paso recomendado';Temporary='Mitigación temporal solo con opción; no instala un runtime de Java y no es una solución permanente. Una opción de máquina no prueba que una JVM recién iniciada o el proceso ELO actual use la opción.';Upgrade='Es preferible instalar una versión de Java más reciente corregida por el fabricante, tras confirmar la compatibilidad con ELO. No se deduce ninguna versión corregida concreta ni una instalación correcta.';VendorUnknown='Fabricante de JVM desconocido; consulta a tu fabricante de JVM y a ELO la versión corregida adecuada y las instrucciones oficiales de descarga e instalación. No se asume que Temurin sea un sustituto del mismo proveedor.';Download='Descargas oficiales de Temurin';Install='Instrucciones oficiales de instalación de Temurin';MachineOptionSet='Opción de máquina establecida';NewlyLaunchedJvmFlagVerified='Opción de una JVM recién iniciada';RunningEloJvmFlagVerified='Opción del proceso ELO en ejecución'}
+        $es=@{Title='Informe técnico';Server='Servidor';Windows='Versión / compilación de Windows';Ram='RAM total';Disk='Disco: total / libre';Jvm='Versiones de JVM detectadas';Execution='Evidencia de ejecución';Elo='Versión de ELO (archivos instalados del Indexserver)';Unknown='Desconocido / no disponible';Failed='Fallida';NotPerformed='No realizada';Proven='Verificada';Update='Actualización del runtime';Mitigation='Mitigación temporal';Backup='Copia de seguridad';Restore='Restauración';From='Versión anterior';To='Versión resultante verificada';BackupVersion='Versión de JVM de la copia verificada';Sources='Fuentes oficiales de información';Notice='Los estados reflejan solo la evidencia verificada aportada. No se deducen la compatibilidad, la vulnerabilidad ni el éxito de la corrección. No se incluyen credenciales ni diagnósticos en bruto.'
+            Classification='Clasificación de vulnerabilidad';Evidence='Evidencia / método';Association='Asociación con el runtime';PotentiallyVulnerable='Potencialmente vulnerable';NotAffected='No afectado por el aviso coincidente';Fixed='Versión corregida según el aviso coincidente';AdvisoryRangeMatch='Coincide con el rango de versiones afectadas del aviso';AdvisoryExcludesVersion='El aviso excluye la versión observada';AdvisoryFixedVersion='La versión observada coincide con la versión corregida del aviso';EffectiveJvmFlagObserved='Opción de JVM observada; ámbito sin especificar, proceso ELO actual no verificado';InstalledRuntimeValidated='Manifiesto del runtime instalado y prueba de versión verificados';BackupManifestMatched='El contenido de la copia coincide con el manifiesto original';OriginalRuntimeRestored='Runtime original restaurado y verificado';DownloadFailed='La descarga falló';ValidationFailed='Falló la validación de la postcondición';RestoreFailed='La restauración falló; hace falta recuperación manual';OperationCancelled='Operación cancelada';Checked='Fecha de verificación de las fuentes';Fetched='consultada directamente en el sitio de origen';Supplied='texto aportado por el usuario; el acceso al sitio devolvió HTTP 403 y no se pudo consultar de forma independiente';Changes='Los avisos pueden cambiar. El acceso a las fuentes no prueba la aplicabilidad ni el éxito de la corrección.'
+            Vendor='Fabricante de JVM verificado';Recommendation='Siguiente paso recomendado';Temporary='La mitigación temporal consiste únicamente en una opción de la JVM: no instala un runtime de Java ni es una solución permanente. Definir la opción en la máquina no prueba que una JVM recién iniciada o el proceso de ELO actual la utilicen.';Upgrade='Es preferible instalar una versión de Java más reciente corregida por el fabricante, tras confirmar la compatibilidad con ELO. No se deduce ninguna versión corregida concreta ni una instalación correcta.';VendorUnknown='Fabricante de JVM desconocido; consulta a tu fabricante de JVM y a ELO la versión corregida adecuada y las instrucciones oficiales de descarga e instalación. No se asume que Temurin sea un sustituto del mismo proveedor.';Download='Descargas oficiales de Temurin';Install='Instrucciones oficiales de instalación de Temurin';MachineOptionSet='Opción de máquina establecida';NewlyLaunchedJvmFlagVerified='Opción de una JVM recién iniciada';RunningEloJvmFlagVerified='Opción del proceso ELO en ejecución'}
         foreach ($key in $es.Keys) { $t[$key]=$es[$key] }
     }    $more=@{en=@{ResultTitle='Result';ResultUpdated='Java runtime updated and verified: {from} to {to}. The backup ZIP and the previous runtime were kept.';ResultFixed=' The new version is listed as fixed according to the matched advisory (a narrow advisory classification: it does not prove that the whole system is safe, and ELO compatibility is not verified).';FragileTitle='Limits of the temporary mitigation';FragileText='This protection is fragile: it exists only as the machine environment variable JAVA_TOOL_OPTIONS. It stops applying if that variable is removed or overwritten (by an administrator, a script, a Windows or installer change), and JVMs and services that were already running keep their old environment until they are restarted. It is a stopgap until the Java runtime is updated.';FragileVerify='To check that it is still in place (PowerShell):'}
         de=@{ResultTitle='Ergebnis';ResultUpdated='Java-Runtime aktualisiert und geprueft: {from} auf {to}. Backup-ZIP und vorherige Runtime wurden behalten.';ResultFixed=' Die neue Version ist laut zugeordnetem Hinweis als korrigiert aufgefuehrt (eine enge Hinweis-Einstufung: kein Beweis fuer die Sicherheit des gesamten Systems; die ELO-Kompatibilitaet ist nicht geprueft).';FragileTitle='Grenzen der vorlaeufigen Risikominderung';FragileText='Dieser Schutz ist fragil: Er besteht nur als systemweite Umgebungsvariable JAVA_TOOL_OPTIONS. Er wirkt nicht mehr, wenn die Variable entfernt oder ueberschrieben wird (durch einen Administrator, ein Skript, eine Windows- oder Installer-Aenderung); bereits laufende JVMs und Dienste behalten ihre alte Umgebung bis zum Neustart. Es ist eine Zwischenloesung bis zur Aktualisierung der Java-Runtime.';FragileVerify='Pruefen, ob sie noch gesetzt ist (PowerShell):'}
         es=@{ResultTitle='Resultado';ResultUpdated='Runtime de Java actualizado y verificado: {from} a {to}. Se conservaron el ZIP de la copia y el runtime anterior.';ResultFixed=' La nueva versión figura como corregida según el aviso coincidente (una clasificación estrecha del aviso: no prueba que todo el sistema sea seguro, y la compatibilidad con ELO no está verificada).';FragileTitle='Límites de la mitigación temporal';FragileText='Esta protección es frágil: solo existe como variable de entorno de la máquina JAVA_TOOL_OPTIONS. Deja de aplicarse si esa variable se elimina o se sobrescribe (por un administrador, un script, un cambio de Windows o de un instalador), y las JVM y servicios que ya estaban en ejecución conservan su entorno antiguo hasta reiniciarse. Es una medida provisional hasta actualizar el runtime de Java.';FragileVerify='Para comprobar que sigue aplicada (PowerShell):'}}
     foreach ($key in $more[$Language].Keys) { $t[$key]=$more[$Language][$key] }
+    $when=@{en=@{Host='Server (hostname)';Generated='Report generated';When='Date and time';UpdatedAt=' Performed on {when}.';AppliedAt='Mitigation applied on {when}.'}
+        de=@{Host='Server (Hostname)';Generated='Bericht erstellt';When='Datum und Uhrzeit';UpdatedAt=' Ausgefuehrt am {when}.';AppliedAt='Risikominderung angewendet am {when}.'}
+        es=@{Host='Equipo (hostname)';Generated='Informe generado';When='Fecha y hora';UpdatedAt=' Realizada el {when}.';AppliedAt='Mitigación aplicada el {when}.'}}
+    foreach ($key in $when[$Language].Keys) { $t[$key]=$when[$Language][$key] }
     $lines=New-Object 'System.Collections.Generic.List[string]'
-    $lines.Add('<!doctype html><html lang="'+$Language+'"><head><meta charset="utf-8"><title>'+$t.Title+'</title></head><body><h1>'+$t.Title+'</h1>')
+    # The hostname opens the report: it identifies which server the evidence belongs to.
+    $hostName=[string]$r.System.ServerName
+    $heading=$t.Title; if ($hostName) { $heading+=' - '+(ConvertTo-EloReportEscapedText $hostName) }
+    $header='<header><h1>'+$heading+'</h1>'
+    if ($hostName) { $header+='<p><strong>'+$t.Host+': '+(ConvertTo-EloReportEscapedText $hostName)+'</strong></p>' }
+    $header+='<p>'+$t.Generated+': '+(Format-EloReportTime (Get-EloReportTimestamp $GeneratedAt))+'</p></header>'
+    $lines.Add('<!doctype html><html lang="'+$Language+'"><head><meta charset="utf-8"><title>'+$heading+'</title></head><body>'+$header)
     $lines.Add('<p>'+$t.Notice+'</p>')
     # Only what is known is reported: anything unknown / unavailable is left out instead of printed as a placeholder.
-    $rows=@(@($t.Server,$r.System.ServerName),@($t.Windows,($r.System.WindowsVersion+' / '+$r.System.WindowsBuild)))
+    $rows=@(,@($t.Windows,($r.System.WindowsVersion+' / '+$r.System.WindowsBuild)))
     $facts2=New-Object 'System.Collections.Generic.List[string]'
     foreach ($row in $rows) {
         $v=$row[1]; if ([string]::IsNullOrWhiteSpace(($v -replace '[ /]',''))) { continue }
@@ -302,6 +436,7 @@ function ConvertTo-EloTechnicalReportHtml {
     foreach ($a in $r.Actions) {
         if ($a.Status -ceq 'Unknown') { continue }
         $detail=''
+        if ($a.At) { $detail+='; '+$t.When+': '+(Format-EloReportTime $a.At) }
         if ($null -ne $a.RuntimeIndex) { $detail+='; '+$t.Association+': JVM #'+$a.RuntimeIndex }
         if ($a.EvidenceCode -cne 'Unknown') { $detail+='; '+$t.Evidence+': '+(ConvertTo-EloReportEscapedText $t[$a.EvidenceCode]) }
         foreach ($key in @('FromVersion','ToVersion','BackupVersion')) {
@@ -325,21 +460,27 @@ function ConvertTo-EloTechnicalReportHtml {
         if ($a.Kind -eq 'Update' -and $a.Status -eq 'Proven' -and $a.FromVersion -and $a.ToVersion) {
             $msg=$t.ResultUpdated.Replace('{from}',(ConvertTo-EloReportEscapedText $a.FromVersion)).Replace('{to}',(ConvertTo-EloReportEscapedText $a.ToVersion))
             if (@($r.Jvms | Where-Object { $_.Version -ceq $a.ToVersion -and $_.Classification -ceq 'Fixed' }).Count -gt 0) { $msg+=$t.ResultFixed }
+            if ($a.At) { $msg+=$t.UpdatedAt.Replace('{when}',(Format-EloReportTime $a.At)) }
             $resultItems.Add('<p>'+$msg+'</p>')
         }
     }
     if ($resultItems.Count -gt 0) { $lines.Add('<h2>'+$t.ResultTitle+'</h2>'+($resultItems -join '')) }
     if (@($r.Actions | Where-Object { $_.Kind -eq 'Mitigation' -and $_.Status -eq 'Proven' }).Count -gt 0) {
-        $lines.Add('<h2>'+$t.FragileTitle+'</h2><p>'+$t.FragileText+'</p><p>'+$t.FragileVerify+'</p><pre>[Environment]::GetEnvironmentVariable(''JAVA_TOOL_OPTIONS'',''Machine'')</pre>')
+        $applied=''
+        $stamped=@($r.Actions | Where-Object { $_.Kind -eq 'Mitigation' -and $_.Status -eq 'Proven' -and $_.At })
+        if ($stamped.Count -gt 0) { $applied='<p>'+$t.AppliedAt.Replace('{when}',(Format-EloReportTime $stamped[-1].At))+'</p>' }
+        $lines.Add('<h2>'+$t.FragileTitle+'</h2>'+$applied+'<p>'+$t.FragileText+'</p><p>'+$t.FragileVerify+'</p><pre>[Environment]::GetEnvironmentVariable(''JAVA_TOOL_OPTIONS'',''Machine'')</pre>')
     }
     $optionLabels=@{Present='Flag present';Absent='Flag absent';Conflict='Conflicting enabling flag present'}
     if ($Language -eq 'de') { $optionLabels=@{Present='Flag vorhanden';Absent='Flag nicht vorhanden';Conflict='Konfligierendes aktivierendes Flag vorhanden'} }
     if ($Language -eq 'es') { $optionLabels=@{Present='Opción presente';Absent='Opción ausente';Conflict='Hay una opción contradictoria que la activa'} }
     $optionItems=@()
-    foreach ($scope in @('Machine','User','Process')) { if ($optionLabels.ContainsKey([string]$r.Options[$scope])) { $optionItems+='<li>'+$scope+': '+$optionLabels[$r.Options[$scope]]+'</li>' } }
+    $scopeLabels=@{Machine='Machine';User='User';Process='Process'}
+    if ($Language -eq 'es') { $scopeLabels=@{Machine='Máquina';User='Usuario';Process='Proceso'} }
+    foreach ($scope in @('Machine','User','Process')) { if ($optionLabels.ContainsKey([string]$r.Options[$scope])) { $optionItems+='<li>'+$scopeLabels[$scope]+': '+$optionLabels[$r.Options[$scope]]+'</li>' } }
     if ($optionItems.Count -gt 0) {
         $lines.Add('<h2>JAVA_TOOL_OPTIONS</h2><ul>'+($optionItems -join '')+'</ul>')
-        if ($Language -eq 'es') { $lines.Add('<p>Los valores del entorno no prueban la protección de los procesos ELO existentes.</p>') } elseif ($Language -eq 'de') { $lines.Add('<p>Umgebungswerte beweisen keinen Schutz bestehender ELO-Prozesse.</p>') } else { $lines.Add('<p>Environment values do not prove protection of existing ELO processes.</p>') }
+        if ($Language -eq 'es') { $lines.Add('<p>Los valores del entorno no prueban que los procesos de ELO existentes estén protegidos.</p>') } elseif ($Language -eq 'de') { $lines.Add('<p>Umgebungswerte beweisen keinen Schutz bestehender ELO-Prozesse.</p>') } else { $lines.Add('<p>Environment values do not prove protection of existing ELO processes.</p>') }
     }
     if (@($r.Actions | Where-Object { $_.Kind -eq 'Update' -and $_.Status -eq 'Failed' }).Count -gt 0 -or @($r.Actions | Where-Object { $_.Kind -eq 'Backup' -and $_.Status -eq 'Proven' }).Count -gt 0) {
         if ($Language -eq 'es') { $lines.Add('<h2>Recuperación manual</h2><p>Si la actualización falla o se necesita de nuevo la versión anterior de Java: detén los servicios de ELO y los procesos Java, elimina el runtime nuevo y restaura la versión guardada desde el ZIP de la copia. Esta herramienta nunca borra el ZIP de la copia ni el runtime antiguo.</p>') }
@@ -350,16 +491,20 @@ function ConvertTo-EloTechnicalReportHtml {
         if ($rr.Recovery.Available) {
             $rec=$rr.Recovery
             $q={ param($s) "'"+$s.Replace("'","''")+"'" }
-            $cmd=@('# PowerShell (run as administrator)',
-                'Remove-Item -LiteralPath '+(& $q $rec.Original)+' -Recurse -Force',
-                'Expand-Archive -LiteralPath '+(& $q $rec.Archive)+' -DestinationPath '+(& $q $rec.Destination),
-                'Move-Item -LiteralPath '+(& $q ($rec.Destination.TrimEnd('\')+'\tree'))+' -Destination '+(& $q $rec.Original),
-                '',
-                'REM cmd.exe (run as administrator)',
-                'rmdir /s /q "'+$rec.Original+'"',
-                'mkdir "'+$rec.Destination+'"',
-                'tar -xf "'+$rec.Archive+'" -C "'+$rec.Destination+'"',
-                'move "'+$rec.Destination.TrimEnd('\')+'\tree" "'+$rec.Original+'"') -join "`r`n"
+            $asAdmin=@{en='run as administrator';de='als Administrator ausfuehren';es='ejecutar como administrador'}[$Language]
+            # One list item per command: inside @() the comma binds tighter than '+', which used to split every command.
+            $cmd=@(
+                ('# PowerShell ('+$asAdmin+')')
+                ('Remove-Item -LiteralPath '+(& $q $rec.Original)+' -Recurse -Force')
+                ('Expand-Archive -LiteralPath '+(& $q $rec.Archive)+' -DestinationPath '+(& $q $rec.Destination))
+                ('Move-Item -LiteralPath '+(& $q ($rec.Destination.TrimEnd('\')+'\tree'))+' -Destination '+(& $q $rec.Original))
+                ''
+                ('REM cmd.exe ('+$asAdmin+')')
+                ('rmdir /s /q "'+$rec.Original+'"')
+                ('mkdir "'+$rec.Destination+'"')
+                ('tar -xf "'+$rec.Archive+'" -C "'+$rec.Destination+'"')
+                ('move "'+$rec.Destination.TrimEnd('\')+'\tree" "'+$rec.Original+'"')
+            ) -join "`r`n"
             $lines.Add('<p>Original: '+(ConvertTo-EloReportEscapedText $rec.Original)+'</p><p>ZIP: '+(ConvertTo-EloReportEscapedText $rec.Archive)+'</p><pre>'+(ConvertTo-EloReportEscapedText $cmd)+'</pre>')
         }
     }

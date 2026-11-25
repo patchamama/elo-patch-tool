@@ -33,7 +33,7 @@ The runnable application is the single, self-contained **`ELO-Patch-Tools.bat`**
 | **2 · Runtime** | Pick one of the runtimes found (vendor, version, architecture, assessment). |
 | **3 · Action** | **Update Java** to the newest release of the *same vendor and branch*, apply the **temporary mitigation** (`-XX:-UseBASE64Intrinsics`), or read the **manual instructions** (steps plus ready-to-run PowerShell commands: inspect, back up, mitigate, update, roll back; also in `--help`). |
 | **4 · Confirm** | The preview names exact versions, backup ZIP, services to stop and risks. Nothing happens before you confirm. |
-| **5 · Report** | Bilingual (EN/DE) technical report: server, Windows, RAM/disk, JVMs, update, backup, ELO version, environment state and restore commands. |
+| **5 · Report** | Technical report in English, German or Spanish, as **HTML and PDF**, headed by the server's hostname (also in the file name): server, Windows, RAM/disk, JVMs, update, backup, ELO version, environment state and restore commands. |
 
 **Supported runtimes:** Azul Zulu and Eclipse Temurin · Java 8, 11, 17, 21, 25 (any branch the vendor publishes) · x86, x64, ARM64 · JDK or JRE · Windows. The newest GA release is resolved at preview time from the vendor API (`api.azul.com`, `api.adoptium.net`); host, URL shape and SHA256 are validated by a strict policy in code before any download.
 
@@ -178,6 +178,9 @@ The web UI, the technical report and the catalog texts are available in **Englis
 - The *Temporary mitigation* button is enabled only for a runtime the catalog classifies as vulnerable; for any other runtime (for example an Azul Zulu build, which the catalog does not evaluate) the page says so and only the update is offered.
 - The static help texts of the UI (manual instructions, action descriptions) still describe the built-in vulnerability; the alert, severity, problem, solution, advisories, mitigation, restore warnings, report sources, CLI security block and scan rules come from the catalog.
 - Raw JSON exports may include local paths; review them before sharing.
+- The report is downloaded as HTML or PDF, named `elo-technical-<hostname>-<language>`. It opens with the hostname and the generation time, and every update, mitigation, backup and restore carries the date and time it was performed (server local time with its UTC offset). The times are kept for the running session only: download the report before closing the tool. The PDF is written by the tool itself (no browser or printer needed; characters outside Windows-1252 print as `?`). Long commands wrap in the PDF, so copy them from the HTML version.
+- As soon as a scan finds something, the scan step shows a red warning with every catalog vulnerability found, the affected runtimes and the actions the catalog offers; new entries in `vulndb.json` appear there without UI changes.
+- The page header shows the version of the tool. It comes from `dev/VERSION`, which must match the release tag (a UI test enforces that the header and the file agree).
 - After a verified update the report states the result (`Java runtime updated and verified: <from> to <to>`, and that the new version is listed as fixed only when the catalog proves it). After a mitigation it states that the protection is **fragile**: it lives only in the machine variable `JAVA_TOOL_OPTIONS` and stops working if that variable is removed or overwritten, and running JVMs and services keep the old environment until restarted; it includes the PowerShell command to check it.
 - The technical report states only what is known: anything unknown or unavailable (classification, evidence, vendor, ELO version, scopes, disks) is left out instead of printed as a placeholder.
 
