@@ -290,12 +290,12 @@ try {
     Assert ((Test-EloSameOptions $session.Backup $original) -and $script:fakeWrites -eq 1 -and $script:fakeProbes -eq 2) 'exact backup plus before/after verification'
     $technical=Request POST '/api/report' '{"language":"en"}'
     Assert ($technical.Body.html.Contains('Machine option set: Verified') -and $technical.Body.html.Contains('Newly launched JVM flag: Verified')) 'actual mitigation postconditions mapped separately'
-    Assert ($technical.Body.html.Contains('Current running ELO process flag: Unknown / unavailable')) 'disposable probe is not running ELO evidence'
+    Assert (-not $technical.Body.html.Contains('Current running ELO process flag')) 'disposable probe is not running ELO evidence (and an unknown scope is not printed)'
     Assert ($technical.Body.html.Contains('Runtime update: Not performed') -and $technical.Body.html.Contains('Backup: Not performed')) 'no invented update or runtime backup'
     Assert (-not $technical.Body.html.Contains($original.Value)) 'raw JVM options not in sanitized report'
     Assert (-not $technical.Body.html.Contains('Temporary mitigation: Unknown / unavailable')) 'successful attempt has no contradictory unknown placeholder'
     $technicalDe=Request POST '/api/report' '{"language":"de"}'
-    Assert ($technicalDe.Body.html.Contains('Maschinenoption gesetzt: Nachgewiesen') -and $technicalDe.Body.html.Contains('Flag des aktuell laufenden ELO-Prozesses: Unbekannt / nicht verfuegbar')) 'German scope claims remain independent'
+    Assert ($technicalDe.Body.html.Contains('Maschinenoption gesetzt: Nachgewiesen') -and -not $technicalDe.Body.html.Contains('Flag des aktuell laufenden ELO-Prozesses')) 'German scope claims remain independent'
     $replay=Apply-Mitigation $view
     Assert ($replay.Status -eq 409 -and $script:fakeWrites -eq 1) 'single-use preview replay rejected'
     $view=Preview-Mitigation

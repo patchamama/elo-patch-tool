@@ -249,42 +249,51 @@ function ConvertTo-EloTechnicalReportHtml {
     foreach ($key in $guidance.Keys) { $t[$key]=$guidance[$key] }
     $lines=New-Object 'System.Collections.Generic.List[string]'
     $lines.Add('<!doctype html><html lang="'+$Language+'"><head><meta charset="utf-8"><title>'+$t.Title+'</title></head><body><h1>'+$t.Title+'</h1>')
-    $lines.Add('<p>'+$t.Notice+'</p><dl>')
+    $lines.Add('<p>'+$t.Notice+'</p>')
+    # Only what is known is reported: anything unknown / unavailable is left out instead of printed as a placeholder.
     $rows=@(@($t.Server,$r.System.ServerName),@($t.Windows,($r.System.WindowsVersion+' / '+$r.System.WindowsBuild)))
+    $facts2=New-Object 'System.Collections.Generic.List[string]'
     foreach ($row in $rows) {
-        $v=$row[1]; if ([string]::IsNullOrWhiteSpace(($v -replace '[ /]',''))) { $v=$t.Unknown }
-        $lines.Add('<dt>'+$row[0]+'</dt><dd>'+(ConvertTo-EloReportEscapedText $v)+'</dd>')
+        $v=$row[1]; if ([string]::IsNullOrWhiteSpace(($v -replace '[ /]',''))) { continue }
+        $facts2.Add('<dt>'+$row[0]+'</dt><dd>'+(ConvertTo-EloReportEscapedText $v)+'</dd>')
     }
-    $ram=$t.Unknown
-    if ($null -ne $r.System.TotalRamBytes) { $ram=([double]$r.System.TotalRamBytes / 1GB).ToString('F2',[Globalization.CultureInfo]::InvariantCulture)+' GiB' }
-    $lines.Add('<dt>'+$t.Ram+'</dt><dd>'+$ram+' ('+$t[$r.System.Status]+')</dd>')
-    if ($r.System.Disks.Count -eq 0) { $lines.Add('<dt>'+$t.Disk+'</dt><dd>'+$t.Unknown+'</dd>') }
+    if ($null -ne $r.System.TotalRamBytes) {
+        $ram=([double]$r.System.TotalRamBytes / 1GB).ToString('F2',[Globalization.CultureInfo]::InvariantCulture)+' GiB'
+        $facts2.Add('<dt>'+$t.Ram+'</dt><dd>'+$ram+' ('+$t[$r.System.Status]+')</dd>')
+    }
     foreach ($d in $r.System.Disks) {
         $space=([double]$d.TotalBytes/1GB).ToString('F2',[Globalization.CultureInfo]::InvariantCulture)+' GiB / '+([double]$d.FreeBytes/1GB).ToString('F2',[Globalization.CultureInfo]::InvariantCulture)+' GiB'
-        $lines.Add('<dt>'+$t.Disk+'</dt><dd>'+(ConvertTo-EloReportEscapedText $d.Name)+' '+$space+'</dd>')
+        $facts2.Add('<dt>'+$t.Disk+'</dt><dd>'+(ConvertTo-EloReportEscapedText $d.Name)+' '+$space+'</dd>')
     }
-    $lines.Add('<dt>'+$t.Elo+'</dt><dd>'+$t[$r.Elo.Status]+' '+(ConvertTo-EloReportEscapedText $r.Elo.Version)+'</dd>')
-    $lines.Add('</dl>')
-    if ($r.Elo.Status -ne 'Proven') { $lines.Add('<p>'+$t.Missing+'</p>') }
-    $lines.Add('<h2>'+$t.Jvm+'</h2><ul>')
-    if ($r.Jvms.Count -eq 0) { $lines.Add('<li>'+$t.Unknown+'</li>') }
-    foreach ($j in $r.Jvms) { $lines.Add('<li>JVM #'+$j.RuntimeIndex+': '+$t[$j.Status]+' '+(ConvertTo-EloReportEscapedText $j.Version)+'; '+$t.Execution+': '+$t[$j.ExecutionStatus]+'; '+$t.Classification+': '+(ConvertTo-EloReportEscapedText $t[$j.Classification])+'; '+$t.Evidence+': '+(ConvertTo-EloReportEscapedText $t[$j.EvidenceCode])+'</li>') }
-    $lines.Add('</ul><h2>'+$t.Recommendation+'</h2><p>'+$t.Temporary+'</p><p>'+$t.Upgrade+'</p><ul>')
-    if ($r.Jvms.Count -eq 0) { $lines.Add('<li>'+$t.VendorUnknown+'</li>') }
+    if ($r.Elo.Status -ceq 'Proven') { $facts2.Add('<dt>'+$t.Elo+'</dt><dd>'+$t[$r.Elo.Status]+' '+(ConvertTo-EloReportEscapedText $r.Elo.Version)+'</dd>') }
+    if ($facts2.Count -gt 0) { $lines.Add('<dl>'+($facts2 -join '')+'</dl>') }
+    $jvmItems=New-Object 'System.Collections.Generic.List[string]'
     foreach ($j in $r.Jvms) {
-        $advice=$t.VendorUnknown
+        if ($j.Status -ceq 'Unknown') { continue }
+        $item='JVM #'+$j.RuntimeIndex+': '+$t[$j.Status]+' '+(ConvertTo-EloReportEscapedText $j.Version)
+        if ($j.ExecutionStatus -cne 'Unknown') { $item+='; '+$t.Execution+': '+$t[$j.ExecutionStatus] }
+        if ($j.Classification -cne 'Unknown') { $item+='; '+$t.Classification+': '+(ConvertTo-EloReportEscapedText $t[$j.Classification]) }
+        if ($j.EvidenceCode -cne 'Unknown') { $item+='; '+$t.Evidence+': '+(ConvertTo-EloReportEscapedText $t[$j.EvidenceCode]) }
+        $jvmItems.Add('<li>'+$item+'</li>')
+    }
+    if ($jvmItems.Count -gt 0) { $lines.Add('<h2>'+$t.Jvm+'</h2><ul>'+($jvmItems -join '')+'</ul>') }
+    $lines.Add('<h2>'+$t.Recommendation+'</h2><p>'+$t.Temporary+'</p><p>'+$t.Upgrade+'</p><ul>')
+    foreach ($j in $r.Jvms) {
+        $advice=$null
         if ($j.Vendor -eq 'Temurin') {
             $advice=$t.Vendor+': Temurin; <a href="https://adoptium.net/temurin/releases">'+$t.Download+'</a>; <a href="https://adoptium.net/installation/">'+$t.Install+'</a>'
         } elseif ($j.Vendor -ceq 'Azul Zulu') {
             $advice=$t.Vendor+': Azul Zulu; <a href="https://www.azul.com/downloads/?os=windows&amp;package=jdk">'+$t.Download+'</a>; <a href="https://docs.azul.com/core/install/windows">'+$t.Install+'</a>. '+$t.Upgrade
         }
-        $lines.Add('<li>JVM #'+$j.RuntimeIndex+': '+$advice+'</li>')
+        if ($advice) { $lines.Add('<li>JVM #'+$j.RuntimeIndex+': '+$advice+'</li>') }
     }
-    $lines.Add('</ul><h2>'+$t.Update+' / '+$t.Mitigation+' / '+$t.Backup+' / '+$t.Restore+'</h2><ul>')
+    $lines.Add('</ul>')
+    $actionItems=New-Object 'System.Collections.Generic.List[string]'
     foreach ($a in $r.Actions) {
-        $association=$t.Unknown
-        if ($null -ne $a.RuntimeIndex) { $association='JVM #'+$a.RuntimeIndex }
-        $detail='; '+$t.Association+': '+$association+'; '+$t.Evidence+': '+(ConvertTo-EloReportEscapedText $t[$a.EvidenceCode])
+        if ($a.Status -ceq 'Unknown') { continue }
+        $detail=''
+        if ($null -ne $a.RuntimeIndex) { $detail+='; '+$t.Association+': JVM #'+$a.RuntimeIndex }
+        if ($a.EvidenceCode -cne 'Unknown') { $detail+='; '+$t.Evidence+': '+(ConvertTo-EloReportEscapedText $t[$a.EvidenceCode]) }
         foreach ($key in @('FromVersion','ToVersion','BackupVersion')) {
             if ($a[$key]) {
                 $label=$t.BackupVersion; if ($key -eq 'FromVersion') { $label=$t.From }; if ($key -eq 'ToVersion') { $label=$t.To }
@@ -293,19 +302,21 @@ function ConvertTo-EloTechnicalReportHtml {
         }
         if ($a.Kind -eq 'Mitigation') {
             foreach ($scope in @('MachineOptionSet','NewlyLaunchedJvmFlagVerified','RunningEloJvmFlagVerified')) {
-                $scopeState='Unknown'
-                if ($a.Status -eq 'Proven' -and $a.EvidenceCode -ceq $scope) { $scopeState='Proven' }
-                $detail+='; '+$t[$scope]+': '+$t[$scopeState]
+                if ($a.Status -eq 'Proven' -and $a.EvidenceCode -ceq $scope) { $detail+='; '+$t[$scope]+': '+$t.Proven }
             }
             if ($a.Status -eq 'Proven') { $detail+='; '+(Get-EloMitigationOptionForReport) }
         }
-        $lines.Add('<li>'+$t[$a.Kind]+': '+$t[$a.Status]+$detail+'</li>')
+        $actionItems.Add('<li>'+$t[$a.Kind]+': '+$t[$a.Status]+$detail+'</li>')
     }
-    $lines.Add('</ul><h2>JAVA_TOOL_OPTIONS</h2><ul>')
-    $optionLabels=@{Present='Flag present';Absent='Flag absent';Conflict='Conflicting enabling flag present';Unknown='Unknown / unavailable'}
-    if ($Language -eq 'de') { $optionLabels=@{Present='Flag vorhanden';Absent='Flag nicht vorhanden';Conflict='Konfligierendes aktivierendes Flag vorhanden';Unknown='Unbekannt / nicht verfuegbar'} }
-    foreach ($scope in @('Machine','User','Process')) { $lines.Add('<li>'+$scope+': '+$optionLabels[$r.Options[$scope]]+'</li>') }
-    if ($Language -eq 'de') { $lines.Add('</ul><p>Umgebungswerte beweisen keinen Schutz bestehender ELO-Prozesse.</p>') } else { $lines.Add('</ul><p>Environment values do not prove protection of existing ELO processes.</p>') }
+    if ($actionItems.Count -gt 0) { $lines.Add('<h2>'+$t.Update+' / '+$t.Mitigation+' / '+$t.Backup+' / '+$t.Restore+'</h2><ul>'+($actionItems -join '')+'</ul>') }
+    $optionLabels=@{Present='Flag present';Absent='Flag absent';Conflict='Conflicting enabling flag present'}
+    if ($Language -eq 'de') { $optionLabels=@{Present='Flag vorhanden';Absent='Flag nicht vorhanden';Conflict='Konfligierendes aktivierendes Flag vorhanden'} }
+    $optionItems=@()
+    foreach ($scope in @('Machine','User','Process')) { if ($optionLabels.ContainsKey([string]$r.Options[$scope])) { $optionItems+='<li>'+$scope+': '+$optionLabels[$r.Options[$scope]]+'</li>' } }
+    if ($optionItems.Count -gt 0) {
+        $lines.Add('<h2>JAVA_TOOL_OPTIONS</h2><ul>'+($optionItems -join '')+'</ul>')
+        if ($Language -eq 'de') { $lines.Add('<p>Umgebungswerte beweisen keinen Schutz bestehender ELO-Prozesse.</p>') } else { $lines.Add('<p>Environment values do not prove protection of existing ELO processes.</p>') }
+    }
     if (@($r.Actions | Where-Object { $_.Kind -eq 'Update' -and $_.Status -eq 'Failed' }).Count -gt 0 -or @($r.Actions | Where-Object { $_.Kind -eq 'Backup' -and $_.Status -eq 'Proven' }).Count -gt 0) {
         if ($Language -eq 'de') { $lines.Add('<h2>Manuelle Wiederherstellung</h2><p>Falls die Aktualisierung fehlschlaegt oder die alte Java-Version wieder benoetigt wird: ELO-Dienste und Java-Prozesse beenden, neue Runtime entfernen und die gesicherte Version aus dem Backup-ZIP zurueckspielen. Backup-ZIP und alte Runtime werden von diesem Werkzeug nie geloescht.</p>') }
         else { $lines.Add('<h2>Manual recovery</h2><p>If the update fails, or the previous Java version is needed again: stop the ELO services and Java processes, remove the new runtime and restore the saved version from the backup ZIP. This tool never deletes the backup ZIP or the old runtime.</p>') }
@@ -325,7 +336,7 @@ function ConvertTo-EloTechnicalReportHtml {
                 'tar -xf "'+$rec.Archive+'" -C "'+$rec.Destination+'"',
                 'move "'+$rec.Destination.TrimEnd('\')+'\tree" "'+$rec.Original+'"') -join "`r`n"
             $lines.Add('<p>Original: '+(ConvertTo-EloReportEscapedText $rec.Original)+'</p><p>ZIP: '+(ConvertTo-EloReportEscapedText $rec.Archive)+'</p><pre>'+(ConvertTo-EloReportEscapedText $cmd)+'</pre>')
-        } else { $lines.Add('<p>'+$t.Unknown+'</p>') }
+        }
     }
     $lines.Add('<h2>'+$t.Sources+'</h2><ul>')
     $lines.Add('<li>'+$t.Checked+': 2026-11-23. '+$t.Changes+'</li>')

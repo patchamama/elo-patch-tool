@@ -70,7 +70,7 @@ $known.Actions[0].ToVersion='password=secret-token'
 $html=ConvertTo-EloTechnicalReportHtml $known en
 Assert ($html -notmatch '<svg|<img|secret-token') 'renderer normalizes forged DTO'
 Assert (($unsafe | ConvertTo-Json -Depth 10) -notmatch 'secret-token') 'DTO excludes secrets as well as HTML'
-Assert ((ConvertTo-EloTechnicalReportHtml $report de).Contains('Authentifizierungsmethode')) 'German missing contract'
+Assert (-not (ConvertTo-EloTechnicalReportHtml $report de).Contains('Authentifizierungsmethode')) 'an unavailable ELO version is not announced in the report'
 Assert ((ConvertTo-EloTechnicalReportHtml $proven en).Contains('17.0.9')) 'old version retained for verified update'
 $detailed = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(
     @{Version='17.0.10';Verified=$true;Classification='PotentiallyVulnerable';ClassificationVerified=$true;EvidenceCode='AdvisoryRangeMatch'},
@@ -135,17 +135,17 @@ foreach ($scopeCode in @('MachineOptionSet','NewlyLaunchedJvmFlagVerified','Runn
         if ($lang -eq 'en') {
             Assert ($h.Contains('not a permanent fix') -and $h.Contains('after ELO compatibility confirmation')) 'temporary and compatibility advice'
             Assert ($h.Contains('does not install a Java runtime')) 'flag-only method identified'
-            if ($scopeCode -ne 'RunningEloJvmFlagVerified') { Assert ($h.Contains('Current running ELO process flag: Unknown / unavailable')) 'no running ELO proof inferred' }
+            if ($scopeCode -ne 'RunningEloJvmFlagVerified') { Assert (-not $h.Contains('Current running ELO process flag')) 'no running ELO proof inferred' }
             if ($scopeCode -eq 'MachineOptionSet') {
                 Assert ($h.Contains('Machine option set: Verified')) 'machine setting proof'
-                Assert ($h.Contains('Newly launched JVM flag: Unknown / unavailable')) 'machine setting does not prove launch'
+                Assert (-not $h.Contains('Newly launched JVM flag')) 'machine setting does not prove launch'
             }
             if ($scopeCode -eq 'NewlyLaunchedJvmFlagVerified') { Assert ($h.Contains('Newly launched JVM flag: Verified')) 'launch proof' }
             if ($scopeCode -eq 'RunningEloJvmFlagVerified') { Assert ($h.Contains('Current running ELO process flag: Verified')) 'explicit ELO proof' }
         } else {
             Assert ($h.Contains('keine dauerhafte Behebung') -and $h.Contains('nach ELO-Kompatibilitaetsbestaetigung')) 'German advice'
             Assert ($h.Contains('installiert keine Java-Runtime')) 'German flag-only method'
-            if ($scopeCode -ne 'RunningEloJvmFlagVerified') { Assert ($h.Contains('Flag des aktuell laufenden ELO-Prozesses: Unbekannt / nicht verfuegbar')) 'German unknown ELO scope' }
+            if ($scopeCode -ne 'RunningEloJvmFlagVerified') { Assert (-not $h.Contains('Flag des aktuell laufenden ELO-Prozesses')) 'German unknown ELO scope' }
         }
     }
     Assert ($scoped.Jvms[0].Classification -eq 'Unknown') 'mitigation does not classify as fixed'
@@ -156,8 +156,8 @@ foreach ($vendor in @('Unknown','Oracle','Temurin','<img>password=secret-token')
     foreach ($lang in @('en','de')) {
         $h=ConvertTo-EloTechnicalReportHtml $unknownVendor $lang
         Assert ($h -notmatch 'https://adoptium.net/temurin/releases|https://adoptium.net/installation/|secret-token|<img>') 'unknown vendor no provider replacement or injection'
-        if ($lang -eq 'en') { Assert ($h.Contains('JVM vendor unknown; consult your JVM vendor and ELO')) 'unknown provider guidance' }
-        else { Assert ($h.Contains('JVM-Anbieter unbekannt; JVM-Anbieter und ELO konsultieren')) 'German unknown provider guidance' }
+        if ($lang -eq 'en') { Assert (-not $h.Contains('JVM vendor unknown')) 'an unknown vendor is simply not mentioned' }
+        else { Assert (-not $h.Contains('JVM-Anbieter unbekannt')) 'an unknown vendor is simply not mentioned (German)' }
         Assert ($h -notmatch 'Machine option set: Verified|Maschinenoption gesetzt: Nachgewiesen') 'nonboolean scoped proof rejected'
     }
 }
@@ -177,14 +177,14 @@ Assert ((ConvertTo-EloTechnicalReportHtml $otherVendor en) -notmatch 'https://ad
 foreach ($state in @('Failed','Unknown','NotPerformed')) {
     $notMitigated = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='17.0.10';Verified=$true}) -Actions @(@{RuntimeIndex=1;Kind='Mitigation';Status=$state;Verified=$true;EvidenceVerified=$true;EvidenceCode='RunningEloJvmFlagVerified';ToVersion='99.0.1'})
     $h=ConvertTo-EloTechnicalReportHtml $notMitigated en
-    Assert ($h.Contains('Current running ELO process flag: Unknown / unavailable')) 'non-success never proves running ELO scope'
+    Assert (-not $h.Contains('Current running ELO process flag')) 'non-success never proves running ELO scope'
     Assert ($h -notmatch '99.0.1|-XX:-UseBASE64Intrinsics') 'non-success omits version and applied flag'
 }
 $legacy = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='17.0.10';Verified=$true}) -Actions @(@{RuntimeIndex=1;Kind='Mitigation';Status='Proven';Verified=$true;EvidenceVerified=$true;EvidenceCode='EffectiveJvmFlagObserved'})
 $h=ConvertTo-EloTechnicalReportHtml $legacy en
 Assert ($h.Contains('scope unspecified, current ELO process not verified')) 'legacy evidence not upgraded to ELO proof'
-Assert ($h.Contains('Current running ELO process flag: Unknown / unavailable')) 'legacy current process unknown'
-Assert ((ConvertTo-EloTechnicalReportHtml $report en).Contains('JVM vendor unknown; consult your JVM vendor and ELO')) 'empty scan does not assume vendor'
+Assert (-not $h.Contains('Current running ELO process flag')) 'legacy current process unknown'
+Assert (-not (ConvertTo-EloTechnicalReportHtml $report en).Contains('JVM vendor unknown')) 'empty scan does not assume a vendor and does not print a placeholder'
 $observed = New-EloTechnicalReport -ResourceCollector $resources -OptionsCollector { @{Machine='-XX:-UseBASE64Intrinsics password=secret-token';User='-XX:+UseBASE64Intrinsics';Process='-XX:-UseBASE64Intrinsics'} }
 Assert ($observed.Options.Machine -eq 'Present' -and $observed.Options.User -eq 'Conflict' -and $observed.Options.Process -eq 'Present') 'scope observations'
 Assert (($observed | ConvertTo-Json -Depth 10) -notmatch 'secret-token') 'options never retained'
@@ -224,4 +224,12 @@ try {
     $full=[IO.Path]::GetFullPath($eloScratch)
     if ($full.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()),[StringComparison]::OrdinalIgnoreCase) -and (Split-Path -Leaf $full) -like 'elo-version-test-*') { Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue }
 }
-Write-Output 'PASS: deterministic bilingual report tests (synthetic adapters only)'
+# Unknown / unavailable values are never printed: no placeholder text, no empty labels.
+$sparse = New-EloTechnicalReport -ResourceCollector { $null } -OptionsCollector { $null } -JvmEvidence @(@{Version='17.0.10';Verified=$true;ExecutionVerified=$true}) -Actions @(@{Kind='Mitigation';Status='Unknown'})
+foreach ($lang in @('en','de')) {
+    $h = ConvertTo-EloTechnicalReportHtml $sparse $lang
+    Assert ($h -notmatch 'Unknown / unavailable|Unbekannt / nicht verfuegbar') "no unknown/unavailable placeholder ($lang)"
+    Assert ($h -notmatch 'Vulnerability classification|Verwundbarkeitsklassifizierung|Evidence / method|Nachweis / Methode') "no label without a value ($lang)"
+    Assert ($h -notmatch '<dl></dl>|<ul></ul>|JAVA_TOOL_OPTIONS') "no empty sections ($lang)"
+    Assert ($h.Contains('17.0.10')) "known facts are still reported ($lang)"
+}Write-Output 'PASS: deterministic bilingual report tests (synthetic adapters only)'

@@ -88,7 +88,7 @@ $html=Get-EloSessionReportHtml $evidenceSession en
 Assert ($html.Contains('Session scan state: Cancelled') -and -not $html.Contains('secret-resource-error')) 'cancelled scan and resource failure are safe'
 $evidenceSession.Adapters.Resources={ @{ServerName='<script>secret-name</script>';WindowsVersion='bad';Disks=@()} }
 $html=Get-EloSessionReportHtml $evidenceSession de
-Assert (-not $html.Contains('secret-name') -and $html.Contains('Unbekannt / nicht verfuegbar')) 'resource injection sanitized in German'
+Assert (-not $html.Contains('secret-name') -and -not $html.Contains('Unbekannt / nicht verfuegbar')) 'resource injection sanitized in German (unknown values are left out)'
 $r = Invoke-EloApi -Session $s -Request (Request)
 Assert ($r.state -eq 'idle') 'authenticated initial state'
 Reject { Invoke-EloApi $s (Request -Remote '10.0.0.1') } 403

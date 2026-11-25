@@ -543,12 +543,15 @@ function boot(hash = '#token=test-session-token', storage = null) {
    if (path === 'community/cancel') { job = {state:'cancelled',kind:'run',log:[],drafts:[],outDir:''}; return {ok:true}; }
    throw Error('unexpected '+path);
  };
- assert(/<details id="communityBox"(?![^>]*\bopen\b)/.test(html),'the community panel is collapsed by default');
+ assert(/<section class="panel community" id="communityBox"[^>]*\bhidden\b/.test(html) && /<button id="settingsBtn"/.test(html) && html.indexOf('id="communityBox"') < html.indexOf('id="step1"'),'a Settings button in the header opens the community panel, which sits above every step and is hidden by default');
+ // opens the Settings panel (closing it first when it is already open, so the status is loaded again)
+ const openSettings = async ui => { if (ui.el('settingsBtn').attrs['aria-expanded'] === 'true') await ui.el('settingsBtn').onclick(); await ui.el('settingsBtn').onclick(); };
  for (const key of ['cUser','cPass','aiProvider','aiKey','aiBase','aiModel','cSince','cMax','cConsent','communityRun']) assert(html.includes('id="'+key+'"'),'panel has '+key);
  assert(/id="cPass" type="password"/.test(html) && /id="aiKey" type="password"/.test(html) && /<select id="aiModel" size="8"/.test(html),'secrets are password fields and the model is a list box');
  assert(html.includes('data-i18n="communityNeed1"') && html.includes('data-i18n="communityNeed3"'),'the panel states the credentials and the extra software up front');
  const cm = boot(); await tick(); cm.community(backend);
- cm.el('communityBox').open = true; await cm.el('communityBox').ontoggle(); await tick();
+ await openSettings(cm); await tick();
+ assert.equal(cm.el('communityBox').attrs.hidden,undefined,'the Settings button shows the panel'); assert.equal(cm.el('settingsBtn').attrs['aria-expanded'],'true');
  assert.equal(calls.filter(c => c.path === 'community/status').length,1,'status is loaded when the panel opens');
  assert(cm.el('communityStatus').textContent.includes('Helper not installed yet') && cm.el('communityStatus').textContent.includes('OPENAI_API_KEY') && !cm.el('communityStatus').textContent.includes('sk-'),'status shows what is missing and which secrets exist (names only)');
  assert.equal(cm.el('communitySetup').attrs.hidden,undefined,'install button shown when playwright is missing');
@@ -559,7 +562,8 @@ function boot(hash = '#token=test-session-token', storage = null) {
  cm.el('cConsent').checked = true; cm.el('cConsent').onchange();
  await cm.el('communitySetup').onclick(); await tick(); await tick();
  assert.deepEqual(calls.find(c => c.path === 'community/setup').body,{consent:'yes'},'install sends the explicit consent');
- status = cs({playwright:true}); job = idleJob(); await cm.el('communityBox').ontoggle(); await tick(); await tick(); await tick();
+ status = cs({playwright:true}); job = idleJob(); await openSettings(cm); await tick(); await tick(); await tick();
+ await cm.el('settingsClose').onclick(); assert.equal(cm.el('communityBox').attrs.hidden,'','the panel closes again'); await openSettings(cm); await tick(); await tick(); await tick();
  // model list box
  cm.el('aiKey').value = 'sk-typed-secret'; await cm.el('aiLoad').onclick(); await tick();
  const mcall = calls.filter(c => c.path === 'community/models').at(-1);
@@ -591,12 +595,12 @@ function boot(hash = '#token=test-session-token', storage = null) {
  await cm.el('communityCancel').onclick(); await tick();
  assert.equal(calls.at(-2).path === 'community/cancel' || calls.at(-1).path === 'community/job' || true,true);
  const bad = boot(); await tick();
- for (const wrong of [cs({extra:1}),cs({helper:'yes'}),cs({secrets:{communityUser:true}}),cs({ai:{provider:'evil',model:'m',baseUrl:''}})]) { bad.community((p) => p === 'community/status' ? wrong : idleJob()); bad.el('communityBox').open = true; await bad.el('communityBox').ontoggle(); await tick(); assert(bad.el('communityError').textContent.length > 0,'invalid status rejected: '+JSON.stringify(wrong).slice(0,60)); bad.el('communityBox').ontoggle = bad.el('communityBox').ontoggle; }
+ for (const wrong of [cs({extra:1}),cs({helper:'yes'}),cs({secrets:{communityUser:true}}),cs({ai:{provider:'evil',model:'m',baseUrl:''}})]) { bad.community((p) => p === 'community/status' ? wrong : idleJob()); await openSettings(bad); await tick(); assert(bad.el('communityError').textContent.length > 0,'invalid status rejected: '+JSON.stringify(wrong).slice(0,60)); }
  const fail = boot(); await tick(); status = cs({playwright:true}); fail.community((p) => { if (p === 'community/models') return {__status:502,body:{error:'community_failed',warnings:[both('The community helper failed. ai_http_401','Der Community-Helfer ist fehlgeschlagen. ai_http_401')]}}; return p === 'community/status' ? status : idleJob(); });
- fail.el('communityBox').open = true; await fail.el('communityBox').ontoggle(); await tick(); await fail.el('aiLoad').onclick(); await tick();
+ await openSettings(fail); await tick(); await fail.el('aiLoad').onclick(); await tick();
  assert(fail.el('communityError').textContent.includes('The community helper failed') && fail.el('communityError').textContent.includes('ai_http_401') && fail.el('error').textContent === '','a helper failure is shown inside the panel with its code, not as a page error');
  changeLocale(fail,'de'); assert(fail.translated.find(el => el.dataset.i18n === 'communityRun').textContent === 'Neueste Sicherheitsartikel analysieren' && fail.translated.find(el => el.dataset.i18n === 'communityConsent').textContent.includes('Zugangsdaten'),'German labels'); changeLocale(fail,'en');
- const noHelper = boot(); await tick(); noHelper.community((p) => p === 'community/status' ? cs({helper:false,node:false}) : idleJob()); noHelper.el('communityBox').open = true; await noHelper.el('communityBox').ontoggle(); await tick();
+ const noHelper = boot(); await tick(); noHelper.community((p) => p === 'community/status' ? cs({helper:false,node:false}) : idleJob()); await openSettings(noHelper); await tick();
  assert(noHelper.el('communityStatus').textContent.includes('tools/community was not found') && noHelper.el('communityRun').disabled === true && noHelper.el('communitySetup').attrs.hidden === '','without the helper the feature explains itself and the patch tool is unaffected'); // ---- the temporary mitigation is always available for a scanned runtime
  const mitUi = boot(); await tick();
  mitUi.results([row({status:'inconclusive',vendor:'Azul Zulu',version:'21.0.1+12-LTS'})]); await mitUi.poll();
