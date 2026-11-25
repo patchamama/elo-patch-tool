@@ -146,6 +146,8 @@ node tools/community/bin/elo-community.js run --since 3m --max 20 --provider ant
 node tools/community/bin/elo-community.js check      # validate + simulate the draft with the app
 ```
 
+**In the web UI** the first step has a collapsed panel *Security articles: ELO Community + AI (optional)*: it shows what is needed (credentials, extra software), offers *Install the helper* only after you tick the consent box, takes your ELO Community user/password and the AI key (used for that one run, never stored, fields cleared afterwards), lists the models your account offers in a list box (**Load available models**), runs the analysis and shows one card per draft with its severity, whether a solution was reported, whether a simulation exists and whether it detects anything. The same commands are available from the terminal.
+
 Limits: `--since 30d|8w|3m|1y|YYYY-MM-DD` and `--max N`. Details, safety rules and the unverified parts are in [`tools/community/README.md`](tools/community/README.md).
 
 ## Safety and limitations
@@ -158,6 +160,7 @@ Limits: `--since 30d|8w|3m|1y|YYYY-MM-DD` and `--max N`. Details, safety rules a
 - The mitigation changes machine-wide `JAVA_TOOL_OPTIONS` and can affect other Java applications; running processes are not protected until restarted. Save the previous value and type independently: its rollback backup is session-only.
 - The ELO version in the report is read from the installed Indexserver files (`servers\*\webapps\ix-*\version.txt`); no API, no credentials. Unknown stays unknown.
 - Vulnerability *classification* is conservative: the catalog decides what is vulnerable, and version tables are supported for identifiable Temurin builds (other vendors stay inconclusive unless an entry uses a `probe-expect` rule), but the update still offers the newest release of their branch.
+- The *Temporary mitigation* button is enabled only for a runtime the catalog classifies as vulnerable; for any other runtime (for example an Azul Zulu build, which the catalog does not evaluate) the page says so and only the update is offered.
 - The static help texts of the UI (manual instructions, action descriptions) still describe the built-in vulnerability; the alert, severity, problem, solution, advisories, mitigation, restore warnings, report sources, CLI security block and scan rules come from the catalog.
 - Raw JSON exports may include local paths; review them before sharing.
 

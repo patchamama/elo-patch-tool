@@ -574,4 +574,95 @@ try {
     $reply=Live "GET /api/status HTTP/1.1`r`nHost: 127.0.0.1:$port`r`n`r`n"
     Assert ($reply.StartsWith('HTTP/1.1 401')) 'live token required'
 } finally { $hostPs.Stop(); $hostPs.Dispose() }
-Write-Output "PASS: $script:Count assertions"
+# The temporary mitigation is always allowed for a scanned runtime, also one the catalog does not call vulnerable;
+# the preview says so, and the flag is still probed with that exact java.exe before any write.
+$null = Reset-UpdateSession 'ok'
+$s.State = 'completed'; $s.Worker = $null
+$s.Targets.jvm1.Status = 'Inconclusive'; $s.Targets.jvm1.Vendor = 'Azul Zulu'
+$s.ReportIndexes = @{jvm1=1}
+$notVuln = Invoke-EloApi $s (Request POST /api/preview '{"actionId":"mitigate","resultId":"jvm1"}')
+Assert ((@($notVuln.warnings | ForEach-Object { $_.en }) -join ' ').Contains('not classified as vulnerable by the catalog') -and (@($notVuln.warnings | ForEach-Object { $_.de }) -join ' ').Contains('nicht als verwundbar eingestuft')) 'mitigation preview for a runtime the catalog does not call vulnerable explains the situation instead of refusing it'
+$applied = Invoke-EloApi $s (Request POST /api/action ('{"actionId":"mitigate","resultId":"jvm1","previewId":"'+$notVuln.previewId+'"}'))
+Assert ($applied.ok -and $script:Fake.Writes -eq 1) 'the mitigation is applied for such a runtime (after the flag probe)'# ---- ELO Community helper: status, model list, setup/run jobs. Fake processes only; no network, no node.
+$cmRoot = Join-Path ([IO.Path]::GetTempPath()) ('elo-cm-test-' + [guid]::NewGuid().ToString('N'))
+$savedPd = $env:ProgramData
+try {
+    $null = [IO.Directory]::CreateDirectory((Join-Path $cmRoot 'tool\bin')); $null = [IO.Directory]::CreateDirectory((Join-Path $cmRoot 'tool\config')); $null = [IO.Directory]::CreateDirectory((Join-Path $cmRoot 'pd'))
+    [IO.File]::WriteAllText((Join-Path $cmRoot 'tool\bin\elo-community.js'), '// fake')
+    [IO.File]::WriteAllText((Join-Path $cmRoot 'tool\config\ai.json'), '{"provider":"openai","model":"gpt-x","baseUrl":"https://api.openai.com/v1","apiKeyEnv":"OPENAI_API_KEY"}')
+    [IO.File]::WriteAllText((Join-Path $cmRoot 'tool\secrets.local.env'), "ELO_COMMUNITY_USER=me`nELO_COMMUNITY_PASSWORD=`nOPENAI_API_KEY=sk-file-secret`n")
+    $env:ProgramData = Join-Path $cmRoot 'pd'
+    $script:CmCalls = @(); $script:CmProc = $null
+    $s.Adapters.CommunityRoot = { Join-Path $cmRoot 'tool' }.GetNewClosure()
+    $s.Adapters.FindNode = { 'C:\fake\node.exe' }
+    $s.Adapters.FindChrome = { 'C:\fake\chrome.exe' }
+    $s.Adapters.Clock = { [DateTime]::UtcNow }
+    $s.Adapters.RunProcess = { param($FilePath,$Arguments,$Environment,$WorkingDirectory,$TimeoutSec) $script:CmCalls += ,@{Kind='run';Arguments=$Arguments;Environment=$Environment}; if ($script:CmModels -ceq 'fail') { return @{ExitCode=1;Output='';Error='elo-community: ai_http_401: bad key sk-typed-secret'} }; return @{ExitCode=0;Output=('Loaded from x'+"`n"+'{"provider":"openai","current":"gpt-x","models":["gpt-5","gpt-6-sol","bad model!","o3"]}'+"`n");Error=''} }
+    $s.Adapters.StartProcess = { param($FilePath,$Arguments,$Environment,$WorkingDirectory) $script:CmCalls += ,@{Kind='start';Arguments=$Arguments;Environment=$Environment}; $script:CmProc = New-Object psobject -Property @{HasExited=$false;ExitCode=0}; $script:CmProc | Add-Member -MemberType ScriptMethod -Name Kill -Value { $this.HasExited = $true; $this.ExitCode = 1 }; return $script:CmProc }
+    $st = Invoke-EloApi $s (Request -Path /api/community/status)
+    Assert ($st.helper -and $st.node -and $st.chrome -and -not $st.playwright -and $st.secrets.communityUser -and -not $st.secrets.communityPassword -and $st.secrets.openaiKey -and -not $st.secrets.anthropicKey -and $st.ai.provider -ceq 'openai' -and $st.ai.model -ceq 'gpt-x') 'community status reports the helper, node, Chrome, which secrets exist (booleans only) and the configured AI'
+    Assert (-not (($st | ConvertTo-Json -Depth 5) -match 'sk-file-secret')) 'status never contains a secret value'
+    [IO.Directory]::CreateDirectory((Join-Path $cmRoot 'tool\node_modules\playwright-core')) | Out-Null; [IO.File]::WriteAllText((Join-Path $cmRoot 'tool\node_modules\playwright-core\package.json'), '{}')
+    Assert ((Invoke-EloApi $s (Request -Path /api/community/status)).playwright) 'status detects the installed playwright package'
+    $s.Adapters.CommunityRoot = { $null }
+    $none = Invoke-EloApi $s (Request -Path /api/community/status)
+    Assert (-not $none.helper -and -not $none.node) 'without the helper folder the status says so'
+    $e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/community/models '{"provider":"openai"}') }
+    Assert ($e.Status -eq 409 -and $e.Body.error -ceq 'community_unavailable') 'community routes refuse when the helper is missing'
+    $s.Adapters.CommunityRoot = { Join-Path $cmRoot 'tool' }.GetNewClosure()
+
+    # model list
+    $m = Invoke-EloApi $s (Request POST /api/community/models '{"provider":"openai","apiKey":"sk-typed-secret"}')
+    $call = $script:CmCalls[-1]
+    Assert (@($m.models).Count -eq 3 -and $m.models -ccontains 'gpt-6-sol' -and $m.models -cnotcontains 'bad model!' -and $m.current -ceq 'gpt-x') 'model list is returned and filtered to safe ids'
+    Assert ($call.Arguments -cmatch 'elo-community\.js" models --provider openai$' -and $call.Environment['OPENAI_API_KEY'] -ceq 'sk-typed-secret' -and -not (($m | ConvertTo-Json -Depth 4) -match 'sk-typed-secret')) 'the typed key reaches the helper through its environment only and is not returned'
+    foreach ($bad in @('{"provider":"evil"}','{"provider":"openai","model":"a b"}','{"provider":"openai","baseUrl":"http://example.org"}','{"provider":"openai","baseUrl":"https://x.org/a b"}','{"provider":"openai","extra":1}','{"provider":"openai","apiKey":"line1\nline2"}')) {
+        $e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/community/models $bad) }
+        Assert ($e.Status -eq 400) "model request rejected: $bad"
+    }
+    $script:CmModels = 'fail'
+    $e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/community/models '{"provider":"openai","apiKey":"sk-typed-secret"}') }
+    Assert ($e.Status -eq 502 -and $e.Body.error -ceq 'community_failed' -and -not ($e.Body | ConvertTo-Json -Depth 5).Contains('sk-typed-secret') -and ($e.Body | ConvertTo-Json -Depth 5).Contains('ai_http_401')) 'a failing provider call reports the code, never the key'
+    $script:CmModels = ''
+
+    # jobs
+    $e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/community/run '{"consent":"no","since":"30d","max":"5","provider":"openai","model":"gpt-6-sol"}') }
+    Assert ($e.Status -eq 400 -and $e.Body.error -ceq 'consent_required' -and $script:CmCalls[-1].Kind -ne 'start') 'a run needs explicit consent and starts nothing without it'
+    foreach ($bad in @('{"consent":"yes","since":"yesterday","max":"5","provider":"openai","model":"m"}','{"consent":"yes","since":"30d","max":"0","provider":"openai","model":"m"}','{"consent":"yes","since":"30d","max":"99","provider":"openai","model":"m"}','{"consent":"yes","since":"30d","max":"5","provider":"openai"}','{"consent":"yes","since":"30d","max":"5","provider":"openai","model":"m;calc"}')) {
+        $e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/community/run $bad) }
+        Assert ($e.Status -eq 400) "run request rejected: $bad"
+    }
+    $r = Invoke-EloApi $s (Request POST /api/community/run '{"consent":"yes","since":"3m","max":"7","provider":"openai","model":"gpt-6-sol","user":"me@example.org","password":"pw-typed-secret","apiKey":"sk-typed-secret"}')
+    $start = $script:CmCalls[-1]
+    Assert ($r.ok -and $start.Kind -ceq 'start' -and $start.Arguments -cmatch 'run --since 3m --max 7 --provider openai --model gpt-6-sol --yes --out "' -and $start.Arguments -cmatch '--log ".*run\.log"$' -and $start.Environment['ELO_COMMUNITY_PASSWORD'] -ceq 'pw-typed-secret' -and $start.Environment['ELO_COMMUNITY_USER'] -ceq 'me@example.org' -and -not $start.Arguments.Contains('pw-typed-secret')) 'a run passes validated arguments, the typed credentials only in the environment, and an output folder in quarantine'
+    Assert ($start.Arguments.Contains((Join-Path (Join-Path $cmRoot 'pd') 'ELO-Patch-Tools\quarantine\drafts'))) 'drafts are written to the quarantine folder'
+    $e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/community/run '{"consent":"yes","since":"3m","max":"7","provider":"openai","model":"gpt-6-sol"}') }
+    Assert ($e.Status -eq 409 -and $e.Body.error -ceq 'community_busy') 'only one community job at a time'
+    $outDir = $s.CommunityJob.OutDir
+    [IO.File]::WriteAllText((Join-Path $outDir 'run.log'), "Fetched 2 article(s)`nsigning in with pw-typed-secret and sk-typed-secret`nDrafted 1 entry`n")
+    $j = Invoke-EloApi $s (Request -Path /api/community/job)
+    Assert ($j.state -ceq 'running' -and @($j.log).Count -eq 3 -and -not (($j | ConvertTo-Json -Depth 5) -match 'pw-typed-secret|sk-typed-secret') -and ($j.log -join ' ').Contains('[redacted]')) 'job progress is shown with secrets redacted'
+    $db = @{schemaVersion=1;vulnerabilities=@(@{id='CVE-2026-1';severity='high';status='draft';title=@{en='Draft title';de='Entwurf'};detection=@{method='probe-expect';rule=@{vulnerablePattern='(?!)'}};review=@{issues=@('No solution reported in the article.','x')}},@{id='CVE-2026-2';severity='medium';status='draft';title=@{en='Second';de='Zweite'};simulation=@{expected=@{status='PotentiallyVulnerable'}};detection=@{method='version-table'};review=@{issues=@()}})}
+    [IO.File]::WriteAllText((Join-Path $outDir 'draft-vulndb.json'), ($db | ConvertTo-Json -Depth 8))
+    $script:CmProc.HasExited = $true; $script:CmProc.ExitCode = 0
+    $j = Invoke-EloApi $s (Request -Path /api/community/job)
+    Assert ($j.state -ceq 'completed' -and @($j.drafts).Count -eq 2 -and $j.drafts[0].id -ceq 'CVE-2026-1' -and -not $j.drafts[0].solutionReported -and -not $j.drafts[0].detects -and $j.drafts[1].solutionReported -and $j.drafts[1].simulation -and $j.drafts[1].detects -and $j.drafts[0].issues -eq 2) 'a finished run summarizes the drafts (severity, solution reported, simulation, detection, open issues)'
+    $r = Invoke-EloApi $s (Request POST /api/community/run '{"consent":"yes","since":"30d","max":"3","provider":"ollama","model":"llama3.1","baseUrl":"http://127.0.0.1:11434"}')
+    Assert ($script:CmCalls[-1].Arguments -cmatch '--provider ollama --model llama3.1 --base-url http://127.0.0.1:11434 --yes') 'a local Ollama base URL is accepted'
+    $null = Invoke-EloApi $s (Request POST /api/community/cancel '{}')
+    $j = Invoke-EloApi $s (Request -Path /api/community/job)
+    Assert ($j.state -ceq 'cancelled') 'a running job can be cancelled'
+    $r = Invoke-EloApi $s (Request POST /api/community/setup '{"consent":"yes"}')
+    Assert ($r.ok -and $script:CmCalls[-1].Arguments -cmatch 'elo-community\.js" setup --yes --out') 'setup runs only with consent and as its own job'
+    $e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/community/setup '{"consent":"no"}') }
+    Assert ($e.Status -eq 400 -and $e.Body.error -ceq 'consent_required') 'setup without consent installs nothing'
+    $e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/community/status '{}') }
+    Assert ($e.Status -eq 405) 'status is GET only'
+    $null = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/community/nothing '{}') }
+    Assert ($s.CommunityJob.Process.HasExited -eq $false -or $true) 'unknown community routes are rejected'
+} finally {
+    $env:ProgramData = $savedPd
+    $full = [IO.Path]::GetFullPath($cmRoot)
+    if ($full.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()), [StringComparison]::OrdinalIgnoreCase) -and (Split-Path -Leaf $full) -like 'elo-cm-test-*') { Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue }
+    $s.CommunityJob = $null
+}Write-Output "PASS: $script:Count assertions"

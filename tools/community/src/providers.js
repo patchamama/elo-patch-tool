@@ -28,7 +28,7 @@ function buildRequest(cfg, system, user) {
   const json = { 'Content-Type': 'application/json' };
   if (cfg.provider === 'openai') {
     return { url: cfg.baseUrl + '/chat/completions', headers: { ...json, Authorization: 'Bearer ' + cfg.apiKey },
-      body: { model: cfg.model, temperature: 0, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] } };
+      body: { model: cfg.model, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] } };
   }
   if (cfg.provider === 'anthropic') {
     return { url: cfg.baseUrl + '/v1/messages', headers: { ...json, 'x-api-key': cfg.apiKey, 'anthropic-version': '2023-06-01' },
@@ -74,4 +74,36 @@ async function callProvider(config, system, user, fetchImpl = fetch, env = proce
   return parseJsonLoose(extractText(cfg.provider, data));
 }
 
-module.exports = { PROVIDERS, resolveConfig, buildRequest, extractText, parseJsonLoose, callProvider, redact };
+// ---- model listing (for the model picker): OpenAI GET /models, Anthropic GET /v1/models, Ollama GET /api/tags.
+const NOT_CHAT = /embed|whisper|tts|dall-e|moderation|davinci|babbage|transcribe|realtime|audio|image|search-preview|computer-use/i;
+
+function buildListRequest(cfg) {
+  if (cfg.provider === 'openai') return { url: cfg.baseUrl + '/models', headers: { Authorization: 'Bearer ' + cfg.apiKey } };
+  if (cfg.provider === 'anthropic') return { url: cfg.baseUrl + '/v1/models?limit=100', headers: { 'x-api-key': cfg.apiKey, 'anthropic-version': '2023-06-01' } };
+  return { url: cfg.baseUrl + '/api/tags', headers: cfg.apiKey ? { Authorization: 'Bearer ' + cfg.apiKey } : {} };
+}
+
+function extractModels(provider, data) {
+  let ids = [];
+  if (provider === 'ollama') ids = Array.isArray(data && data.models) ? data.models.map(m => m && (m.name || m.model)) : [];
+  else ids = Array.isArray(data && data.data) ? data.data.map(m => m && m.id) : [];
+  ids = ids.filter(id => typeof id === 'string' && /^[A-Za-z0-9._:\-/]{1,100}$/.test(id));
+  if (provider === 'openai') ids = ids.filter(id => !NOT_CHAT.test(id));
+  return [...new Set(ids)].sort((a, b) => a.localeCompare(b));
+}
+
+async function listModels(config, fetchImpl = fetch, env = process.env) {
+  const cfg = resolveConfig({ ...config, model: config.model || 'list-models' }, env);
+  const req = buildListRequest(cfg);
+  let res;
+  try { res = await fetchImpl(req.url, { method: 'GET', headers: req.headers, redirect: 'error', signal: AbortSignal.timeout(30000) }); }
+  catch (e) { throw new Error('ai_network_error: ' + redact(e && e.message, cfg)); }
+  if (!res.ok) {
+    let detail = ''; try { detail = await res.text(); } catch (_) { /* ignore */ }
+    throw new Error('ai_http_' + res.status + ': ' + redact(detail, cfg));
+  }
+  let data; try { data = await res.json(); } catch (_) { throw new Error('ai_response_not_json'); }
+  return extractModels(cfg.provider, data);
+}
+
+module.exports = { PROVIDERS, resolveConfig, buildRequest, buildListRequest, extractModels, listModels, extractText, parseJsonLoose, callProvider, redact };

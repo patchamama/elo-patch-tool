@@ -48,11 +48,11 @@ async function listArticles(page, cfg, { since, max, now = new Date(), maxPages 
     if (pageNo === 1) { if (!/board=/.test(page.url())) await page.goto(url, { waitUntil: 'domcontentloaded' }); }
     else await page.evaluate(h => { window.location.hash = h; }, new URL(url).hash);
     await page.waitForTimeout(cfg.list.waitMs);
-    const items = await page.evaluate(({ item, dateAttr }) => [...document.querySelectorAll(item)].map(a => {
-      const row = a.closest('li, tr, article, div') || a;
-      const t = row.querySelector(dateAttr);
-      return { href: a.href, text: (a.innerText || a.textContent || '').trim(), date: t ? t.getAttribute('datetime') || t.textContent : (row.innerText || '').slice(0, 400) };
-    }), { item: cfg.list.item, dateAttr: cfg.list.dateAttr });
+    const items = await page.evaluate(({ item, row }) => [...document.querySelectorAll(item)].map(a => {
+      const container = a.closest(row) || a.parentElement || a;
+      const t = container.querySelector('time[datetime]');
+      return { href: a.href, text: (a.innerText || a.textContent || '').trim(), date: t ? t.getAttribute('datetime') : (container.innerText || '').slice(0, 400) };
+    }), { item: cfg.list.item, row: cfg.list.row || 'li' });
     const { picked, stop } = selectArticles(items, { since, max: max - all.length, allowedHost: cfg.board.allowedHost, seen });
     all.push(...picked);
     if (stop || items.length === 0) break;
@@ -65,12 +65,12 @@ async function readArticle(page, cfg, article) {
   if (!sameHost(article.url, cfg.board.allowedHost)) throw new Error('article_host_rejected');
   await page.goto(article.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(cfg.article.waitMs);
-  const data = await page.evaluate(sel => {
-    const body = document.querySelector(sel);
-    const h = document.querySelector('h1, h2');
+  const data = await page.evaluate(({ body: bodySel, title: titleSel }) => {
+    const body = document.querySelector(bodySel);
+    const h = document.querySelector(titleSel || 'h1, h2');
     const t = document.querySelector('time[datetime]');
     return { text: body ? body.innerText : '', title: h ? h.innerText : document.title, date: t ? t.getAttribute('datetime') : null };
-  }, cfg.article.body);
+  }, { body: cfg.article.body, title: cfg.article.title });
   const date = parseArticleDate(data.date) || parseArticleDate(data.text.slice(0, 600));
   return { url: article.url, title: (data.title || article.title || '').trim().slice(0, 300), date: date ? date.toISOString().slice(0, 10) : article.date, text: String(data.text).replace(/\r/g, '').slice(0, cfg.limits.maxCharsPerArticle) };
 }

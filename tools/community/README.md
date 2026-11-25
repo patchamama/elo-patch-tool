@@ -44,6 +44,7 @@ node tools/community/bin/elo-community.js run --since 30d --provider ollama --mo
 node tools/community/bin/elo-community.js fetch   --since 1y --max 50                                  # only the articles
 node tools/community/bin/elo-community.js analyze --articles C:\q\articles.json --provider openai --model gpt-4o
 node tools/community/bin/elo-community.js check   --draft C:\q\draft-vulndb.json
+node tools/community/bin/elo-community.js models  --provider openai            # list the models of your account
 ```
 
 Then follow `report.md`: validate (`--catalog-validate`), simulate (`--catalog-simulate`), review and set `"status": "active"` on the entries you accept, and install with `--catalog-install FILE --confirm-admin`. The previous installed catalog is quarantined first and can be restored with `--catalog-restore`.
@@ -62,10 +63,12 @@ AI configuration: flags, or `config/ai.json` (copy `config/ai.example.json`; git
 ## Verified and not verified
 
 - Verified: the sign-in page (`form#eloLoginForm`, `input[name=username]`, `input[name=password]`, button *Anmelden*), all provider request shapes against mocks, the draft sanitizing, the date/count limits, and that generated drafts pass the app's real validator and simulation (Windows PowerShell 5.1) — see `npm test`.
-- **Not verified:** the board's list/article markup after sign-in and the answers of real AI services. No account was available, so the selectors in `config/community.json` (`list`, `article`) are best-effort defaults; adjust them if the board differs. Treat every draft as a suggestion from a model, not a verified advisory.
+- Verified against the real services (2026-11): sign-in, the board list (`a.post-list-title-text` inside `.post-list-content`, dates like `18. Nov. 2026`, pages via `&page=N`), article text (`.post-view`), the OpenAI model list and a full run through the web UI (fetch, model list box, analysis, drafts in quarantine).
+- Real-world findings: some newer OpenAI models reject `temperature: 0` (the tool no longer sends it), and `gpt-6.0-sol` is not offered by every account - use **Load available models** (`models` command) to pick an existing one, e.g. `gpt-6-sol`.
+- Treat every draft as a suggestion from a model, not a verified advisory.
 
 ## Tests
 
 ```powershell
-npm test --prefix tools/community        # 23 tests, no network, no browser; the PowerShell cross-check runs on Windows
+npm test --prefix tools/community        # 35 tests, no network, no browser; the PowerShell cross-check runs on Windows
 ```

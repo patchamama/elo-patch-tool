@@ -12,14 +12,20 @@
     "submit": "#eloLoginForm button, #eloLoginForm input[type=submit]"
   },
   "list": {
-    "note": "The board is an AngularJS single-page app. These selectors are best-effort defaults that could not be verified without an account; adjust them here if the board markup differs.",
-    "item": "a[href*='#/'][href*='id='], a[href*='article'], .sol-knowledge-board-list a, .knowledge-board-entry a",
-    "dateAttr": "time[datetime]",
+    "note": "Verified against the real board (2026-11): each article is a.post-list-title-text inside .post-list-content, whose text carries the author and the date (\"18. Nov. 2026\"). The board is an AngularJS SPA; pages are reached with &page=N in the hash.",
+    "item": "a.post-list-title-text",
+    "row": ".post-list-content",
     "waitMs": 4000
   },
   "article": {
-    "body": "main, .article, .sol-knowledge-article, body",
+    "note": "Verified: the article is .post-view (title in .post-title, date in the text).",
+    "body": ".post-view, .post-container",
+    "title": ".post-title",
     "waitMs": 3000
   },
-  "limits": { "maxArticlesHard": 200, "maxCharsPerArticle": 12000, "politenessMs": 800 }
+  "limits": {
+    "maxArticlesHard": 200,
+    "maxCharsPerArticle": 12000,
+    "politenessMs": 800
+  }
 }

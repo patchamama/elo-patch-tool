@@ -900,8 +900,8 @@ function Invoke-EloCli {
         if ($scan.Cancelled) { throw 'Scan cancelled; no action performed.' }
         if ($isAction) {
             $index = [int]$options['--target']; $rows = @($scan.Results)
-            # A mitigation needs a potentially vulnerable JVM; an update only needs a runtime the backend can identify.
-            if ($index -ge $rows.Count -or ($kind -eq 'mitigation' -and $rows[$index].Status -cne 'PotentiallyVulnerable')) { throw 'Target not eligible.' }
+            # Both actions only need a scanned runtime: the mitigation is probed with that exact java.exe before any write.
+            if ($index -ge $rows.Count) { throw 'Target not eligible.' }
             $preview = & $Actions[$previewName] $rows[$index]
             if ($null -eq $preview -or [string]::IsNullOrWhiteSpace([string]$preview.Summary)) { throw 'Backend preview required.' }
             $report.action = @{ preview=$preview; result=$null }
@@ -980,10 +980,39 @@ function New-EloServerSession {
     @{
         Port=$Port; Origin="http://127.0.0.1:$Port"; Token=(New-EloSecret); UiHtml=$UiHtml; ScanSource=$ScanSource
         State='idle'; Results=@(); Targets=@{}; Preview=$null; Worker=$null; Backup=$null; RecoveryRequired=$false; LastError=$null
-        ReportJvms=@(); ReportActions=@(); ReportIndexes=@{}; UpdateContext=$null; ReportRecovery=$null; LastUpdate=$null; Backups=@{}; BackupsCache=$null; BackupsLogged=-1; LastRejected=''
+        ReportJvms=@(); ReportActions=@(); ReportIndexes=@{}; UpdateContext=$null; ReportRecovery=$null; LastUpdate=$null; Backups=@{}; BackupsCache=$null; BackupsLogged=-1; LastRejected=''; CommunityJob=$null
         Adapters=@{
             NewUpdateContext={ param($Root,$Runtime,$StopServices) New-EloUpdateContext -Adapters (New-EloWindowsUpdateAdapters -ApprovedRoot $Root -Runtime $Runtime -AllowServiceStop:([bool]$StopServices)) -Production }
             BackupRoots={ @([IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -in @([IO.DriveType]::Fixed,[IO.DriveType]::Removable) -and $_.Name -cmatch '^[C-Z]:\\$' } | ForEach-Object { $_.RootDirectory.FullName }) }
+            CommunityRoot={
+                $candidates=@()
+                if ($env:ELO_PATCH_SOURCE) { $candidates+=(Join-Path (Split-Path -Parent $env:ELO_PATCH_SOURCE) 'tools\community') }
+                $candidates+=(Join-Path (Split-Path -Parent $PSScriptRoot) 'tools\community')
+                foreach ($c in $candidates) { if (Test-Path -LiteralPath (Join-Path $c 'bin\elo-community.js') -PathType Leaf) { return $c } }
+                return $null
+            }
+            FindNode={ $n=Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($n) { return [string]$n.Source } else { return $null } }
+            FindChrome={ foreach ($b in @($env:ProgramFiles,${env:ProgramFiles(x86)},$env:LOCALAPPDATA)) { if ($b) { $p=Join-Path $b 'Google\Chrome\Application\chrome.exe'; if (Test-Path -LiteralPath $p) { return $p } } }; return $null }
+            RunProcess={ param($FilePath,$Arguments,$Environment,$WorkingDirectory,$TimeoutSec)
+                $psi=New-Object Diagnostics.ProcessStartInfo; $psi.FileName=$FilePath; $psi.Arguments=$Arguments; $psi.UseShellExecute=$false; $psi.CreateNoWindow=$true
+                $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true; $psi.WorkingDirectory=$WorkingDirectory
+                foreach ($k in $Environment.Keys) { $psi.EnvironmentVariables[[string]$k]=[string]$Environment[$k] }
+                $p=New-Object Diagnostics.Process; $p.StartInfo=$psi
+                try {
+                    if (-not $p.Start()) { throw 'process_start_failed' }
+                    $out=$p.StandardOutput.ReadToEndAsync(); $err=$p.StandardError.ReadToEndAsync()
+                    if (-not $p.WaitForExit([int]$TimeoutSec*1000)) { try { $p.Kill() } catch { }; throw 'process_timeout' }
+                    $null=[Threading.Tasks.Task]::WaitAll(@($out,$err),5000)
+                    return @{ExitCode=$p.ExitCode;Output=[string]$out.Result;Error=[string]$err.Result}
+                } finally { $p.Dispose() }
+            }
+            StartProcess={ param($FilePath,$Arguments,$Environment,$WorkingDirectory)
+                $psi=New-Object Diagnostics.ProcessStartInfo; $psi.FileName=$FilePath; $psi.Arguments=$Arguments; $psi.UseShellExecute=$false; $psi.CreateNoWindow=$true; $psi.WorkingDirectory=$WorkingDirectory
+                foreach ($k in $Environment.Keys) { $psi.EnvironmentVariables[[string]$k]=[string]$Environment[$k] }
+                $p=New-Object Diagnostics.Process; $p.StartInfo=$psi
+                if (-not $p.Start()) { throw 'process_start_failed' }
+                return $p
+            }
             ScanRules={ if (Get-Command Get-EloScanRules -CommandType Function -ErrorAction SilentlyContinue) { ,@(Get-EloScanRules) } else { ,@() } }
             Log={ param($Message) Write-Host ((Get-Date).ToString('HH:mm:ss')+'  '+$Message) }
             Identity={ param($Path) Get-EloRuntimeIdentity $Path }
@@ -1323,7 +1352,9 @@ function New-EloMitigationPreview {
     $Session.Preview=$null
     if (-not (& $Session.Adapters.Admin)) { Stop-EloRequest 403 'administrator_required' }
     $target=$Session.Targets[$ResultId]
-    if (-not $target -or $target.Status -cne 'PotentiallyVulnerable') { Stop-EloRequest 409 'target_not_eligible' }
+    # The temporary mitigation is always allowed for a scanned runtime (also one the catalog does not classify as
+    # vulnerable, e.g. Azul Zulu): the exact java.exe is probed with the flag BEFORE anything is written.
+    if (-not $target) { Stop-EloRequest 409 'target_not_eligible' }
     $before=& $Session.Adapters.ReadOptions
     # Preserve raw REG_EXPAND_SZ bytes, but do not pretend a process-local probe
     # proves Windows' future service expansion against an unknown environment.
@@ -1341,7 +1372,9 @@ function New-EloMitigationPreview {
     $summaryEn=Format-EloVulnText ([string]$spec.Action.summary.en) $values
     $summaryDe=Format-EloVulnText ([string]$spec.Action.summary.de) $values
     $Session.Preview=$preview
-    return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe};warnings=@(
+    $notice=@()
+    if ($target.Status -cne 'PotentiallyVulnerable') { $notice=@(@{en='This runtime is not classified as vulnerable by the catalog (for example another vendor). The temporary mitigation is allowed anyway: the option is probed with this exact java.exe first and nothing is written if that fails. It still applies machine-wide.';de='Diese Runtime wird vom Katalog nicht als verwundbar eingestuft (z. B. anderer Hersteller). Die vorlaeufige Risikominderung ist trotzdem erlaubt: die Option wird zuerst mit genau dieser java.exe geprueft; schlaegt das fehl, wird nichts geschrieben. Sie gilt weiterhin systemweit.'}) }
+    return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe};warnings=@($notice)+@(
         @{en='Existing JVMs are NOT protected. No restart is performed. Windows services may retain an old environment even after restart; a verified PrintFlagsFinal probe is not proof of service protection. Coordinate supported ELO configuration with your administrator.';de='Bestehende JVMs sind NICHT geschuetzt. Kein Neustart. Windows-Dienste koennen alte Umgebungswerte behalten. Der PrintFlagsFinal-Test beweist keinen Schutz des Dienstes. Unterstuetzte ELO-Konfiguration mit Administrator klaeren.'},
         @{en='Global options can break unrelated JVMs. Advisory source verification does not establish ELO or JVM-option compatibility. Session-only backup is lost on exit: save the previous value from this preview before confirmation. No runtime update is available.';de='Globale Optionen koennen andere JVMs stoeren. Quellenpruefung beweist keine ELO- oder JVM-Optionskompatibilitaet. Sitzungssicherung geht beim Beenden verloren: alten Wert vor Bestaetigung sichern. Laufzeit-Update nicht verfuegbar.'})}
 }
@@ -1352,7 +1385,7 @@ function Invoke-EloMitigation {
         (& $Session.Adapters.Clock) -ge $preview.Expires) { Stop-EloRequest 409 'preview_expired_or_mismatched' }
     if (-not (& $Session.Adapters.Admin)) { Stop-EloRequest 403 'administrator_required' }
     $target=$Session.Targets[$Body.resultId]
-    if (-not $target -or $target.Location -cne $preview.JavaPath -or $target.Status -cne 'PotentiallyVulnerable' -or
+    if (-not $target -or $target.Location -cne $preview.JavaPath -or
         (& $Session.Adapters.Fingerprint $preview.JavaPath) -cne $preview.Fingerprint -or
         -not (Test-EloSameOptions (& $Session.Adapters.ReadOptions) $preview.Before)) { Stop-EloRequest 409 'stale_preview' }
     if (-not (& $Session.Adapters.Verify $preview.JavaPath $preview.After.Value)) { Stop-EloRequest 422 'probe_failed_no_change' }
@@ -1730,14 +1763,206 @@ function Invoke-EloRestoreAction {
     $recovery=''; if ($Session.RecoveryRequired) { $recovery='Manual recovery required / Manuelle Wiederherstellung erforderlich.' }
     return $html.Replace('<head>','<head><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; base-uri &#39;none&#39;; form-action &#39;none&#39;">').Replace('<body>','<body><p>'+ $notice+$state+'. '+$scope+' '+$recovery+'</p>')
 }
+# ---- ELO Community helper (optional Node tool in tools\community): status, model list, setup and analysis jobs.
+# Credentials and API keys arrive in a request body, are handed to the child process through its environment for
+# that one run, and are never stored, logged or returned.
+$script:EloCommunitySecretKeys=@('ELO_COMMUNITY_USER','ELO_COMMUNITY_PASSWORD','OPENAI_API_KEY','ANTHROPIC_API_KEY')
+function Get-EloCommunitySecretsPresent {
+    param([string]$Root)
+    $present=@{}
+    foreach ($k in $script:EloCommunitySecretKeys) { $present[$k]=[bool][Environment]::GetEnvironmentVariable($k) }
+    $file=Join-Path $Root 'secrets.local.env'
+    if (Test-Path -LiteralPath $file -PathType Leaf) {
+        foreach ($line in @([IO.File]::ReadAllLines($file))) { if ($line -cmatch '^\s*([A-Z][A-Z0-9_]*)\s*=\s*\S') { if ($script:EloCommunitySecretKeys -ccontains $Matches[1]) { $present[$Matches[1]]=$true } } }
+    }
+    return $present
+}
+function Get-EloCommunityStatus {
+    param($Session)
+    $root=& $Session.Adapters.CommunityRoot
+    $status=@{helper=[bool]$root;node=$false;playwright=$false;chrome=$false
+        secrets=@{communityUser=$false;communityPassword=$false;openaiKey=$false;anthropicKey=$false};ai=$null}
+    if (-not $root) { return $status }
+    $status.node=[bool](& $Session.Adapters.FindNode)
+    $status.chrome=[bool](& $Session.Adapters.FindChrome)
+    $status.playwright=(Test-Path -LiteralPath (Join-Path $root 'node_modules\playwright-core\package.json') -PathType Leaf)
+    $p=Get-EloCommunitySecretsPresent $root
+    $status.secrets=@{communityUser=[bool]$p.ELO_COMMUNITY_USER;communityPassword=[bool]$p.ELO_COMMUNITY_PASSWORD;openaiKey=[bool]$p.OPENAI_API_KEY;anthropicKey=[bool]$p.ANTHROPIC_API_KEY}
+    $aiFile=Join-Path $root 'config\ai.json'
+    if (Test-Path -LiteralPath $aiFile -PathType Leaf) {
+        try {
+            $ai=[IO.File]::ReadAllText($aiFile) | ConvertFrom-Json
+            $prov=[string]$ai.provider; $model=[string]$ai.model; $base=[string]$ai.baseUrl
+            if (@('openai','anthropic','ollama') -ccontains $prov -and $model -cmatch '^[A-Za-z0-9._:\-/]{1,100}$') { $status.ai=@{provider=$prov;model=$model;baseUrl=$(if ($base -cmatch '^https?://[^\s"<>]{1,200}$') { $base } else { '' })} }
+        } catch { }
+    }
+    return $status
+}
+function Assert-EloCommunityText {
+    param($Value,[string]$Pattern,[int]$Max,[string]$Code)
+    if ($null -eq $Value) { return '' }
+    $s=[string]$Value
+    if ($s.Length -gt $Max -or $s -match '[\x00-\x1f\x7f]' -or ($Pattern -and $s -cnotmatch $Pattern)) { Stop-EloRequest 400 $Code }
+    return $s
+}
+function Get-EloCommunityEnvironment {
+    # Only values the person typed for THIS run; anything empty is left to the helper's own secrets file.
+    param($Body)
+    $env2=@{}
+    $map=@{user='ELO_COMMUNITY_USER';password='ELO_COMMUNITY_PASSWORD'}
+    foreach ($k in $map.Keys) { $v=Assert-EloCommunityText $Body.$k $null 300 'invalid_parameters'; if ($v) { $env2[$map[$k]]=$v } }
+    $key=Assert-EloCommunityText $Body.apiKey $null 400 'invalid_parameters'
+    if ($key) { $prov=[string]$Body.provider; if ($prov -ceq 'openai') { $env2['OPENAI_API_KEY']=$key } elseif ($prov -ceq 'anthropic') { $env2['ANTHROPIC_API_KEY']=$key } }
+    return $env2
+}
+function Get-EloCommunityAiArguments {
+    param($Body,[bool]$RequireModel)
+    $prov=[string]$Body.provider
+    if (@('openai','anthropic','ollama') -cnotcontains $prov) { Stop-EloRequest 400 'invalid_parameters' }
+    $arguments=@('--provider',$prov)
+    $model=Assert-EloCommunityText $Body.model '^[A-Za-z0-9._:\-/]{1,100}$' 100 'invalid_parameters'
+    if ($RequireModel -and -not $model) { Stop-EloRequest 400 'missing_parameter' }
+    if ($model) { $arguments+=@('--model',$model) }
+    $base=Assert-EloCommunityText $Body.baseUrl $null 200 'invalid_parameters'
+    if ($base) {
+        if ($base -cnotmatch '^(https://[A-Za-z0-9.\-]+|http://(127\.0\.0\.1|localhost))(:[0-9]{1,5})?(/[A-Za-z0-9._~\-/]*)?$') { Stop-EloRequest 400 'invalid_parameters' }
+        $arguments+=@('--base-url',$base)
+    }
+    return ,$arguments
+}
+function Get-EloCommunityTool {
+    param($Session)
+    $root=& $Session.Adapters.CommunityRoot
+    if (-not $root) { Stop-EloRequestDetail 409 'community_unavailable' 'helper_not_found' }
+    $node=& $Session.Adapters.FindNode
+    if (-not $node) { Stop-EloRequestDetail 409 'community_unavailable' 'node_not_found' }
+    return @{Root=$root;Node=$node;Cli=(Join-Path $root 'bin\elo-community.js')}
+}
+function Remove-EloCommunitySecrets {
+    param([string]$Text,$Environment)
+    $clean=[string]$Text
+    foreach ($v in @($Environment.Values)) { if ($v -and ([string]$v).Length -ge 4) { $clean=$clean.Replace([string]$v,'[redacted]') } }
+    return $clean
+}
+function Get-EloCommunityModels {
+    param($Session,$Body)
+    $tool=Get-EloCommunityTool $Session
+    $arguments=@(('"'+$tool.Cli+'"'),'models')+(Get-EloCommunityAiArguments $Body $false)
+    $environment=Get-EloCommunityEnvironment $Body
+    Write-EloLog $Session "Community: listing models of '$($Body.provider)'."
+    try { $r=& $Session.Adapters.RunProcess $tool.Node ($arguments -join ' ') $environment $tool.Root 40 }
+    catch { Stop-EloRequestDetail 502 'community_failed' (ConvertTo-EloUpdateCode ([string]$_.Exception.Message)) }
+    if ($r.ExitCode -ne 0) {
+        $msg=Remove-EloCommunitySecrets (([string]$r.Error+[string]$r.Output) -replace '(?s)^.*?elo-community: ','') $environment
+        $code='models_failed'; if ($msg -match 'ai_key_missing') { $code='ai_key_missing' } elseif ($msg -match 'ai_http_(\d{3})') { $code='ai_http_'+$Matches[1] } elseif ($msg -match 'ai_network_error') { $code='ai_network_error' }
+        Stop-EloRequestDetail 502 'community_failed' $code
+    }
+    $json=@(([string]$r.Output -split "`r?`n") | Where-Object { $_ -match '^\{.*\}\s*$' } | Select-Object -Last 1)
+    if ($json.Count -ne 1) { Stop-EloRequestDetail 502 'community_failed' 'models_unreadable' }
+    try { $parsed=$json[0] | ConvertFrom-Json } catch { Stop-EloRequestDetail 502 'community_failed' 'models_unreadable' }
+    $models=@(@($parsed.models) | Where-Object { [string]$_ -cmatch '^[A-Za-z0-9._:\-/]{1,100}$' } | Select-Object -First 300 | ForEach-Object { [string]$_ })
+    return @{models=$models;current=$(if ($parsed.current) { [string]$parsed.current } else { '' })}
+}
+function Start-EloCommunityJob {
+    param($Session,[string]$Kind,$Body)
+    # The protocol carries flat strings only: consent is the exact text yes.
+    if ([string]$Body.consent -cne 'yes') { Stop-EloRequest 400 'consent_required' }
+    $job=$Session.CommunityJob
+    if ($job -and $job.Process -and -not $job.Process.HasExited) { Stop-EloRequest 409 'community_busy' }
+    $tool=Get-EloCommunityTool $Session
+    $stamp=(& $Session.Adapters.Clock).ToString('yyyyMMddHHmmss')
+    $outDir=Join-Path (Join-Path (Get-EloQuarantineRoot) 'drafts') $stamp
+    $null=[IO.Directory]::CreateDirectory($outDir)
+    $logFile=Join-Path $outDir 'run.log'
+    $environment=@{}
+    if ($Kind -ceq 'run') {
+        $since=Assert-EloCommunityText $Body.since '^([0-9]{1,4}[dwmy]|[0-9]{4}-[0-9]{2}-[0-9]{2})$' 12 'invalid_parameters'
+        if (-not $since) { Stop-EloRequest 400 'missing_parameter' }
+        if ([string]$Body.max -cnotmatch '^[0-9]{1,2}$') { Stop-EloRequest 400 'invalid_parameters' }
+        $max=[int]$Body.max; if ($max -lt 1 -or $max -gt 50) { Stop-EloRequest 400 'invalid_parameters' }
+        $arguments=@(('"'+$tool.Cli+'"'),'run','--since',$since,'--max',[string]$max)+(Get-EloCommunityAiArguments $Body $true)
+        $environment=Get-EloCommunityEnvironment $Body
+    } else {
+        $arguments=@(('"'+$tool.Cli+'"'),'setup')
+    }
+    $arguments+=@('--yes','--out',('"'+$outDir+'"'),'--log',('"'+$logFile+'"'))
+    Write-EloLog $Session "Community: starting '$Kind' (output in $outDir)."
+    try { $process=& $Session.Adapters.StartProcess $tool.Node ($arguments -join ' ') $environment $tool.Root }
+    catch { Stop-EloRequestDetail 502 'community_failed' 'process_start_failed' }
+    $Session.CommunityJob=@{Kind=$Kind;Process=$process;OutDir=$outDir;LogFile=$logFile;Started=(& $Session.Adapters.Clock);Environment=$environment;Reported=$false}
+}
+function Get-EloCommunityJobState {
+    param($Session)
+    $job=$Session.CommunityJob
+    if (-not $job) { return @{state='idle';kind='';log=@();drafts=@();outDir=''} }
+    $state='running'
+    if ($job.Process.HasExited) {
+        if ($job.Cancelled) { $state='cancelled' } elseif ($job.Process.ExitCode -eq 0) { $state='completed' } else { $state='failed' }
+        if (-not $job.Reported) { $job.Reported=$true; Write-EloLog $Session "Community: '$($job.Kind)' $state."; $Session.BackupsCache=$null }
+    }
+    $log=@()
+    if (Test-Path -LiteralPath $job.LogFile -PathType Leaf) {
+        try {
+            $fs=[IO.File]::Open($job.LogFile,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+            try { $len=[int][Math]::Min($fs.Length,20000); $null=$fs.Seek(-$len,[IO.SeekOrigin]::End); $buf=New-Object byte[] $len; $null=$fs.Read($buf,0,$len); $text=[Text.Encoding]::UTF8.GetString($buf) } finally { $fs.Dispose() }
+            $log=@(($text -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -Last 40 | ForEach-Object { $l=Remove-EloCommunitySecrets $_ $job.Environment; $l.Substring(0,[Math]::Min(300,$l.Length)) })
+        } catch { }
+    }
+    $drafts=@()
+    $draftFile=Join-Path $job.OutDir 'draft-vulndb.json'
+    if ($state -ceq 'completed' -and $job.Kind -ceq 'run' -and (Test-Path -LiteralPath $draftFile -PathType Leaf)) {
+        try {
+            $db=[IO.File]::ReadAllText($draftFile) | ConvertFrom-Json
+            foreach ($e in @($db.vulnerabilities | Select-Object -First 50)) {
+                $issues=@($e.review.issues)
+                $title=[string]$e.title.en; if ($title.Length -gt 200) { $title=$title.Substring(0,200) }
+                $drafts+=@{id=[string]$e.id;severity=[string]$e.severity;title=$title;solutionReported=(@($issues | Where-Object { $_ -match 'No solution reported' }).Count -eq 0);simulation=[bool]$e.simulation;issues=$issues.Count;detects=([string]$e.detection.method -ceq 'version-table' -or ([string]$e.detection.rule.vulnerablePattern -cne '(?!)'))}
+            }
+        } catch { $drafts=@() }
+    }
+    return @{state=$state;kind=[string]$job.Kind;log=@($log);drafts=@($drafts);outDir=[string]$job.OutDir}
+}
+function Invoke-EloCommunityApi {
+    param($Session,$Request)
+    if ($Request.Target -ceq '/api/community/status') { return (Get-EloCommunityStatus $Session) }
+    if ($Request.Target -ceq '/api/community/job') { return (Get-EloCommunityJobState $Session) }
+    switch -CaseSensitive ($Request.Target) {
+        '/api/community/models' {
+            $body=ConvertFrom-EloBody $Request.Body -Required @('provider') -Optional @('apiKey','baseUrl','model')
+            return (Get-EloCommunityModels $Session $body)
+        }
+        '/api/community/setup' {
+            $body=ConvertFrom-EloBody $Request.Body -Required @('consent')
+            Start-EloCommunityJob $Session 'setup' $body
+            return @{ok=$true}
+        }
+        '/api/community/run' {
+            $body=ConvertFrom-EloBody $Request.Body -Required @('consent','since','max','provider','model') -Optional @('user','password','apiKey','baseUrl')
+            Start-EloCommunityJob $Session 'run' $body
+            return @{ok=$true}
+        }
+        '/api/community/cancel' {
+            $null=ConvertFrom-EloBody $Request.Body
+            $job=$Session.CommunityJob
+            if ($job -and $job.Process -and -not $job.Process.HasExited) { $job.Cancelled=$true; try { $job.Process.Kill() } catch { }; Write-EloLog $Session 'Community: cancelled.' }
+            return @{ok=$true}
+        }
+    }
+    Stop-EloRequest 404 'unknown_route'
+}
 function Invoke-EloApi {
     param($Session,$Request)
     Assert-EloBoundary $Session $Request
     if (-not (Test-EloSecret ([string]$Request.Headers['X-Session-Token']) $Session.Token)) { Stop-EloRequest 401 'authentication_required' }
-    $get=@('/api/status','/api/results'); $post=@('/api/scan','/api/cancel','/api/preview','/api/action','/api/report')
+    $get=@('/api/status','/api/results','/api/community/status','/api/community/job'); $post=@('/api/scan','/api/cancel','/api/preview','/api/action','/api/report','/api/community/models','/api/community/setup','/api/community/run','/api/community/cancel')
     if ($Request.Target -cnotin ($get+$post)) { Stop-EloRequest 404 'unknown_route' }
     if (($Request.Target -cin $get -and $Request.Method -cne 'GET') -or ($Request.Target -cin $post -and $Request.Method -cne 'POST')) { Stop-EloRequest 405 'method_rejected' }
     Update-EloScanWorker $Session
+    if ($Request.Target -clike '/api/community/*') {
+        if ($Request.Method -ceq 'POST' -and $Request.Headers['Content-Type'] -cnotin @('application/json','application/json; charset=utf-8')) { Stop-EloRequest 415 'json_required' }
+        if ($Request.Method -ceq 'GET' -and $Request.Body.Length -ne 0) { Stop-EloRequest 400 'unexpected_body' }
+        return (Invoke-EloCommunityApi $Session $Request)
+    }
     if ($Request.Method -ceq 'GET') {
         if ($Request.Body.Length -ne 0) { Stop-EloRequest 400 'unexpected_body' }
         if ($Request.Target -ceq '/api/status') { return @{state=$Session.State} }
@@ -1859,8 +2084,14 @@ function ConvertTo-EloErrorResponse {
         'inaccessible_path' { $warnings+=@{en='The selected local directory is missing or inaccessible. Select an accessible directory and check permissions.';de='Das ausgewaehlte lokale Verzeichnis fehlt oder ist unzugaenglich. Zugaengliches Verzeichnis waehlen und Berechtigungen pruefen.'} }
         'update_unavailable_provenance_compatibility_backup_replacement_rollback_not_verified' { $warnings+=@{en='Automatic runtime update is unavailable: provenance, ELO compatibility, validated backups, reversible replacement and rollback guarantees are not implemented and verified. Nothing was downloaded or replaced.';de='Automatisches Laufzeit-Update nicht verfuegbar: Herkunft, ELO-Kompatibilitaet, validierte Sicherung, reversible Ersetzung und Wiederherstellung sind nicht implementiert und geprueft. Nichts heruntergeladen oder ersetzt.'} }
     }
+    switch ($code) {
+        'community_unavailable' { $warnings+=@{en='The ELO Community helper is not available here (it needs the tools\community folder next to the tool and Node.js). The patch tool itself is unaffected.';de='Der ELO-Community-Helfer ist hier nicht verfuegbar (er braucht den Ordner tools\community neben dem Werkzeug und Node.js). Das Patch-Werkzeug selbst ist nicht betroffen.'} }
+        'community_busy' { $warnings+=@{en='A community job is already running. Wait for it or cancel it.';de='Ein Community-Auftrag laeuft bereits. Abwarten oder abbrechen.'} }
+        'consent_required' { $warnings+=@{en='Confirm that extra software may be installed and that your ELO Community credentials are used.';de='Bestaetigen, dass zusaetzliche Software installiert werden darf und Ihre ELO-Community-Zugangsdaten verwendet werden.'} }
+    }
     $detail=''; if ($cursor -and $cursor.Data.Contains('Detail')) { $detail=' ['+[string]$cursor.Data['Detail']+']' }
     switch ($code) {
+        'community_failed' { $warnings+=@{en="The community helper failed.$detail Check the backend window for details; credentials are never shown.";de="Der Community-Helfer ist fehlgeschlagen.$detail Details im Backend-Fenster pruefen; Zugangsdaten werden nie angezeigt."} }
         'update_not_needed' { $warnings+=@{en='This runtime is already the newest release of its branch. Nothing to update.';de='Diese Runtime ist bereits die neueste Version ihres Branches. Nichts zu aktualisieren.'} }
         'no_backup_for_target' { $warnings+=@{en='No backup from this session exists for this runtime. Restore manually from a backup ZIP using the commands in the technical report.';de='Fuer diese Runtime existiert in dieser Sitzung kein Backup. Manuell aus einem Backup-ZIP wiederherstellen; Befehle stehen im technischen Bericht.'} }
         'restore_failed_no_change' { $warnings+=@{en="The restore was rejected before the runtime was swapped.$detail The current runtime is unchanged.";de="Die Wiederherstellung wurde abgelehnt, bevor die Runtime getauscht wurde.$detail Die aktuelle Runtime ist unveraendert."} }
@@ -2088,7 +2319,7 @@ details>summary::after{content:"";margin-left:auto;width:8px;height:8px;border-r
 details[open]>summary::after{transform:rotate(-135deg)}
 details>.body{padding:0 14px 14px}
 label.field{display:block;font-weight:600;margin:.5rem 0}
-input[type=text]{display:block;width:100%;font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:.55rem .7rem;margin-top:.35rem}
+input[type=text],input[type=password]{display:block;width:100%;font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:.55rem .7rem;margin-top:.35rem}
 .cards{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}
 .rt,.card{text-align:left;font:inherit;color:var(--text);background:var(--surface);border:1.5px solid var(--line);border-radius:13px;padding:14px;cursor:pointer;display:flex;flex-direction:column;gap:6px;transition:border-color .12s,background .12s,box-shadow .12s}
 .rt:hover:not(:disabled),.card:hover:not(:disabled){border-color:var(--muted)}
@@ -2137,6 +2368,19 @@ ol.manual li{margin:.35rem 0}
 .sev[data-sev=medium]{background:#c2410c}
 .sev[data-sev=low]{background:#a16207}
 .rt[data-status=vulnerable]{border-color:var(--bad)}
+.community{margin-top:14px}
+.community fieldset{border:1px solid var(--line);border-radius:12px;margin:10px 0;padding:8px 12px 12px}
+.community legend{font-weight:700;padding:0 6px}
+.community .grid2{display:grid;gap:4px 14px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+.community select[size]{width:100%;font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:.3rem;margin-top:.35rem}
+.community select:not([size]){display:block;width:100%;font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:.5rem;margin-top:.35rem}
+.community input[type=number]{display:block;width:100%;font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:.55rem .7rem;margin-top:.35rem}
+.notice{border:1.5px solid var(--warn);background:var(--warn-soft);border-radius:12px;padding:10px 14px;margin:10px 0}
+.notice ul{margin:.35rem 0 0 1.1rem;padding:0}
+.banner-inline{color:var(--bad);font-weight:600;white-space:pre-wrap;margin:6px 0}
+.banner-inline:empty{display:none}
+pre.log{white-space:pre-wrap;overflow-wrap:anywhere;font-size:.8125rem;background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:10px;max-height:220px;overflow:auto}
+pre.log:empty{display:none}
 .cmdbox{margin:16px 0 8px}
 .cmdbox h3{display:flex;align-items:center;gap:8px;font-size:1rem;margin:0 0 6px}
 pre.cmd{background:#0f172a;color:#e2e8f0;border:1px solid #1e293b;border-radius:12px;padding:14px;font-family:Consolas,"Cascadia Mono",monospace;font-size:.8125rem;overflow-x:auto;white-space:pre-wrap;overflow-wrap:anywhere}
@@ -2200,6 +2444,32 @@ pre.cmd .c-str{color:#fca5a5}
 <button id="cancel" class="btn" type="button" disabled><svg class="i"><use href="#i-stop"/></svg><span data-i18n="cancel"></span></button>
 <button id="toStep2" class="btn ghost" type="button" hidden><span data-i18n="continue"></span><svg class="i"><use href="#i-next"/></svg></button>
 </div>
+<details id="communityBox" class="community"><summary><svg class="i"><use href="#i-globe"/></svg><span data-i18n="communityTitle"></span></summary><div class="body">
+<p class="muted" data-i18n="communityIntro"></p>
+<div class="notice" id="communityNeeds"><strong data-i18n="communityNeedsTitle"></strong><ul><li data-i18n="communityNeed1"></li><li data-i18n="communityNeed2"></li><li data-i18n="communityNeed3"></li></ul></div>
+<p id="communityStatus" class="muted" role="status"></p>
+<p id="communityError" class="banner-inline" role="alert"></p>
+<div class="row"><button id="communitySetup" class="btn" type="button" hidden><svg class="i"><use href="#i-download"/></svg><span data-i18n="communitySetup"></span></button></div>
+<fieldset class="grid2"><legend data-i18n="communityAccount"></legend>
+<label class="field"><span data-i18n="communityUser"></span><input id="cUser" type="text" maxlength="300" autocomplete="off" spellcheck="false"></label>
+<label class="field"><span data-i18n="communityPassword"></span><input id="cPass" type="password" maxlength="300" autocomplete="new-password"></label>
+</fieldset>
+<fieldset class="grid2"><legend data-i18n="communityAi"></legend>
+<label class="field"><span data-i18n="aiProvider"></span><select id="aiProvider"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="ollama">Ollama (local)</option></select></label>
+<label class="field"><span data-i18n="aiKey"></span><input id="aiKey" type="password" maxlength="400" autocomplete="new-password"></label>
+<label class="field"><span data-i18n="aiBase"></span><input id="aiBase" type="text" maxlength="200" autocomplete="off" spellcheck="false" placeholder="https://api.openai.com/v1"></label>
+<div class="field"><span data-i18n="aiModel"></span><select id="aiModel" size="8" aria-label="Model"></select><div class="row"><button id="aiLoad" class="btn" type="button"><svg class="i"><use href="#i-list"/></svg><span data-i18n="aiLoad"></span></button><span id="aiModelNote" class="muted"></span></div></div>
+</fieldset>
+<fieldset class="grid2"><legend data-i18n="communityScope"></legend>
+<label class="field"><span data-i18n="cSince"></span><select id="cSince"><option value="30d">30</option><option value="90d">90</option><option value="180d">180</option><option value="1y">365</option><option value="3y">3 y</option></select></label>
+<label class="field"><span data-i18n="cMax"></span><input id="cMax" type="number" min="1" max="50" value="10"></label>
+</fieldset>
+<label class="confirm"><input id="cConsent" type="checkbox"><span data-i18n="communityConsent"></span></label>
+<div class="row"><button id="communityRun" class="btn primary" type="button" disabled><svg class="i"><use href="#i-play"/></svg><span data-i18n="communityRun"></span></button><button id="communityCancel" class="btn" type="button" hidden><svg class="i"><use href="#i-stop"/></svg><span data-i18n="cancel"></span></button></div>
+<pre id="communityLog" class="log" aria-live="polite"></pre>
+<div id="communityDrafts" class="cards"></div>
+<pre id="communityNext" class="cmd" aria-label="PowerShell" hidden></pre>
+</div></details>
 </section>
 
 <section class="panel" id="step2" aria-labelledby="h2s" hidden>
@@ -2222,6 +2492,7 @@ pre.cmd .c-str{color:#fca5a5}
 <h2 id="h3s"><span class="ico"><svg class="i"><use href="#i-update"/></svg></span><span data-i18n="step3Title"></span></h2>
 <p class="lead" data-i18n="warning"></p>
 <div id="vulnRec" class="alert" role="alert" hidden><div id="vulnRecList"></div></div>
+<p id="mitigateHint" class="muted" hidden data-i18n="mitigateHint"></p>
 <div class="cards">
 <button id="update" class="card rec" type="button" disabled><span class="ico"><svg class="i"><use href="#i-update"/></svg></span><span><span class="tt" data-i18n="update"></span><span class="dd" data-i18n="updateDesc"></span></span></button>
 <button id="mitigate" class="card" type="button" disabled><span class="ico"><svg class="i"><use href="#i-shield"/></svg></span><span><span class="tt" data-i18n="mitigate"></span><span class="dd" data-i18n="mitigateDesc"></span></span></button>
@@ -2299,7 +2570,8 @@ const messages = {
  'Stop only the affected service during the approved window, apply the chosen change using the vendor procedure, then restart. Check service health and effective JVM options/version. If checks fail, stop and restore the saved configuration/runtime.',
  'Rescan and document the outcome. Keep the backup until validated. Contact ELO support if paths, service ownership or compatibility are uncertain.'],
  manualCommandsTitle:'PowerShell commands (administrator)',manualCommands:'# Run in an ADMINISTRATOR PowerShell. Adjust the paths and service names to your scan result.\n\n# 1) Find the runtime, its version and the services that use it\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nGet-Content \'C:\\ELO\\java\\release\' | Select-String \'IMPLEMENTOR|JAVA_RUNTIME_VERSION|OS_ARCH\'\nGet-CimInstance Win32_Service | Where-Object { $_.PathName -match \'ELO\' } | Select-Object Name, State, PathName\n[Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\')\n\n# 2) Back up the runtime (ZIP) before changing anything\nCompress-Archive -LiteralPath \'C:\\ELO\\java\' -DestinationPath \'C:\\ELO\\java-backup.zip\'\n\n# 3) Temporary mitigation (machine-wide): KEEP the old value and append, never overwrite\n$old = [Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\'); $old\n[Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', (($old + \' -XX:-UseBASE64Intrinsics\').Trim()), \'Machine\')\n# Undo: [Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', $old, \'Machine\')   (use $null if it was empty)\n# Services only see the change after they are restarted.\n\n# 4) Update the runtime by hand (download the newest release of the SAME vendor and branch first)\n(Get-FileHash \'C:\\Downloads\\new-java.zip\' -Algorithm SHA256).Hash        # compare with the vendor\'s published SHA256\nStop-Service \'ELO-SRV01-1\' -Force                                        # every service that uses this Java\nRename-Item \'C:\\ELO\\java\' \'java.old\'\nExpand-Archive -LiteralPath \'C:\\Downloads\\new-java.zip\' -DestinationPath \'C:\\ELO\\java-new\'\nMove-Item (Get-ChildItem \'C:\\ELO\\java-new\' -Directory | Select-Object -First 1).FullName \'C:\\ELO\\java\'\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nStart-Service \'ELO-SRV01-1\'\n\n# 5) If something fails: stop the services, put the old runtime back, start the services\nStop-Service \'ELO-SRV01-1\' -Force\nRename-Item \'C:\\ELO\\java\' \'java.failed\'; Rename-Item \'C:\\ELO\\java.old\' \'java\'\nStart-Service \'ELO-SRV01-1\'\n# Or restore from the ZIP: Expand-Archive \'C:\\ELO\\java-backup.zip\' -DestinationPath \'C:\\ELO\\restore\'; then move the java folder back',
- backupsTitle:'Existing backups',backupsText:'Backups made by this tool were found on this server. Pick one to bring that Java version back; the runtime that is installed now is kept next to it.',behindTitle:'Without this tool: the same steps by hand',behindIntro:'These are the commands this tool runs behind the scenes, step by step, for the selected runtime. Run them in an ADMINISTRATOR PowerShell if you prefer to fix it without the tool. Replace the text in <angle brackets>.',behindUpdateTitle:'Update Java runtime (what the tool does)',behindMitigateTitle:'Temporary mitigation (what the tool does)',severity_high:'High',severity_medium:'Medium',severity_low:'Low',vulnTitle:'Vulnerability found: CVE-2026-114938 (Java4Shell)',vulnText:'{n} runtime(s) are before the fixed release: {list}. The JIT BASE64 intrinsics flaw lets this Java produce wrong results; the vendor fixed it in a newer release.',vulnFixLabel:'Solution:',vulnFix:'update Java to the current release of the same branch (step 3, Update Java runtime). The temporary mitigation only reduces the risk until you update.',terminalTitle:'Run it from the terminal (administrator PowerShell)',terminalCmdsText:'# Update Java to the current release (recommended)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Temporary mitigation only (adds -XX:-UseBASE64Intrinsics; restart the ELO services afterwards)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Check the result (--target is the position in the scan list, starting at 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'contains a vulnerable Java',
+ backupsTitle:'Existing backups',backupsText:'Backups made by this tool were found on this server. Pick one to bring that Java version back; the runtime that is installed now is kept next to it.',behindTitle:'Without this tool: the same steps by hand',behindIntro:'These are the commands this tool runs behind the scenes, step by step, for the selected runtime. Run them in an ADMINISTRATOR PowerShell if you prefer to fix it without the tool. Replace the text in <angle brackets>.',behindUpdateTitle:'Update Java runtime (what the tool does)',behindMitigateTitle:'Temporary mitigation (what the tool does)',communityTitle:'Security articles: ELO Community + AI (optional)',communityIntro:'Reads the latest security articles of the ELO Community, rates them (high / medium / low) with an AI and drafts catalog entries with a simulation. It only writes DRAFTS to the quarantine folder; nothing is installed or changed on this server.',communityNeedsTitle:'What this needs (nothing is installed until you confirm)',communityNeed1:'Your ELO Community account (user name or e-mail + password) to sign in at community.elo.com. Typed here, used for this run only, never stored.',communityNeed2:'An AI: an API key (OpenAI / Anthropic) or a local Ollama. Only the article text is sent to the provider.',communityNeed3:'Extra software: Node.js 18+, Google Chrome and the npm package playwright-core (about 14 MB, installed into tools/community only after you confirm).',communityAccount:'ELO Community account',communityUser:'User name or e-mail',communityPassword:'Password',communityAi:'AI provider',aiProvider:'Provider',aiKey:'API key',aiBase:'Base URL (optional)',aiModel:'Model',aiLoad:'Load available models',communityScope:'Which articles',cSince:'Newer than (days)',cMax:'At most (articles)',communityConsent:'I confirm that extra software may be installed and that my ELO Community credentials and the AI key are used for this run.',communityRun:'Analyze latest security articles',communitySetup:'Install the helper (playwright-core, ~14 MB)',communityHelperMissing:'The helper folder tools/community was not found next to this tool, so this feature is unavailable. The patch tool itself is not affected.',communityNodeMissing:'Node.js 18+ was not found. Install it from nodejs.org to use this feature.',communityNeedsSetup:'Helper not installed yet: confirm below and press Install.',communityReady:'Ready.',communitySaved:'Saved in secrets.local.env or the environment: {list}. Leave the field empty to use it.',communityModels:'{n} models loaded',communityModelNone:'Load the models first.',communityModelMissing:'Your configured model {name} is not offered by this account; {pick} is selected instead. Pick another one if you prefer.',communityDraftsTitle:'Drafts',communityOutDir:'Drafts saved in the quarantine folder:',communityJobRunning:'Running...',communityJobDone:'Finished.',communityJobFailed:'Failed; see the log.',communityJobCancelled:'Cancelled.',communitySolution:'solution reported',communitySim:'simulation',communityDetects:'detects',communityIssues:'open issues',yes:'yes',no:'no',communityError:'The community helper could not do that.',
+mitigateHint:'This runtime is not classified as vulnerable (for example another vendor than the catalog covers). The temporary mitigation is still available: the option is tested with this exact java.exe first and nothing is written if that fails.',severity_high:'High',severity_medium:'Medium',severity_low:'Low',vulnTitle:'Vulnerability found: CVE-2026-114938 (Java4Shell)',vulnText:'{n} runtime(s) are before the fixed release: {list}. The JIT BASE64 intrinsics flaw lets this Java produce wrong results; the vendor fixed it in a newer release.',vulnFixLabel:'Solution:',vulnFix:'update Java to the current release of the same branch (step 3, Update Java runtime). The temporary mitigation only reduces the risk until you update.',terminalTitle:'Run it from the terminal (administrator PowerShell)',terminalCmdsText:'# Update Java to the current release (recommended)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Temporary mitigation only (adds -XX:-UseBASE64Intrinsics; restart the ELO services afterwards)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Check the result (--target is the position in the scan list, starting at 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'contains a vulnerable Java',
 restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: this version is before the vendor fix for a catalog vulnerability',backupRisk_patched:'Listed as fixed for every catalog vulnerability',backupRisk_unknown:'Security status unknown: treat as potentially vulnerable',backupStop:'Restoring stops the ELO Tomcat services that use this Java (ELO is unavailable meanwhile) and starts them again afterwards.',
  exportHeading:'Activity log',exportJson:'Export JSON results',exportLog:'Export activity log',
  idle:'Ready',scanning:'Scanning',cancelling:'Cancellation requested; waiting for the scanner',completed:'Scan completed',cancelled:'Scan cancelled; results may be incomplete',error:'Operation failed',unknown:'Unknown',
@@ -2319,7 +2591,7 @@ restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: this versi
  incompleteScan:'The scan is incomplete or exceeds evidence limits. Choose a narrower accessible local directory and review permissions without bypassing access controls.',
  inaccessiblePath:'The selected local directory is missing or inaccessible. Check the directory and permissions.',
  scanBusy:'A scan is already running. Wait for completion or request cancellation.',completedScan:'Complete a successful scan before requesting a change.',
- targetIneligible:'The selected JVM is not eligible for this change. Review the scan evidence.',optionsUnsupported:'Existing JVM/environment settings are ambiguous or unsupported. Review them with your administrator before making changes.',
+ communityUnavailable:'The ELO Community helper is not available here.',communityFailed:'The community helper failed.',communityBusy:'A community job is already running.',consentRequired:'Confirm the consent box first.',targetIneligible:'The selected JVM is not eligible for this change. Review the scan evidence.',optionsUnsupported:'Existing JVM/environment settings are ambiguous or unsupported. Review them with your administrator before making changes.',
  scanSent:'Scan requested',cancelSent:'Cancellation requested',previewReady:'Preview received',actionSent:'Confirmed action completed',connected:'Session connected',report:'Report exported',log:'Activity log exported',
  units:'items checked',previewKind:'Selected change',mitigation:'Temporary mitigation',runtimeUpdate:'Runtime update',
  searchPath:'Optional local search directory',searchHelp:'On ready fixed or removable drives C: through Z:, the scan checks X:\\java\\bin\\java.exe, X:\\ELO\\java\\bin\\java.exe and X:\\<folder>\\java\\bin\\java.exe (any first-level folder, e.g. X:\\OtherFolder\\java\\bin) at each drive root. Optionally enter an absolute local directory to search after the root checks, e.g. C:\\ELO data. It is read-only search data, never a command. Network/device paths and wildcards are not accepted.',
@@ -2359,7 +2631,8 @@ restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: this versi
  'Stoppen Sie nur den betroffenen Dienst im genehmigten Wartungsfenster, führen Sie die gewählte Änderung nach Herstellerverfahren aus und starten Sie ihn erneut. Prüfen Sie Dienstzustand und wirksame JVM-Optionen beziehungsweise Version. Bei Fehlern stoppen und gesicherte Konfiguration oder Laufzeit wiederherstellen.',
  'Scannen Sie erneut und dokumentieren Sie das Ergebnis. Bewahren Sie die Sicherung bis zur erfolgreichen Prüfung auf. Bei unklaren Pfaden, Dienstzuordnung oder Kompatibilität wenden Sie sich an den ELO-Support.'],
  manualCommandsTitle:'PowerShell-Befehle (Administrator)',manualCommands:'# In einer ADMINISTRATOR-PowerShell ausfuehren. Pfade und Dienstnamen an das Scan-Ergebnis anpassen.\n\n# 1) Runtime, Version und die Dienste finden, die sie verwenden\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nGet-Content \'C:\\ELO\\java\\release\' | Select-String \'IMPLEMENTOR|JAVA_RUNTIME_VERSION|OS_ARCH\'\nGet-CimInstance Win32_Service | Where-Object { $_.PathName -match \'ELO\' } | Select-Object Name, State, PathName\n[Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\')\n\n# 2) Runtime vor jeder Aenderung als ZIP sichern\nCompress-Archive -LiteralPath \'C:\\ELO\\java\' -DestinationPath \'C:\\ELO\\java-backup.zip\'\n\n# 3) Vorlaeufige Risikominderung (systemweit): alten Wert BEHALTEN und anhaengen, nie ueberschreiben\n$old = [Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\'); $old\n[Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', (($old + \' -XX:-UseBASE64Intrinsics\').Trim()), \'Machine\')\n# Rueckgaengig: [Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', $old, \'Machine\')   ($null, falls leer)\n# Dienste sehen die Aenderung erst nach einem Neustart.\n\n# 4) Runtime manuell aktualisieren (zuerst die neueste Version DESSELBEN Herstellers und Branches laden)\n(Get-FileHash \'C:\\Downloads\\new-java.zip\' -Algorithm SHA256).Hash        # mit der veroeffentlichten SHA256 des Herstellers vergleichen\nStop-Service \'ELO-SRV01-1\' -Force                                        # jeden Dienst, der dieses Java verwendet\nRename-Item \'C:\\ELO\\java\' \'java.old\'\nExpand-Archive -LiteralPath \'C:\\Downloads\\new-java.zip\' -DestinationPath \'C:\\ELO\\java-new\'\nMove-Item (Get-ChildItem \'C:\\ELO\\java-new\' -Directory | Select-Object -First 1).FullName \'C:\\ELO\\java\'\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nStart-Service \'ELO-SRV01-1\'\n\n# 5) Bei Fehlern: Dienste stoppen, alte Runtime zurueckstellen, Dienste starten\nStop-Service \'ELO-SRV01-1\' -Force\nRename-Item \'C:\\ELO\\java\' \'java.failed\'; Rename-Item \'C:\\ELO\\java.old\' \'java\'\nStart-Service \'ELO-SRV01-1\'\n# Oder aus dem ZIP: Expand-Archive \'C:\\ELO\\java-backup.zip\' -DestinationPath \'C:\\ELO\\restore\'; dann den java-Ordner zurueckverschieben',
- backupsTitle:'Vorhandene Backups',backupsText:'Auf diesem Server wurden Backups dieses Werkzeugs gefunden. Wählen Sie eines, um diese Java-Version zurückzuholen; die aktuell installierte Runtime bleibt daneben erhalten.',behindTitle:'Ohne dieses Werkzeug: dieselben Schritte von Hand',behindIntro:'Das sind die Befehle, die dieses Werkzeug im Hintergrund Schritt für Schritt für die gewählte Runtime ausführt. Führen Sie sie in einer ADMINISTRATOR-PowerShell aus, wenn Sie das Problem ohne das Werkzeug beheben möchten. Text in <spitzen Klammern> ersetzen.',behindUpdateTitle:'Java-Runtime aktualisieren (was das Werkzeug tut)',behindMitigateTitle:'Vorläufige Risikominderung (was das Werkzeug tut)',severity_high:'Hoch',severity_medium:'Mittel',severity_low:'Niedrig',vulnTitle:'Schwachstelle gefunden: CVE-2026-114938 (Java4Shell)',vulnText:'{n} Runtime(s) liegen vor der behobenen Version: {list}. Der Fehler in den JIT-BASE64-Intrinsics kann falsche Ergebnisse liefern; der Hersteller hat ihn in einer neueren Version behoben.',vulnFixLabel:'Loesung:',vulnFix:'Java auf die aktuelle Version desselben Branches aktualisieren (Schritt 3, Java-Runtime aktualisieren). Die vorlaeufige Risikominderung senkt das Risiko nur bis zum Update.',terminalTitle:'Im Terminal ausfuehren (Administrator-PowerShell)',terminalCmdsText:'# Java auf die aktuelle Version aktualisieren (empfohlen)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Nur vorlaeufige Risikominderung (haengt -XX:-UseBASE64Intrinsics an; danach die ELO-Dienste neu starten)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Ergebnis pruefen (--target ist die Position in der Scan-Liste, ab 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'enthaelt ein verwundbares Java',
+ backupsTitle:'Vorhandene Backups',backupsText:'Auf diesem Server wurden Backups dieses Werkzeugs gefunden. Wählen Sie eines, um diese Java-Version zurückzuholen; die aktuell installierte Runtime bleibt daneben erhalten.',behindTitle:'Ohne dieses Werkzeug: dieselben Schritte von Hand',behindIntro:'Das sind die Befehle, die dieses Werkzeug im Hintergrund Schritt für Schritt für die gewählte Runtime ausführt. Führen Sie sie in einer ADMINISTRATOR-PowerShell aus, wenn Sie das Problem ohne das Werkzeug beheben möchten. Text in <spitzen Klammern> ersetzen.',behindUpdateTitle:'Java-Runtime aktualisieren (was das Werkzeug tut)',behindMitigateTitle:'Vorläufige Risikominderung (was das Werkzeug tut)',communityTitle:'Sicherheitsartikel: ELO Community + KI (optional)',communityIntro:'Liest die neuesten Sicherheitsartikel der ELO Community, bewertet sie (hoch / mittel / niedrig) mit einer KI und entwirft Katalogeinträge mit Simulation. Es werden nur ENTWÜRFE im Quarantäne-Ordner geschrieben; auf diesem Server wird nichts installiert oder geändert.',communityNeedsTitle:'Was dafür nötig ist (nichts wird installiert, bevor Sie bestätigen)',communityNeed1:'Ihr ELO-Community-Konto (Benutzername oder E-Mail + Passwort) zur Anmeldung bei community.elo.com. Hier eingegeben, nur für diesen Lauf verwendet, nie gespeichert.',communityNeed2:'Eine KI: ein API-Schlüssel (OpenAI / Anthropic) oder ein lokales Ollama. Nur der Artikeltext wird an den Anbieter gesendet.',communityNeed3:'Zusätzliche Software: Node.js 18+, Google Chrome und das npm-Paket playwright-core (etwa 14 MB, wird erst nach Bestätigung in tools/community installiert).',communityAccount:'ELO-Community-Konto',communityUser:'Benutzername oder E-Mail',communityPassword:'Passwort',communityAi:'KI-Anbieter',aiProvider:'Anbieter',aiKey:'API-Schlüssel',aiBase:'Basis-URL (optional)',aiModel:'Modell',aiLoad:'Verfügbare Modelle laden',communityScope:'Welche Artikel',cSince:'Neuer als (Tage)',cMax:'Höchstens (Artikel)',communityConsent:'Ich bestätige, dass zusätzliche Software installiert werden darf und meine ELO-Community-Zugangsdaten sowie der KI-Schlüssel für diesen Lauf verwendet werden.',communityRun:'Neueste Sicherheitsartikel analysieren',communitySetup:'Helfer installieren (playwright-core, ~14 MB)',communityHelperMissing:'Der Ordner tools/community wurde neben diesem Werkzeug nicht gefunden; die Funktion ist nicht verfügbar. Das Patch-Werkzeug selbst ist nicht betroffen.',communityNodeMissing:'Node.js 18+ wurde nicht gefunden. Für diese Funktion von nodejs.org installieren.',communityNeedsSetup:'Helfer noch nicht installiert: unten bestätigen und Installieren drücken.',communityReady:'Bereit.',communitySaved:'In secrets.local.env oder der Umgebung gespeichert: {list}. Feld leer lassen, um es zu verwenden.',communityModels:'{n} Modelle geladen',communityModelNone:'Zuerst die Modelle laden.',communityModelMissing:'Das konfigurierte Modell {name} wird von diesem Konto nicht angeboten; stattdessen ist {pick} gewählt. Wählen Sie bei Bedarf ein anderes.',communityDraftsTitle:'Entwürfe',communityOutDir:'Entwürfe im Quarantäne-Ordner gespeichert:',communityJobRunning:'Läuft...',communityJobDone:'Fertig.',communityJobFailed:'Fehlgeschlagen; siehe Protokoll.',communityJobCancelled:'Abgebrochen.',communitySolution:'Lösung berichtet',communitySim:'Simulation',communityDetects:'erkennt',communityIssues:'offene Punkte',yes:'ja',no:'nein',communityError:'Der Community-Helfer konnte das nicht ausführen.',
+mitigateHint:'Diese Runtime ist nicht als verwundbar eingestuft (z. B. anderer Hersteller als im Katalog). Die vorübergehende Risikominderung bleibt verfügbar: die Option wird zuerst mit genau dieser java.exe geprüft; schlägt das fehl, wird nichts geschrieben.',severity_high:'Hoch',severity_medium:'Mittel',severity_low:'Niedrig',vulnTitle:'Schwachstelle gefunden: CVE-2026-114938 (Java4Shell)',vulnText:'{n} Runtime(s) liegen vor der behobenen Version: {list}. Der Fehler in den JIT-BASE64-Intrinsics kann falsche Ergebnisse liefern; der Hersteller hat ihn in einer neueren Version behoben.',vulnFixLabel:'Loesung:',vulnFix:'Java auf die aktuelle Version desselben Branches aktualisieren (Schritt 3, Java-Runtime aktualisieren). Die vorlaeufige Risikominderung senkt das Risiko nur bis zum Update.',terminalTitle:'Im Terminal ausfuehren (Administrator-PowerShell)',terminalCmdsText:'# Java auf die aktuelle Version aktualisieren (empfohlen)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Nur vorlaeufige Risikominderung (haengt -XX:-UseBASE64Intrinsics an; danach die ELO-Dienste neu starten)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Ergebnis pruefen (--target ist die Position in der Scan-Liste, ab 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'enthaelt ein verwundbares Java',
 restoreShort:'Dieses Backup wiederherstellen',backupRisk_vulnerable:'Verwundbar: diese Version liegt vor dem Herstellerfix einer Katalog-Schwachstelle',backupRisk_patched:'Für alle Katalog-Schwachstellen als behoben aufgeführt',backupRisk_unknown:'Sicherheitsstatus unbekannt: als potenziell verwundbar behandeln',backupStop:'Die Wiederherstellung beendet die ELO-Tomcat-Dienste, die dieses Java verwenden (ELO ist solange nicht verfügbar), und startet sie danach wieder.',
  exportHeading:'Aktivitätsprotokoll',exportJson:'JSON-Ergebnisse exportieren',exportLog:'Aktivitätsprotokoll exportieren',
  idle:'Bereit',scanning:'Scan läuft',cancelling:'Abbruch angefordert; Scanner wird abgewartet',completed:'Scan abgeschlossen',cancelled:'Scan abgebrochen; Ergebnisse möglicherweise unvollständig',error:'Vorgang fehlgeschlagen',unknown:'Unbekannt',
@@ -2379,7 +2652,7 @@ restoreShort:'Dieses Backup wiederherstellen',backupRisk_vulnerable:'Verwundbar:
  incompleteScan:'Der Scan ist unvollständig oder überschreitet Nachweisgrenzen. Engeres zugängliches lokales Verzeichnis wählen und Berechtigungen prüfen, ohne den Zugriffsschutz zu umgehen.',
  inaccessiblePath:'Das gewählte lokale Verzeichnis fehlt oder ist unzugänglich. Verzeichnis und Berechtigungen prüfen.',
  scanBusy:'Ein Scan läuft bereits. Abschluss abwarten oder Abbruch anfordern.',completedScan:'Vor einer Änderung einen erfolgreichen Scan abschließen.',
- targetIneligible:'Die gewählte JVM ist für diese Änderung nicht geeignet. Scan-Nachweise prüfen.',optionsUnsupported:'Vorhandene JVM-/Umgebungseinstellungen sind mehrdeutig oder nicht unterstützt. Vor Änderungen mit Ihrem Administrator prüfen.',
+ communityUnavailable:'Der ELO-Community-Helfer ist hier nicht verfügbar.',communityFailed:'Der Community-Helfer ist fehlgeschlagen.',communityBusy:'Ein Community-Auftrag läuft bereits.',consentRequired:'Zuerst das Bestätigungsfeld ankreuzen.',targetIneligible:'Die gewählte JVM ist für diese Änderung nicht geeignet. Scan-Nachweise prüfen.',optionsUnsupported:'Vorhandene JVM-/Umgebungseinstellungen sind mehrdeutig oder nicht unterstützt. Vor Änderungen mit Ihrem Administrator prüfen.',
  scanSent:'Scan angefordert',cancelSent:'Abbruch angefordert',previewReady:'Vorschau empfangen',actionSent:'Bestätigte Änderung abgeschlossen',connected:'Sitzung verbunden',report:'Bericht exportiert',log:'Aktivitätsprotokoll exportiert',
  units:'Elemente geprüft',previewKind:'Gewählte Änderung',mitigation:'Vorübergehende Risikominderung',runtimeUpdate:'Laufzeit-Update',
  searchPath:'Optionales lokales Suchverzeichnis',searchHelp:'Auf bereiten festen oder Wechsellaufwerken C: bis Z: prüft der Scan X:\\java\\bin\\java.exe, X:\\ELO\\java\\bin\\java.exe und X:\\<Ordner>\\java\\bin\\java.exe (jeder Ordner der ersten Ebene, z. B. X:\\AndererOrdner\\java\\bin) im Laufwerksstamm. Optional ein absolutes lokales Verzeichnis eingeben, das nach den Stammprüfungen durchsucht wird, z. B. C:\\ELO data. Die Eingabe ist nur ein schreibgeschützter Suchpfad, niemals ein Befehl. Netzwerk- und Gerätepfade sowie Platzhalter sind nicht zulässig.',
@@ -2456,6 +2729,7 @@ const errorMessages = Object.fromEntries(Object.entries({
  incompleteScan:['scan_incomplete','narrow_scan_root','evidence_out_of_bounds'],inaccessiblePath:['inaccessible_path'],
  invalidPath:['invalid_path','nonlocal_path','reparse_path'],scanBusy:['scan_busy'],completedScan:['completed_scan_required'],
  targetIneligible:['target_not_eligible','invalid_java_target'],
+ communityUnavailable:['community_unavailable'],communityFailed:['community_failed'],communityBusy:['community_busy'],consentRequired:['consent_required'],
  optionsUnsupported:['unsupported_environment_type','unsupported_options','ambiguous_option_quoting','malformed_option_quoting','ambiguous_intrinsics_option','ambiguous_jvm_options','ambiguous_environment_expansion'],
  failed:['operation_failed','scan_failed','unknown_route','method_rejected','unexpected_body','json_required','invalid_id','invalid_action','invalid_json','invalid_parameters','missing_parameter','request_timeout','incomplete_request','invalid_header','headers_too_large','invalid_request_line','duplicate_header','unsupported_framing','invalid_length','length_required','body_too_large','incomplete_body','invalid_utf8']
 }).flatMap(([key,codes]) => codes.map(code => [code,key])));
@@ -2688,6 +2962,105 @@ function renderBackups() {
  $('backups').append(card);
  });
 }
+// ---- optional ELO Community + AI panel. Credentials and keys are typed here, sent once to the local backend for one
+// run (environment of the helper process) and never kept: the inputs are cleared after sending.
+let cStatus = null, cJob = {state:'idle',kind:'',log:[],drafts:[],outDir:''}, cModels = [], cBusy = false, cPolling = false, cError = '';
+const validDraft = item => keys(item,['id','severity','title','solutionReported','simulation','issues','detects']) && /^[A-Za-z0-9._-]{3,64}$/.test(item.id) && severities.includes(item.severity) && typeof item.title === 'string' && item.title.length <= 300 && typeof item.solutionReported === 'boolean' && typeof item.simulation === 'boolean' && typeof item.detects === 'boolean' && Number.isSafeInteger(item.issues) && item.issues >= 0;
+const validCStatus = value => keys(value,['helper','node','playwright','chrome','secrets','ai']) && ['helper','node','playwright','chrome'].every(k => typeof value[k] === 'boolean') && keys(value.secrets,['communityUser','communityPassword','openaiKey','anthropicKey']) && Object.values(value.secrets).every(v => typeof v === 'boolean') &&
+ (value.ai === null || (keys(value.ai,['provider','model','baseUrl']) && ['openai','anthropic','ollama'].includes(value.ai.provider) && text(value.ai.model,100) && typeof value.ai.baseUrl === 'string' && value.ai.baseUrl.length <= 200));
+const validCJob = value => keys(value,['state','kind','log','drafts','outDir']) && ['idle','running','completed','failed','cancelled'].includes(value.state) && typeof value.kind === 'string' && value.kind.length <= 16 && Array.isArray(value.log) && value.log.length <= 60 && value.log.every(line => typeof line === 'string' && line.length <= 400) && Array.isArray(value.drafts) && value.drafts.length <= 50 && value.drafts.every(validDraft) && typeof value.outDir === 'string' && value.outDir.length <= 1024;
+const validModels = value => keys(value,['models','current']) && Array.isArray(value.models) && value.models.length <= 300 && value.models.every(item => /^[A-Za-z0-9._:\/-]{1,100}$/.test(item)) && typeof value.current === 'string' && value.current.length <= 100;
+const communityRunning = () => cJob.state === 'running';
+function communityMessage(error) {
+ if (error instanceof ApiFailure) return [t(error.key),...error.warnings.map(localized)].join('\n');
+ return t(typeof error === 'string' && Object.hasOwn(messages.en,error) ? error : 'communityError');
+}
+async function communityCall(work) {
+ if (cBusy) return; cBusy = true; cError = ''; renderCommunity();
+ try { await work(); } catch (error) { cError = communityMessage(error); } finally { cBusy = false; renderCommunity(); }
+}
+async function refreshCommunityStatus() {
+ await communityCall(async () => {
+ const data = await api('community/status'); if (!validCStatus(data)) throw 'invalid';
+ cStatus = data;
+ if (data.ai && !$('aiModel').children.length) {
+ $('aiProvider').value = data.ai.provider; $('aiBase').value = data.ai.baseUrl;
+ const option = document.createElement('option'); option.value = data.ai.model; option.textContent = data.ai.model; $('aiModel').append(option); $('aiModel').value = data.ai.model; cModels = [data.ai.model];
+ }
+ const job = await api('community/job'); if (!validCJob(job)) throw 'invalid'; cJob = job;
+ });
+}
+async function loadCommunityModels() {
+ await communityCall(async () => {
+ const body = {provider:$('aiProvider').value}; if ($('aiKey').value) body.apiKey = $('aiKey').value; if ($('aiBase').value) body.baseUrl = $('aiBase').value;
+ const wanted = $('aiModel').value || (cStatus && cStatus.ai ? cStatus.ai.model : '');
+ const data = await api('community/models',body); if (!validModels(data)) throw 'invalid';
+ cModels = data.models; $('aiModel').replaceChildren();
+ data.models.forEach(name => { const option = document.createElement('option'); option.value = name; option.textContent = name; $('aiModel').append(option); });
+ const pick = data.models.includes(wanted) ? wanted : (data.models.includes(data.current) ? data.current : data.models[0] || '');
+ $('aiModel').value = pick; $('aiModelNote').textContent = t('communityModels').replace('{n}',String(data.models.length))+(wanted && pick !== wanted ? ' - '+t('communityModelMissing').replace('{name}',() => safeText(wanted)).replace('{pick}',() => safeText(pick)) : '');
+ });
+}
+async function installCommunityHelper() {
+ if (!$('cConsent').checked) { cError = t('consentRequired'); renderCommunity(); return; }
+ await communityCall(async () => { await acknowledge('community/setup',{consent:'yes'}); cJob = {state:'running',kind:'setup',log:[],drafts:[],outDir:''}; startCommunityPolling(); });
+}
+async function runCommunity() {
+ if (!$('cConsent').checked) { cError = t('consentRequired'); renderCommunity(); return; }
+ if (!$('aiModel').value) { cError = t('communityModelNone'); renderCommunity(); return; }
+ const max = Number($('cMax').value);
+ if (!Number.isInteger(max) || max < 1 || max > 50) { cError = t('communityError'); renderCommunity(); return; }
+ const body = {consent:'yes',since:$('cSince').value,max:String(max),provider:$('aiProvider').value,model:$('aiModel').value};
+ if ($('cUser').value) body.user = $('cUser').value; if ($('cPass').value) body.password = $('cPass').value;
+ if ($('aiKey').value) body.apiKey = $('aiKey').value; if ($('aiBase').value) body.baseUrl = $('aiBase').value;
+ await communityCall(async () => { await acknowledge('community/run',body); $('cPass').value = ''; $('aiKey').value = ''; cJob = {state:'running',kind:'run',log:[],drafts:[],outDir:''}; startCommunityPolling(); });
+}
+function startCommunityPolling() {
+ if (cPolling) return; cPolling = true;
+ const tick = async () => {
+ try { const job = await api('community/job'); if (validCJob(job)) cJob = job; } catch (_) { /* keep the last state */ }
+ renderCommunity();
+ if (communityRunning()) setTimeout(tick,2000); else { cPolling = false; if (cJob.kind === 'setup') void refreshCommunityStatus(); }
+ };
+ setTimeout(tick,1000);
+}
+function renderCommunity() {
+ const status = cStatus;
+ const ready = !!(status && status.helper && status.node && status.playwright);
+ $('communityStatus').textContent = !status ? '' : !status.helper ? t('communityHelperMissing') : !status.node ? t('communityNodeMissing') : !status.playwright ? t('communityNeedsSetup') : t('communityReady')+(status.chrome ? '' : ' (Chrome?)');
+ const saved = status ? [status.secrets.communityUser && 'ELO_COMMUNITY_USER',status.secrets.communityPassword && 'ELO_COMMUNITY_PASSWORD',status.secrets.openaiKey && 'OPENAI_API_KEY',status.secrets.anthropicKey && 'ANTHROPIC_API_KEY'].filter(Boolean) : [];
+ if (saved.length) $('communityStatus').textContent += ' '+t('communitySaved').replace('{list}',saved.join(', '));
+ $('communityError').textContent = cError;
+ toggle('communitySetup',!(status && status.helper && status.node && !status.playwright));
+ $('communitySetup').disabled = cBusy || communityRunning();
+ $('aiLoad').disabled = cBusy || communityRunning() || !(status && status.helper && status.node);
+ $('communityRun').disabled = cBusy || communityRunning() || !ready || !$('cConsent').checked || !$('aiModel').value;
+ toggle('communityCancel',!communityRunning());
+ const jobText = {running:'communityJobRunning',completed:'communityJobDone',failed:'communityJobFailed',cancelled:'communityJobCancelled'}[cJob.state];
+ $('communityLog').textContent = cJob.log.length ? (jobText ? t(jobText)+'\n' : '')+cJob.log.map(safeText).join('\n') : (jobText ? t(jobText) : '');
+ $('communityDrafts').replaceChildren();
+ cJob.drafts.forEach(item => {
+ const card = document.createElement('div'), head = document.createElement('span'), sev = document.createElement('span'), name = document.createElement('span'), meta = document.createElement('span');
+ card.className = 'rt'; head.className = 't'; sev.className = 'sev'; sev.dataset.sev = item.severity; sev.textContent = t('severity_'+item.severity); name.textContent = safeText(item.id)+' - '+safeText(item.title);
+ head.append(sev); head.append(name);
+ meta.className = 'p'; meta.textContent = [t('communitySolution')+': '+t(item.solutionReported ? 'yes' : 'no'),t('communitySim')+': '+t(item.simulation ? 'yes' : 'no'),t('communityDetects')+': '+t(item.detects ? 'yes' : 'no'),t('communityIssues')+': '+item.issues].join(' · ');
+ card.append(head); card.append(meta); $('communityDrafts').append(card);
+ });
+ const done = cJob.state === 'completed' && cJob.kind === 'run' && cJob.outDir;
+ toggle('communityNext',!done);
+ if (done) {
+ const file = safeText(cJob.outDir)+'\\draft-vulndb.json';
+ highlightInto($('communityNext'),['# '+t('communityOutDir'),'# '+safeText(cJob.outDir),`ELO-Patch-Tools.bat --cli --catalog-validate "${file}"`,`ELO-Patch-Tools.bat --cli --catalog-simulate "${file}"`,'# '+(language === 'de' ? 'Nach der Prüfung "status": "active" setzen und installieren:' : 'After your review set "status": "active" and install:'),`ELO-Patch-Tools.bat --cli --catalog-install "${file}" --confirm-admin`].join('\n'));
+ }
+}
+$('communityBox').ontoggle = () => { if ($('communityBox').open) void refreshCommunityStatus(); };
+$('communitySetup').onclick = () => installCommunityHelper();
+$('aiLoad').onclick = () => loadCommunityModels();
+$('communityRun').onclick = () => runCommunity();
+$('communityCancel').onclick = () => communityCall(async () => { await acknowledge('community/cancel',{}); const job = await api('community/job'); if (validCJob(job)) cJob = job; });
+$('cConsent').onchange = renderCommunity;
+$('aiModel').onchange = renderCommunity;
+$('aiProvider').onchange = () => { $('aiModel').replaceChildren(); cModels = []; $('aiModelNote').textContent = ''; $('aiBase').value = ''; renderCommunity(); };
 function render() {
  document.documentElement.lang = language;
  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
@@ -2713,7 +3086,7 @@ function render() {
  rows.forEach(item => { const tr = document.createElement('tr'); cells(item).forEach(value => { const td = document.createElement('td'); td.textContent = value; tr.append(td); }); $('jvmRows').append(tr); });
  const labels = ['path','runtimeRoot','version','vendor','architecture','classification','eloRationale','classificationEvidence'];
  $('details').textContent = row ? cells(row).map((value,index) => t(labels[index])+': '+value).join('\n') : '';
- renderCards(); renderBackups(); renderAdvice(row); renderBehind(row);
+ renderCards(); renderBackups(); renderAdvice(row); renderBehind(row); renderCommunity();
  $('verifiedOn').textContent = security.verifiedOn ? t('verifiedDate')+': '+security.verifiedOn : t('noAdvisories');
  $('advisories').replaceChildren();
  security.advisories.forEach(item => {
@@ -2725,7 +3098,10 @@ function render() {
  $('scan').disabled = pending || running() || !token || recoveryRequired;
  $('cancel').disabled = pending || state !== 'scanning' || !token || recoveryRequired;
  $('results').disabled = pending || running();
- $('mitigate').disabled = $('update').disabled = pending || running() || !row || !token || recoveryRequired || (!!lastError && errorFromPoll);
+ $('update').disabled = pending || running() || !row || !token || recoveryRequired || (!!lastError && errorFromPoll);
+ // The temporary mitigation is always available for a scanned runtime; for a runtime the catalog does not call vulnerable the page says what that means.
+ $('mitigate').disabled = $('update').disabled;
+ toggle('mitigateHint',!(row && row.status !== 'vulnerable'));
  $('preview').textContent = preview ? localized(preview.summary)+(preview.warnings.length ? '\n\n'+preview.warnings.map(w => '• '+localized(w)).join('\n') : '') : t('noPreview');
  $('previewKind').textContent = preview ? t(previewKinds[preview.actionId]) : '';
  $('confirmation').textContent = t(preview && preview.actionId === 'update-runtime' ? 'confirmUpdate' : preview && preview.actionId === 'restore-backup' ? 'confirmRestore' : 'confirmMitigation');

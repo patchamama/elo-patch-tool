@@ -54,7 +54,11 @@ async function setup(options = {}, deps = {}) {
   const ok = await (deps.confirm || confirm)('Install the npm package above?', { yes: Boolean(options.yes) });
   if (!ok) { out('Cancelled. Nothing was installed. (Use --yes to confirm without a prompt.)\n'); return 1; }
   const spawn = deps.spawn || cp.spawnSync;
-  const r = spawn(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--prefix', ROOT, '--no-audit', '--no-fund', '--ignore-scripts'], { stdio: 'inherit', shell: process.platform === 'win32' });
+  // Run npm through the current Node (no shell, so no argument injection and no deprecation warning).
+  const npmCli = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  const npmArgs = ['install', '--prefix', ROOT, '--no-audit', '--no-fund', '--ignore-scripts'];
+  const useNode = (deps.exists || fs.existsSync)(npmCli);
+  const r = useNode ? spawn(process.execPath, [npmCli, ...npmArgs], { stdio: 'inherit' }) : spawn(process.platform === 'win32' ? 'npm.cmd' : 'npm', npmArgs, { stdio: 'inherit', shell: process.platform === 'win32' });
   if (r.status !== 0) { out('npm install failed; nothing else was changed.\n'); return r.status || 1; }
   out('Installed playwright-core. You can now run: node tools/community/bin/elo-community.js run --since 30d\n');
   return 0;

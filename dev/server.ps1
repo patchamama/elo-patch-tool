@@ -36,10 +36,39 @@ function New-EloServerSession {
     @{
         Port=$Port; Origin="http://127.0.0.1:$Port"; Token=(New-EloSecret); UiHtml=$UiHtml; ScanSource=$ScanSource
         State='idle'; Results=@(); Targets=@{}; Preview=$null; Worker=$null; Backup=$null; RecoveryRequired=$false; LastError=$null
-        ReportJvms=@(); ReportActions=@(); ReportIndexes=@{}; UpdateContext=$null; ReportRecovery=$null; LastUpdate=$null; Backups=@{}; BackupsCache=$null; BackupsLogged=-1; LastRejected=''
+        ReportJvms=@(); ReportActions=@(); ReportIndexes=@{}; UpdateContext=$null; ReportRecovery=$null; LastUpdate=$null; Backups=@{}; BackupsCache=$null; BackupsLogged=-1; LastRejected=''; CommunityJob=$null
         Adapters=@{
             NewUpdateContext={ param($Root,$Runtime,$StopServices) New-EloUpdateContext -Adapters (New-EloWindowsUpdateAdapters -ApprovedRoot $Root -Runtime $Runtime -AllowServiceStop:([bool]$StopServices)) -Production }
             BackupRoots={ @([IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -in @([IO.DriveType]::Fixed,[IO.DriveType]::Removable) -and $_.Name -cmatch '^[C-Z]:\\$' } | ForEach-Object { $_.RootDirectory.FullName }) }
+            CommunityRoot={
+                $candidates=@()
+                if ($env:ELO_PATCH_SOURCE) { $candidates+=(Join-Path (Split-Path -Parent $env:ELO_PATCH_SOURCE) 'tools\community') }
+                $candidates+=(Join-Path (Split-Path -Parent $PSScriptRoot) 'tools\community')
+                foreach ($c in $candidates) { if (Test-Path -LiteralPath (Join-Path $c 'bin\elo-community.js') -PathType Leaf) { return $c } }
+                return $null
+            }
+            FindNode={ $n=Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($n) { return [string]$n.Source } else { return $null } }
+            FindChrome={ foreach ($b in @($env:ProgramFiles,${env:ProgramFiles(x86)},$env:LOCALAPPDATA)) { if ($b) { $p=Join-Path $b 'Google\Chrome\Application\chrome.exe'; if (Test-Path -LiteralPath $p) { return $p } } }; return $null }
+            RunProcess={ param($FilePath,$Arguments,$Environment,$WorkingDirectory,$TimeoutSec)
+                $psi=New-Object Diagnostics.ProcessStartInfo; $psi.FileName=$FilePath; $psi.Arguments=$Arguments; $psi.UseShellExecute=$false; $psi.CreateNoWindow=$true
+                $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true; $psi.WorkingDirectory=$WorkingDirectory
+                foreach ($k in $Environment.Keys) { $psi.EnvironmentVariables[[string]$k]=[string]$Environment[$k] }
+                $p=New-Object Diagnostics.Process; $p.StartInfo=$psi
+                try {
+                    if (-not $p.Start()) { throw 'process_start_failed' }
+                    $out=$p.StandardOutput.ReadToEndAsync(); $err=$p.StandardError.ReadToEndAsync()
+                    if (-not $p.WaitForExit([int]$TimeoutSec*1000)) { try { $p.Kill() } catch { }; throw 'process_timeout' }
+                    $null=[Threading.Tasks.Task]::WaitAll(@($out,$err),5000)
+                    return @{ExitCode=$p.ExitCode;Output=[string]$out.Result;Error=[string]$err.Result}
+                } finally { $p.Dispose() }
+            }
+            StartProcess={ param($FilePath,$Arguments,$Environment,$WorkingDirectory)
+                $psi=New-Object Diagnostics.ProcessStartInfo; $psi.FileName=$FilePath; $psi.Arguments=$Arguments; $psi.UseShellExecute=$false; $psi.CreateNoWindow=$true; $psi.WorkingDirectory=$WorkingDirectory
+                foreach ($k in $Environment.Keys) { $psi.EnvironmentVariables[[string]$k]=[string]$Environment[$k] }
+                $p=New-Object Diagnostics.Process; $p.StartInfo=$psi
+                if (-not $p.Start()) { throw 'process_start_failed' }
+                return $p
+            }
             ScanRules={ if (Get-Command Get-EloScanRules -CommandType Function -ErrorAction SilentlyContinue) { ,@(Get-EloScanRules) } else { ,@() } }
             Log={ param($Message) Write-Host ((Get-Date).ToString('HH:mm:ss')+'  '+$Message) }
             Identity={ param($Path) Get-EloRuntimeIdentity $Path }
@@ -379,7 +408,9 @@ function New-EloMitigationPreview {
     $Session.Preview=$null
     if (-not (& $Session.Adapters.Admin)) { Stop-EloRequest 403 'administrator_required' }
     $target=$Session.Targets[$ResultId]
-    if (-not $target -or $target.Status -cne 'PotentiallyVulnerable') { Stop-EloRequest 409 'target_not_eligible' }
+    # The temporary mitigation is always allowed for a scanned runtime (also one the catalog does not classify as
+    # vulnerable, e.g. Azul Zulu): the exact java.exe is probed with the flag BEFORE anything is written.
+    if (-not $target) { Stop-EloRequest 409 'target_not_eligible' }
     $before=& $Session.Adapters.ReadOptions
     # Preserve raw REG_EXPAND_SZ bytes, but do not pretend a process-local probe
     # proves Windows' future service expansion against an unknown environment.
@@ -397,7 +428,9 @@ function New-EloMitigationPreview {
     $summaryEn=Format-EloVulnText ([string]$spec.Action.summary.en) $values
     $summaryDe=Format-EloVulnText ([string]$spec.Action.summary.de) $values
     $Session.Preview=$preview
-    return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe};warnings=@(
+    $notice=@()
+    if ($target.Status -cne 'PotentiallyVulnerable') { $notice=@(@{en='This runtime is not classified as vulnerable by the catalog (for example another vendor). The temporary mitigation is allowed anyway: the option is probed with this exact java.exe first and nothing is written if that fails. It still applies machine-wide.';de='Diese Runtime wird vom Katalog nicht als verwundbar eingestuft (z. B. anderer Hersteller). Die vorlaeufige Risikominderung ist trotzdem erlaubt: die Option wird zuerst mit genau dieser java.exe geprueft; schlaegt das fehl, wird nichts geschrieben. Sie gilt weiterhin systemweit.'}) }
+    return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe};warnings=@($notice)+@(
         @{en='Existing JVMs are NOT protected. No restart is performed. Windows services may retain an old environment even after restart; a verified PrintFlagsFinal probe is not proof of service protection. Coordinate supported ELO configuration with your administrator.';de='Bestehende JVMs sind NICHT geschuetzt. Kein Neustart. Windows-Dienste koennen alte Umgebungswerte behalten. Der PrintFlagsFinal-Test beweist keinen Schutz des Dienstes. Unterstuetzte ELO-Konfiguration mit Administrator klaeren.'},
         @{en='Global options can break unrelated JVMs. Advisory source verification does not establish ELO or JVM-option compatibility. Session-only backup is lost on exit: save the previous value from this preview before confirmation. No runtime update is available.';de='Globale Optionen koennen andere JVMs stoeren. Quellenpruefung beweist keine ELO- oder JVM-Optionskompatibilitaet. Sitzungssicherung geht beim Beenden verloren: alten Wert vor Bestaetigung sichern. Laufzeit-Update nicht verfuegbar.'})}
 }
@@ -408,7 +441,7 @@ function Invoke-EloMitigation {
         (& $Session.Adapters.Clock) -ge $preview.Expires) { Stop-EloRequest 409 'preview_expired_or_mismatched' }
     if (-not (& $Session.Adapters.Admin)) { Stop-EloRequest 403 'administrator_required' }
     $target=$Session.Targets[$Body.resultId]
-    if (-not $target -or $target.Location -cne $preview.JavaPath -or $target.Status -cne 'PotentiallyVulnerable' -or
+    if (-not $target -or $target.Location -cne $preview.JavaPath -or
         (& $Session.Adapters.Fingerprint $preview.JavaPath) -cne $preview.Fingerprint -or
         -not (Test-EloSameOptions (& $Session.Adapters.ReadOptions) $preview.Before)) { Stop-EloRequest 409 'stale_preview' }
     if (-not (& $Session.Adapters.Verify $preview.JavaPath $preview.After.Value)) { Stop-EloRequest 422 'probe_failed_no_change' }
@@ -786,14 +819,206 @@ function Invoke-EloRestoreAction {
     $recovery=''; if ($Session.RecoveryRequired) { $recovery='Manual recovery required / Manuelle Wiederherstellung erforderlich.' }
     return $html.Replace('<head>','<head><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; base-uri &#39;none&#39;; form-action &#39;none&#39;">').Replace('<body>','<body><p>'+ $notice+$state+'. '+$scope+' '+$recovery+'</p>')
 }
+# ---- ELO Community helper (optional Node tool in tools\community): status, model list, setup and analysis jobs.
+# Credentials and API keys arrive in a request body, are handed to the child process through its environment for
+# that one run, and are never stored, logged or returned.
+$script:EloCommunitySecretKeys=@('ELO_COMMUNITY_USER','ELO_COMMUNITY_PASSWORD','OPENAI_API_KEY','ANTHROPIC_API_KEY')
+function Get-EloCommunitySecretsPresent {
+    param([string]$Root)
+    $present=@{}
+    foreach ($k in $script:EloCommunitySecretKeys) { $present[$k]=[bool][Environment]::GetEnvironmentVariable($k) }
+    $file=Join-Path $Root 'secrets.local.env'
+    if (Test-Path -LiteralPath $file -PathType Leaf) {
+        foreach ($line in @([IO.File]::ReadAllLines($file))) { if ($line -cmatch '^\s*([A-Z][A-Z0-9_]*)\s*=\s*\S') { if ($script:EloCommunitySecretKeys -ccontains $Matches[1]) { $present[$Matches[1]]=$true } } }
+    }
+    return $present
+}
+function Get-EloCommunityStatus {
+    param($Session)
+    $root=& $Session.Adapters.CommunityRoot
+    $status=@{helper=[bool]$root;node=$false;playwright=$false;chrome=$false
+        secrets=@{communityUser=$false;communityPassword=$false;openaiKey=$false;anthropicKey=$false};ai=$null}
+    if (-not $root) { return $status }
+    $status.node=[bool](& $Session.Adapters.FindNode)
+    $status.chrome=[bool](& $Session.Adapters.FindChrome)
+    $status.playwright=(Test-Path -LiteralPath (Join-Path $root 'node_modules\playwright-core\package.json') -PathType Leaf)
+    $p=Get-EloCommunitySecretsPresent $root
+    $status.secrets=@{communityUser=[bool]$p.ELO_COMMUNITY_USER;communityPassword=[bool]$p.ELO_COMMUNITY_PASSWORD;openaiKey=[bool]$p.OPENAI_API_KEY;anthropicKey=[bool]$p.ANTHROPIC_API_KEY}
+    $aiFile=Join-Path $root 'config\ai.json'
+    if (Test-Path -LiteralPath $aiFile -PathType Leaf) {
+        try {
+            $ai=[IO.File]::ReadAllText($aiFile) | ConvertFrom-Json
+            $prov=[string]$ai.provider; $model=[string]$ai.model; $base=[string]$ai.baseUrl
+            if (@('openai','anthropic','ollama') -ccontains $prov -and $model -cmatch '^[A-Za-z0-9._:\-/]{1,100}$') { $status.ai=@{provider=$prov;model=$model;baseUrl=$(if ($base -cmatch '^https?://[^\s"<>]{1,200}$') { $base } else { '' })} }
+        } catch { }
+    }
+    return $status
+}
+function Assert-EloCommunityText {
+    param($Value,[string]$Pattern,[int]$Max,[string]$Code)
+    if ($null -eq $Value) { return '' }
+    $s=[string]$Value
+    if ($s.Length -gt $Max -or $s -match '[\x00-\x1f\x7f]' -or ($Pattern -and $s -cnotmatch $Pattern)) { Stop-EloRequest 400 $Code }
+    return $s
+}
+function Get-EloCommunityEnvironment {
+    # Only values the person typed for THIS run; anything empty is left to the helper's own secrets file.
+    param($Body)
+    $env2=@{}
+    $map=@{user='ELO_COMMUNITY_USER';password='ELO_COMMUNITY_PASSWORD'}
+    foreach ($k in $map.Keys) { $v=Assert-EloCommunityText $Body.$k $null 300 'invalid_parameters'; if ($v) { $env2[$map[$k]]=$v } }
+    $key=Assert-EloCommunityText $Body.apiKey $null 400 'invalid_parameters'
+    if ($key) { $prov=[string]$Body.provider; if ($prov -ceq 'openai') { $env2['OPENAI_API_KEY']=$key } elseif ($prov -ceq 'anthropic') { $env2['ANTHROPIC_API_KEY']=$key } }
+    return $env2
+}
+function Get-EloCommunityAiArguments {
+    param($Body,[bool]$RequireModel)
+    $prov=[string]$Body.provider
+    if (@('openai','anthropic','ollama') -cnotcontains $prov) { Stop-EloRequest 400 'invalid_parameters' }
+    $arguments=@('--provider',$prov)
+    $model=Assert-EloCommunityText $Body.model '^[A-Za-z0-9._:\-/]{1,100}$' 100 'invalid_parameters'
+    if ($RequireModel -and -not $model) { Stop-EloRequest 400 'missing_parameter' }
+    if ($model) { $arguments+=@('--model',$model) }
+    $base=Assert-EloCommunityText $Body.baseUrl $null 200 'invalid_parameters'
+    if ($base) {
+        if ($base -cnotmatch '^(https://[A-Za-z0-9.\-]+|http://(127\.0\.0\.1|localhost))(:[0-9]{1,5})?(/[A-Za-z0-9._~\-/]*)?$') { Stop-EloRequest 400 'invalid_parameters' }
+        $arguments+=@('--base-url',$base)
+    }
+    return ,$arguments
+}
+function Get-EloCommunityTool {
+    param($Session)
+    $root=& $Session.Adapters.CommunityRoot
+    if (-not $root) { Stop-EloRequestDetail 409 'community_unavailable' 'helper_not_found' }
+    $node=& $Session.Adapters.FindNode
+    if (-not $node) { Stop-EloRequestDetail 409 'community_unavailable' 'node_not_found' }
+    return @{Root=$root;Node=$node;Cli=(Join-Path $root 'bin\elo-community.js')}
+}
+function Remove-EloCommunitySecrets {
+    param([string]$Text,$Environment)
+    $clean=[string]$Text
+    foreach ($v in @($Environment.Values)) { if ($v -and ([string]$v).Length -ge 4) { $clean=$clean.Replace([string]$v,'[redacted]') } }
+    return $clean
+}
+function Get-EloCommunityModels {
+    param($Session,$Body)
+    $tool=Get-EloCommunityTool $Session
+    $arguments=@(('"'+$tool.Cli+'"'),'models')+(Get-EloCommunityAiArguments $Body $false)
+    $environment=Get-EloCommunityEnvironment $Body
+    Write-EloLog $Session "Community: listing models of '$($Body.provider)'."
+    try { $r=& $Session.Adapters.RunProcess $tool.Node ($arguments -join ' ') $environment $tool.Root 40 }
+    catch { Stop-EloRequestDetail 502 'community_failed' (ConvertTo-EloUpdateCode ([string]$_.Exception.Message)) }
+    if ($r.ExitCode -ne 0) {
+        $msg=Remove-EloCommunitySecrets (([string]$r.Error+[string]$r.Output) -replace '(?s)^.*?elo-community: ','') $environment
+        $code='models_failed'; if ($msg -match 'ai_key_missing') { $code='ai_key_missing' } elseif ($msg -match 'ai_http_(\d{3})') { $code='ai_http_'+$Matches[1] } elseif ($msg -match 'ai_network_error') { $code='ai_network_error' }
+        Stop-EloRequestDetail 502 'community_failed' $code
+    }
+    $json=@(([string]$r.Output -split "`r?`n") | Where-Object { $_ -match '^\{.*\}\s*$' } | Select-Object -Last 1)
+    if ($json.Count -ne 1) { Stop-EloRequestDetail 502 'community_failed' 'models_unreadable' }
+    try { $parsed=$json[0] | ConvertFrom-Json } catch { Stop-EloRequestDetail 502 'community_failed' 'models_unreadable' }
+    $models=@(@($parsed.models) | Where-Object { [string]$_ -cmatch '^[A-Za-z0-9._:\-/]{1,100}$' } | Select-Object -First 300 | ForEach-Object { [string]$_ })
+    return @{models=$models;current=$(if ($parsed.current) { [string]$parsed.current } else { '' })}
+}
+function Start-EloCommunityJob {
+    param($Session,[string]$Kind,$Body)
+    # The protocol carries flat strings only: consent is the exact text yes.
+    if ([string]$Body.consent -cne 'yes') { Stop-EloRequest 400 'consent_required' }
+    $job=$Session.CommunityJob
+    if ($job -and $job.Process -and -not $job.Process.HasExited) { Stop-EloRequest 409 'community_busy' }
+    $tool=Get-EloCommunityTool $Session
+    $stamp=(& $Session.Adapters.Clock).ToString('yyyyMMddHHmmss')
+    $outDir=Join-Path (Join-Path (Get-EloQuarantineRoot) 'drafts') $stamp
+    $null=[IO.Directory]::CreateDirectory($outDir)
+    $logFile=Join-Path $outDir 'run.log'
+    $environment=@{}
+    if ($Kind -ceq 'run') {
+        $since=Assert-EloCommunityText $Body.since '^([0-9]{1,4}[dwmy]|[0-9]{4}-[0-9]{2}-[0-9]{2})$' 12 'invalid_parameters'
+        if (-not $since) { Stop-EloRequest 400 'missing_parameter' }
+        if ([string]$Body.max -cnotmatch '^[0-9]{1,2}$') { Stop-EloRequest 400 'invalid_parameters' }
+        $max=[int]$Body.max; if ($max -lt 1 -or $max -gt 50) { Stop-EloRequest 400 'invalid_parameters' }
+        $arguments=@(('"'+$tool.Cli+'"'),'run','--since',$since,'--max',[string]$max)+(Get-EloCommunityAiArguments $Body $true)
+        $environment=Get-EloCommunityEnvironment $Body
+    } else {
+        $arguments=@(('"'+$tool.Cli+'"'),'setup')
+    }
+    $arguments+=@('--yes','--out',('"'+$outDir+'"'),'--log',('"'+$logFile+'"'))
+    Write-EloLog $Session "Community: starting '$Kind' (output in $outDir)."
+    try { $process=& $Session.Adapters.StartProcess $tool.Node ($arguments -join ' ') $environment $tool.Root }
+    catch { Stop-EloRequestDetail 502 'community_failed' 'process_start_failed' }
+    $Session.CommunityJob=@{Kind=$Kind;Process=$process;OutDir=$outDir;LogFile=$logFile;Started=(& $Session.Adapters.Clock);Environment=$environment;Reported=$false}
+}
+function Get-EloCommunityJobState {
+    param($Session)
+    $job=$Session.CommunityJob
+    if (-not $job) { return @{state='idle';kind='';log=@();drafts=@();outDir=''} }
+    $state='running'
+    if ($job.Process.HasExited) {
+        if ($job.Cancelled) { $state='cancelled' } elseif ($job.Process.ExitCode -eq 0) { $state='completed' } else { $state='failed' }
+        if (-not $job.Reported) { $job.Reported=$true; Write-EloLog $Session "Community: '$($job.Kind)' $state."; $Session.BackupsCache=$null }
+    }
+    $log=@()
+    if (Test-Path -LiteralPath $job.LogFile -PathType Leaf) {
+        try {
+            $fs=[IO.File]::Open($job.LogFile,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+            try { $len=[int][Math]::Min($fs.Length,20000); $null=$fs.Seek(-$len,[IO.SeekOrigin]::End); $buf=New-Object byte[] $len; $null=$fs.Read($buf,0,$len); $text=[Text.Encoding]::UTF8.GetString($buf) } finally { $fs.Dispose() }
+            $log=@(($text -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -Last 40 | ForEach-Object { $l=Remove-EloCommunitySecrets $_ $job.Environment; $l.Substring(0,[Math]::Min(300,$l.Length)) })
+        } catch { }
+    }
+    $drafts=@()
+    $draftFile=Join-Path $job.OutDir 'draft-vulndb.json'
+    if ($state -ceq 'completed' -and $job.Kind -ceq 'run' -and (Test-Path -LiteralPath $draftFile -PathType Leaf)) {
+        try {
+            $db=[IO.File]::ReadAllText($draftFile) | ConvertFrom-Json
+            foreach ($e in @($db.vulnerabilities | Select-Object -First 50)) {
+                $issues=@($e.review.issues)
+                $title=[string]$e.title.en; if ($title.Length -gt 200) { $title=$title.Substring(0,200) }
+                $drafts+=@{id=[string]$e.id;severity=[string]$e.severity;title=$title;solutionReported=(@($issues | Where-Object { $_ -match 'No solution reported' }).Count -eq 0);simulation=[bool]$e.simulation;issues=$issues.Count;detects=([string]$e.detection.method -ceq 'version-table' -or ([string]$e.detection.rule.vulnerablePattern -cne '(?!)'))}
+            }
+        } catch { $drafts=@() }
+    }
+    return @{state=$state;kind=[string]$job.Kind;log=@($log);drafts=@($drafts);outDir=[string]$job.OutDir}
+}
+function Invoke-EloCommunityApi {
+    param($Session,$Request)
+    if ($Request.Target -ceq '/api/community/status') { return (Get-EloCommunityStatus $Session) }
+    if ($Request.Target -ceq '/api/community/job') { return (Get-EloCommunityJobState $Session) }
+    switch -CaseSensitive ($Request.Target) {
+        '/api/community/models' {
+            $body=ConvertFrom-EloBody $Request.Body -Required @('provider') -Optional @('apiKey','baseUrl','model')
+            return (Get-EloCommunityModels $Session $body)
+        }
+        '/api/community/setup' {
+            $body=ConvertFrom-EloBody $Request.Body -Required @('consent')
+            Start-EloCommunityJob $Session 'setup' $body
+            return @{ok=$true}
+        }
+        '/api/community/run' {
+            $body=ConvertFrom-EloBody $Request.Body -Required @('consent','since','max','provider','model') -Optional @('user','password','apiKey','baseUrl')
+            Start-EloCommunityJob $Session 'run' $body
+            return @{ok=$true}
+        }
+        '/api/community/cancel' {
+            $null=ConvertFrom-EloBody $Request.Body
+            $job=$Session.CommunityJob
+            if ($job -and $job.Process -and -not $job.Process.HasExited) { $job.Cancelled=$true; try { $job.Process.Kill() } catch { }; Write-EloLog $Session 'Community: cancelled.' }
+            return @{ok=$true}
+        }
+    }
+    Stop-EloRequest 404 'unknown_route'
+}
 function Invoke-EloApi {
     param($Session,$Request)
     Assert-EloBoundary $Session $Request
     if (-not (Test-EloSecret ([string]$Request.Headers['X-Session-Token']) $Session.Token)) { Stop-EloRequest 401 'authentication_required' }
-    $get=@('/api/status','/api/results'); $post=@('/api/scan','/api/cancel','/api/preview','/api/action','/api/report')
+    $get=@('/api/status','/api/results','/api/community/status','/api/community/job'); $post=@('/api/scan','/api/cancel','/api/preview','/api/action','/api/report','/api/community/models','/api/community/setup','/api/community/run','/api/community/cancel')
     if ($Request.Target -cnotin ($get+$post)) { Stop-EloRequest 404 'unknown_route' }
     if (($Request.Target -cin $get -and $Request.Method -cne 'GET') -or ($Request.Target -cin $post -and $Request.Method -cne 'POST')) { Stop-EloRequest 405 'method_rejected' }
     Update-EloScanWorker $Session
+    if ($Request.Target -clike '/api/community/*') {
+        if ($Request.Method -ceq 'POST' -and $Request.Headers['Content-Type'] -cnotin @('application/json','application/json; charset=utf-8')) { Stop-EloRequest 415 'json_required' }
+        if ($Request.Method -ceq 'GET' -and $Request.Body.Length -ne 0) { Stop-EloRequest 400 'unexpected_body' }
+        return (Invoke-EloCommunityApi $Session $Request)
+    }
     if ($Request.Method -ceq 'GET') {
         if ($Request.Body.Length -ne 0) { Stop-EloRequest 400 'unexpected_body' }
         if ($Request.Target -ceq '/api/status') { return @{state=$Session.State} }
@@ -915,8 +1140,14 @@ function ConvertTo-EloErrorResponse {
         'inaccessible_path' { $warnings+=@{en='The selected local directory is missing or inaccessible. Select an accessible directory and check permissions.';de='Das ausgewaehlte lokale Verzeichnis fehlt oder ist unzugaenglich. Zugaengliches Verzeichnis waehlen und Berechtigungen pruefen.'} }
         'update_unavailable_provenance_compatibility_backup_replacement_rollback_not_verified' { $warnings+=@{en='Automatic runtime update is unavailable: provenance, ELO compatibility, validated backups, reversible replacement and rollback guarantees are not implemented and verified. Nothing was downloaded or replaced.';de='Automatisches Laufzeit-Update nicht verfuegbar: Herkunft, ELO-Kompatibilitaet, validierte Sicherung, reversible Ersetzung und Wiederherstellung sind nicht implementiert und geprueft. Nichts heruntergeladen oder ersetzt.'} }
     }
+    switch ($code) {
+        'community_unavailable' { $warnings+=@{en='The ELO Community helper is not available here (it needs the tools\community folder next to the tool and Node.js). The patch tool itself is unaffected.';de='Der ELO-Community-Helfer ist hier nicht verfuegbar (er braucht den Ordner tools\community neben dem Werkzeug und Node.js). Das Patch-Werkzeug selbst ist nicht betroffen.'} }
+        'community_busy' { $warnings+=@{en='A community job is already running. Wait for it or cancel it.';de='Ein Community-Auftrag laeuft bereits. Abwarten oder abbrechen.'} }
+        'consent_required' { $warnings+=@{en='Confirm that extra software may be installed and that your ELO Community credentials are used.';de='Bestaetigen, dass zusaetzliche Software installiert werden darf und Ihre ELO-Community-Zugangsdaten verwendet werden.'} }
+    }
     $detail=''; if ($cursor -and $cursor.Data.Contains('Detail')) { $detail=' ['+[string]$cursor.Data['Detail']+']' }
     switch ($code) {
+        'community_failed' { $warnings+=@{en="The community helper failed.$detail Check the backend window for details; credentials are never shown.";de="Der Community-Helfer ist fehlgeschlagen.$detail Details im Backend-Fenster pruefen; Zugangsdaten werden nie angezeigt."} }
         'update_not_needed' { $warnings+=@{en='This runtime is already the newest release of its branch. Nothing to update.';de='Diese Runtime ist bereits die neueste Version ihres Branches. Nichts zu aktualisieren.'} }
         'no_backup_for_target' { $warnings+=@{en='No backup from this session exists for this runtime. Restore manually from a backup ZIP using the commands in the technical report.';de='Fuer diese Runtime existiert in dieser Sitzung kein Backup. Manuell aus einem Backup-ZIP wiederherstellen; Befehle stehen im technischen Bericht.'} }
         'restore_failed_no_change' { $warnings+=@{en="The restore was rejected before the runtime was swapped.$detail The current runtime is unchanged.";de="Die Wiederherstellung wurde abgelehnt, bevor die Runtime getauscht wurde.$detail Die aktuelle Runtime ist unveraendert."} }

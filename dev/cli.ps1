@@ -366,8 +366,8 @@ function Invoke-EloCli {
         if ($scan.Cancelled) { throw 'Scan cancelled; no action performed.' }
         if ($isAction) {
             $index = [int]$options['--target']; $rows = @($scan.Results)
-            # A mitigation needs a potentially vulnerable JVM; an update only needs a runtime the backend can identify.
-            if ($index -ge $rows.Count -or ($kind -eq 'mitigation' -and $rows[$index].Status -cne 'PotentiallyVulnerable')) { throw 'Target not eligible.' }
+            # Both actions only need a scanned runtime: the mitigation is probed with that exact java.exe before any write.
+            if ($index -ge $rows.Count) { throw 'Target not eligible.' }
             $preview = & $Actions[$previewName] $rows[$index]
             if ($null -eq $preview -or [string]::IsNullOrWhiteSpace([string]$preview.Summary)) { throw 'Backend preview required.' }
             $report.action = @{ preview=$preview; result=$null }

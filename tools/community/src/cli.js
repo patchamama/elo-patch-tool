@@ -4,7 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { parseSince, parseMax } = require('./since');
-const { callProvider, PROVIDERS } = require('./providers');
+const { callProvider, listModels, PROVIDERS } = require('./providers');
 const { SYSTEM, userPrompt } = require('./prompt');
 const { buildDraftEntry, validateEntry, buildDraftDb } = require('./draft');
 const { loadSecrets } = require('./secrets');
@@ -15,6 +15,7 @@ const HELP = `ELO Community vulnerability helper (optional, drafts only)
 Usage: node tools/community/bin/elo-community.js <command> [options]
 
 Commands
+  models   List the models your AI provider offers (JSON), to choose one.
   setup    Show what the community helper needs and install it ONLY after you say yes.
   fetch    Sign in to the ELO Community board, list the latest articles and save their text.
   analyze  Send saved articles to an AI provider and write DRAFT catalog entries (vulndb.json format).
@@ -45,7 +46,7 @@ automatically: review the draft, then  ELO-Patch-Tools.bat --cli --catalog-valid
 
 function parseArgs(argv) {
   const out = { command: argv[0] && !argv[0].startsWith('--') ? argv[0] : 'help', options: {} };
-  const valued = ['since', 'max', 'provider', 'model', 'base-url', 'ai', 'out', 'articles', 'draft', 'channel', 'config'];
+  const valued = ['log', 'since', 'max', 'provider', 'model', 'base-url', 'ai', 'out', 'articles', 'draft', 'channel', 'config'];
   const flags = ['headed', 'help', 'yes'];
   for (let i = out.command === 'help' && !argv[0] ? 0 : 1; i < argv.length; i++) {
     const a = argv[i];
@@ -68,7 +69,7 @@ function defaultOutDir(now = new Date(), env = process.env) {
 function readJson(file) { return JSON.parse(fs.readFileSync(file, 'utf8')); }
 function writeJson(file, value) { fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n', 'utf8'); }
 
-function aiConfig(options, root) {
+function aiConfig(options, root, { requireModel = true } = {}) {
   let cfg = {};
   const file = options.ai || path.join(root, 'config', 'ai.json');
   if (fs.existsSync(file)) cfg = readJson(file);
@@ -78,6 +79,7 @@ function aiConfig(options, root) {
   if (cfg.provider === 'openai' && !cfg.apiKeyEnv) cfg.apiKeyEnv = 'OPENAI_API_KEY';
   if (cfg.provider === 'anthropic' && !cfg.apiKeyEnv) cfg.apiKeyEnv = 'ANTHROPIC_API_KEY';
   if (!PROVIDERS.includes(cfg.provider)) throw new Error('ai_provider_invalid: pass --provider openai|anthropic|ollama');
+  if (requireModel && !cfg.model) throw new Error('ai_model_required: pass --model (run the models command to list them)');
   return cfg;
 }
 
@@ -139,6 +141,14 @@ async function main(argv, deps = {}) {
   const now = deps.now || new Date();
   const { command, options } = parseArgs(argv);
   if (command === 'help' || options.help) { process.stdout.write(HELP); return 0; }
+  if (options.log) {
+    // Mirror everything printed to a log file (used by the web UI to show progress). Never contains secrets.
+    const logFile = path.resolve(options.log);
+    for (const stream of [process.stdout, process.stderr]) {
+      const write = stream.write.bind(stream);
+      stream.write = (chunk, ...rest) => { try { fs.appendFileSync(logFile, String(chunk)); } catch (_) { /* ignore */ } return write(chunk, ...rest); };
+    }
+  }
   if (command === 'setup') return setup(options, deps.setupDeps);
   const secrets = (deps.loadSecrets || loadSecrets)();
   if (secrets.loaded.length) process.stderr.write('Loaded from ' + path.basename(secrets.file) + ': ' + secrets.loaded.join(', ') + ' (names only)\n');
@@ -153,6 +163,12 @@ async function main(argv, deps = {}) {
       process.stdout.write(`${verb}: exit ${r.status}\n${shown}\n`);
       if (r.status !== 0) return r.status || 1;
     }
+    return 0;
+  }
+  if (command === 'models') {
+    const cfg = aiConfig(options, root, { requireModel: false });
+    const models = await (deps.listModels || listModels)(cfg);
+    process.stdout.write(JSON.stringify({ provider: cfg.provider, current: cfg.model || null, models }) + '\n');
     return 0;
   }
   fs.mkdirSync(outDir, { recursive: true });

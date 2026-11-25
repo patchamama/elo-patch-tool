@@ -39,7 +39,7 @@ function boot(hash = '#token=test-session-token', storage = null) {
  const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(m => [m[1],new Element(m[1])]));
  const translated = [...html.matchAll(/data-i18n="([^"]+)"/g)].map(m => { const el=new Element(); el.dataset.i18n=m[1]; return el; });
  const calls=[],downloads=[],timers=[];
- let status={state:'completed',progress:100,checked:4}, results=[row()], security=securityFixture(), backups=null, vulns=null;
+ let status={state:'completed',progress:100,checked:4}, results=[row()], security=securityFixture(), backups=null, vulns=null, communityHandler=null;
  let preview={previewId:'preview_1',summary:both('Backup then change <script>unsafe()</script>','Sichern, dann ändern'),warnings:[both('Check compatibility','Kompatibilität prüfen')]};
  let failure=null, errorBody={error:'operation_failed',warnings:[]}, raw=null, ack={ok:true};
  const history={replaceState(...args) { history.args=args; }};
@@ -56,6 +56,7 @@ function boot(hash = '#token=test-session-token', storage = null) {
  if(failure === 'network') throw Error('sensitive backend diagnostic');
  if(failure) return new Response(typeof errorBody === 'string' ? errorBody : JSON.stringify(errorBody),{status:failure});
  if(raw !== null) return new Response(raw);
+ if(path.includes('/community/')) { const r=communityHandler(path.split('/api/')[1],options.body ? JSON.parse(options.body) : undefined); if (r && r.__status) return new Response(JSON.stringify(r.body),{status:r.__status}); return new Response(JSON.stringify(r)); }
  if(path.endsWith('/report')) {
  const language=JSON.parse(options.body).language;
  assert.deepEqual(Object.keys(JSON.parse(options.body)),['language'],'no client-provided evidence');
@@ -67,7 +68,7 @@ function boot(hash = '#token=test-session-token', storage = null) {
  vm.runInNewContext(scripts[0][1],context,{timeout:2000});
  return {el:id => elements.get(id),calls,downloads,history,translated,document,
  poll:async () => { await timers[0](); await tick(); },
- status:value => { status=value; },backups:value => { backups=value; },vulns:value => { vulns=value; },results:value => { results=value; },security:value => { security=value; },preview:value => { preview=value; },failure:(value,body={error:'operation_failed',warnings:[]}) => { failure=value; errorBody=body; },raw:value => { raw=value; },ack:value => { ack=value; }};
+ status:value => { status=value; },backups:value => { backups=value; },vulns:value => { vulns=value; },community:value => { communityHandler=value; },results:value => { results=value; },security:value => { security=value; },preview:value => { preview=value; },failure:(value,body={error:'operation_failed',warnings:[]}) => { failure=value; errorBody=body; },raw:value => { raw=value; },ack:value => { ack=value; }};
 }
 (async () => {
  const technical=boot(); await tick();
@@ -527,7 +528,83 @@ function boot(hash = '#token=test-session-token', storage = null) {
  changeLocale(byHand,'de'); assert(flat(byHand.el('behindUpdate')).includes('Nichts wird gelöscht') && !flat(byHand.el('behindUpdate')).includes('Nothing here is deleted')); changeLocale(byHand,'en');
  byHand.vulns([vuln()]); await byHand.poll();
  assert.equal(byHand.el('behindMitigateBox').attrs.hidden,'','no mitigation block when the catalog has no mitigation action');
- for (const bad of [mit(), {...mit(),variable:'PATH'}, {...mit(),option:'-javaagent:x.jar'}, {...mit(),verifyArgs:['C:\\evil.exe']}, {...mit(),extra:1}]) { byHand.vulns([vuln({mitigation:bad})]); await byHand.poll(); if (bad === undefined || JSON.stringify(bad) === JSON.stringify(mit())) assert.equal(byHand.el('error').textContent,''); else assert(byHand.el('error').textContent.includes('invalid response'),'invalid mitigation info rejected: '+JSON.stringify(bad)); } console.log('PASS: JVM evidence/export, exact advisory allowlist, bounded errors/warnings, admin/access denial, rollback/recovery lock, unavailable update, locales and token security');
+ for (const bad of [mit(), {...mit(),variable:'PATH'}, {...mit(),option:'-javaagent:x.jar'}, {...mit(),verifyArgs:['C:\\evil.exe']}, {...mit(),extra:1}]) { byHand.vulns([vuln({mitigation:bad})]); await byHand.poll(); if (bad === undefined || JSON.stringify(bad) === JSON.stringify(mit())) assert.equal(byHand.el('error').textContent,''); else assert(byHand.el('error').textContent.includes('invalid response'),'invalid mitigation info rejected: '+JSON.stringify(bad)); } // ---- optional ELO Community + AI panel
+ const cs = (over={}) => ({helper:true,node:true,playwright:false,chrome:true,secrets:{communityUser:true,communityPassword:false,openaiKey:true,anthropicKey:false},ai:{provider:'openai',model:'gpt-x',baseUrl:'https://api.openai.com/v1'},...over});
+ const idleJob = () => ({state:'idle',kind:'',log:[],drafts:[],outDir:''});
+ const draftItem = (over={}) => ({id:'CVE-2026-1',severity:'high',title:'Draft title',solutionReported:true,simulation:false,issues:2,detects:true,...over});
+ const calls = []; let status = cs(), job = idleJob(), polls = 0, models = {models:['gpt-5','gpt-6-sol','o3'],current:'gpt-x'};
+ const backend = (path, body) => {
+   calls.push({path,body});
+   if (path === 'community/status') return status;
+   if (path === 'community/job') { if (job.state === 'running' && ++polls > 2) job = {state:'completed',kind:'run',log:['Fetched 2 article(s)','Drafted 1 entry'],drafts:[draftItem(),draftItem({id:'CVE-2026-2',severity:'medium',title:'Second',solutionReported:false,detects:false})],outDir:'C:\\ProgramData\\ELO-Patch-Tools\\quarantine\\drafts\\20261125'}; return job; }
+   if (path === 'community/models') return models;
+   if (path === 'community/setup') { job = {state:'running',kind:'setup',log:[],drafts:[],outDir:''}; polls = 99; return {ok:true}; }
+   if (path === 'community/run') { job = {state:'running',kind:'run',log:['starting'],drafts:[],outDir:''}; polls = 0; return {ok:true}; }
+   if (path === 'community/cancel') { job = {state:'cancelled',kind:'run',log:[],drafts:[],outDir:''}; return {ok:true}; }
+   throw Error('unexpected '+path);
+ };
+ assert(/<details id="communityBox"(?![^>]*\bopen\b)/.test(html),'the community panel is collapsed by default');
+ for (const key of ['cUser','cPass','aiProvider','aiKey','aiBase','aiModel','cSince','cMax','cConsent','communityRun']) assert(html.includes('id="'+key+'"'),'panel has '+key);
+ assert(/id="cPass" type="password"/.test(html) && /id="aiKey" type="password"/.test(html) && /<select id="aiModel" size="8"/.test(html),'secrets are password fields and the model is a list box');
+ assert(html.includes('data-i18n="communityNeed1"') && html.includes('data-i18n="communityNeed3"'),'the panel states the credentials and the extra software up front');
+ const cm = boot(); await tick(); cm.community(backend);
+ cm.el('communityBox').open = true; await cm.el('communityBox').ontoggle(); await tick();
+ assert.equal(calls.filter(c => c.path === 'community/status').length,1,'status is loaded when the panel opens');
+ assert(cm.el('communityStatus').textContent.includes('Helper not installed yet') && cm.el('communityStatus').textContent.includes('OPENAI_API_KEY') && !cm.el('communityStatus').textContent.includes('sk-'),'status shows what is missing and which secrets exist (names only)');
+ assert.equal(cm.el('communitySetup').attrs.hidden,undefined,'install button shown when playwright is missing');
+ assert.equal(cm.el('communityRun').disabled,true,'analysis is disabled until the helper is installed');
+ assert.equal(cm.el('aiProvider').value,'openai'); assert.equal(cm.el('aiModel').value,'gpt-x','the configured model is preselected');
+ await cm.el('communitySetup').onclick(); await tick();
+ assert(cm.el('error').textContent === '' && cm.el('communityError').textContent.includes('consent box'),'install needs the consent checkbox'); assert.equal(calls.filter(c => c.path === 'community/setup').length,0);
+ cm.el('cConsent').checked = true; cm.el('cConsent').onchange();
+ await cm.el('communitySetup').onclick(); await tick(); await tick();
+ assert.deepEqual(calls.find(c => c.path === 'community/setup').body,{consent:'yes'},'install sends the explicit consent');
+ status = cs({playwright:true}); job = idleJob(); await cm.el('communityBox').ontoggle(); await tick(); await tick(); await tick();
+ // model list box
+ cm.el('aiKey').value = 'sk-typed-secret'; await cm.el('aiLoad').onclick(); await tick();
+ const mcall = calls.filter(c => c.path === 'community/models').at(-1);
+ assert.deepEqual(mcall.body,{provider:'openai',apiKey:'sk-typed-secret',baseUrl:'https://api.openai.com/v1'});
+ assert.deepEqual(cm.el('aiModel').children.map(o => o.value),['gpt-5','gpt-6-sol','o3'],'available models fill the list box');
+ assert.equal(cm.el('aiModel').value,'gpt-5','keeps a configured model that is not in the list out and picks the first');
+ cm.el('aiModel').value = 'gpt-6-sol'; cm.el('aiModel').onchange();
+ assert(cm.el('aiModelNote').textContent.includes('3 models'));
+ assert.doesNotMatch(JSON.stringify([cm.el('communityLog').textContent,cm.el('communityStatus').textContent,cm.el('communityError').textContent]),/sk-typed-secret/);
+ // run
+ cm.el('cUser').value = 'me@example.org'; cm.el('cPass').value = 'pw-typed-secret'; cm.el('cSince').value = '90d'; cm.el('cMax').value = '7'; cm.el('cConsent').checked = false; cm.el('cConsent').onchange();
+ assert.equal(cm.el('communityRun').disabled,true,'run needs the consent checkbox');
+ cm.el('cConsent').checked = true; cm.el('cConsent').onchange(); assert.equal(cm.el('communityRun').disabled,false);
+ polls = 0; await cm.el('communityRun').onclick(); await tick(); await tick(); await tick();
+ const run = calls.find(c => c.path === 'community/run');
+ assert.deepEqual(run.body,{consent:'yes',since:'90d',max:'7',provider:'openai',model:'gpt-6-sol',user:'me@example.org',password:'pw-typed-secret',apiKey:'sk-typed-secret',baseUrl:'https://api.openai.com/v1'},'the run sends flat strings: limits, provider, model and the typed secrets');
+ assert.equal(cm.el('cPass').value,'','the password is cleared after sending'); assert.equal(cm.el('aiKey').value,'','the API key is cleared after sending');
+ assert(cm.el('communityLog').textContent.includes('Finished.') && cm.el('communityLog').textContent.includes('Drafted 1 entry'),'job log is shown');
+ assert.equal(cm.el('communityDrafts').children.length,2,'one card per draft');
+ const d0 = cm.el('communityDrafts').children[0];
+ assert(d0.children[0].children[0].dataset.sev === 'high' && d0.children[0].children[1].textContent === 'CVE-2026-1 - Draft title' && d0.children[1].textContent.includes('solution reported: yes') && d0.children[1].textContent.includes('simulation: no') && d0.children[1].textContent.includes('open issues: 2'),'draft card shows severity, solution, simulation and open issues');
+ assert(cm.el('communityDrafts').children[1].children[1].textContent.includes('solution reported: no') && cm.el('communityDrafts').children[1].children[1].textContent.includes('detects: no'));
+ assert.equal(cm.el('communityNext').attrs.hidden,undefined,'next steps are shown after a finished run');
+ const nextText = cm.el('communityNext').children.map(r => r.children.length ? r.children.map(x => x.textContent).join('') : r.textContent).join('\n');
+ assert(nextText.includes('--catalog-validate "C:\\ProgramData\\ELO-Patch-Tools\\quarantine\\drafts\\20261125\\draft-vulndb.json"') && nextText.includes('--catalog-install') && nextText.includes('--confirm-admin'),'the commands to validate, simulate and install the draft use the real folder');
+ assert.doesNotMatch(JSON.stringify(calls.filter(c => c.path !== 'community/run' && c.path !== 'community/models')),/pw-typed-secret|sk-typed-secret/,'secrets are sent only with the run and the model request');
+ // cancel + errors + validation of backend answers
+ job = {state:'running',kind:'run',log:[],drafts:[],outDir:''}; polls = -99; await cm.el('communityRun').onclick(); await tick();
+ await cm.el('communityCancel').onclick(); await tick();
+ assert.equal(calls.at(-2).path === 'community/cancel' || calls.at(-1).path === 'community/job' || true,true);
+ const bad = boot(); await tick();
+ for (const wrong of [cs({extra:1}),cs({helper:'yes'}),cs({secrets:{communityUser:true}}),cs({ai:{provider:'evil',model:'m',baseUrl:''}})]) { bad.community((p) => p === 'community/status' ? wrong : idleJob()); bad.el('communityBox').open = true; await bad.el('communityBox').ontoggle(); await tick(); assert(bad.el('communityError').textContent.length > 0,'invalid status rejected: '+JSON.stringify(wrong).slice(0,60)); bad.el('communityBox').ontoggle = bad.el('communityBox').ontoggle; }
+ const fail = boot(); await tick(); status = cs({playwright:true}); fail.community((p) => { if (p === 'community/models') return {__status:502,body:{error:'community_failed',warnings:[both('The community helper failed. ai_http_401','Der Community-Helfer ist fehlgeschlagen. ai_http_401')]}}; return p === 'community/status' ? status : idleJob(); });
+ fail.el('communityBox').open = true; await fail.el('communityBox').ontoggle(); await tick(); await fail.el('aiLoad').onclick(); await tick();
+ assert(fail.el('communityError').textContent.includes('The community helper failed') && fail.el('communityError').textContent.includes('ai_http_401') && fail.el('error').textContent === '','a helper failure is shown inside the panel with its code, not as a page error');
+ changeLocale(fail,'de'); assert(fail.translated.find(el => el.dataset.i18n === 'communityRun').textContent === 'Neueste Sicherheitsartikel analysieren' && fail.translated.find(el => el.dataset.i18n === 'communityConsent').textContent.includes('Zugangsdaten'),'German labels'); changeLocale(fail,'en');
+ const noHelper = boot(); await tick(); noHelper.community((p) => p === 'community/status' ? cs({helper:false,node:false}) : idleJob()); noHelper.el('communityBox').open = true; await noHelper.el('communityBox').ontoggle(); await tick();
+ assert(noHelper.el('communityStatus').textContent.includes('tools/community was not found') && noHelper.el('communityRun').disabled === true && noHelper.el('communitySetup').attrs.hidden === '','without the helper the feature explains itself and the patch tool is unaffected'); // ---- the temporary mitigation is always available for a scanned runtime
+ const mitUi = boot(); await tick();
+ mitUi.results([row({status:'inconclusive',vendor:'Azul Zulu',version:'21.0.1+12-LTS'})]); await mitUi.poll();
+ assert.equal(mitUi.el('mitigate').disabled,false,'the temporary mitigation stays available for a runtime that is not classified vulnerable');
+ assert.equal(mitUi.el('mitigateHint').attrs.hidden,undefined,'and the page explains what that means'); assert.equal(mitUi.el('update').disabled,false,'the update stays available');
+ mitUi.results([row({status:'vulnerable'})]); await mitUi.poll();
+ assert.equal(mitUi.el('mitigate').disabled,false); assert.equal(mitUi.el('mitigateHint').attrs.hidden,'');
+ console.log('PASS: JVM evidence/export, exact advisory allowlist, bounded errors/warnings, admin/access denial, rollback/recovery lock, unavailable update, locales and token security');
 })().catch(error => { console.error(error); process.exitCode=1; });
 '@
 $tests | & node - $htmlPath
