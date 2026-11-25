@@ -1,5 +1,6 @@
 # Run with Windows PowerShell 5.1; no external test framework or fixture writes.
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot\vulndb.ps1"
 . "$PSScriptRoot\scan.ps1"
 $script:Passed = 0
 function Assert-Equal($Actual, $Expected, [string]$Label) {
@@ -233,4 +234,28 @@ $parseTokens = $null; $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'scan.ps1'), [ref]$parseTokens, [ref]$parseErrors)
 Assert-Equal $parseErrors.Count 0 'Module parses with PowerShell 5.1'
 Assert-Equal @($ast.EndBlock.Statements | Where-Object { $_ -isnot [System.Management.Automation.Language.FunctionDefinitionAst] }).Count 0 'Module contains only callable definitions'
+# ---- catalog rules of method probe-expect: a java probe from the catalog plus expect patterns
+$flagRule = @{ Id = 'CVE-TEST-1'; Severity = 'medium'; Method = 'probe-expect'; ProbeArgs = @('-XX:+PrintFlagsFinal','-version'); TimeoutSec = 5
+    VulnerablePattern = '(?m)^\s*bool\s+TestFlag\s*=\s*true'; SafePattern = '(?m)^\s*bool\s+TestFlag\s*=\s*false'; Source = 'https://example.org/advisory' }
+$script:ProbeCalls = @()
+function Get-ProbeReport($Evidence, $Succeeded = $true) {
+    Invoke-EloJavaScan -DriveRoots @('Q:\') -GetChildren $children -IsReparsePoint { $false } -Rules @($flagRule) -ProbeJava {
+        param($Path, $Cancel)
+        [pscustomobject]@{ Succeeded = $true; Cancelled = $false; Evidence = 'Temurin (build 17.0.21.1+2)'; Error = $null; ExitCode = 0 }
+    } -ProbeExtra {
+        param($Path, $ProbeArgs, $Timeout, $Cancel)
+        $script:ProbeCalls += ,@($ProbeArgs)
+        [pscustomobject]@{ Succeeded = $Succeeded; Cancelled = $false; Evidence = $Evidence; Error = $null; ExitCode = 0 }
+    }
+}
+$vulnerableProbe = Get-ProbeReport '     bool TestFlag = true {product}'
+Assert-Equal $vulnerableProbe.Results[0].Status 'PotentiallyVulnerable' 'probe-expect: vulnerable pattern marks the runtime'
+Assert-Equal (@($vulnerableProbe.Results[0].Findings | Where-Object { $_.Id -ceq 'CVE-TEST-1' })[0].Status) 'PotentiallyVulnerable' 'probe-expect: finding recorded'
+Assert-Equal (($script:ProbeCalls[0] -join ' ')) '-XX:+PrintFlagsFinal -version' 'probe-expect: catalog arguments are used'
+Assert-Equal (Get-ProbeReport '     bool TestFlag = false {product}').Results[0].Status 'KnownFixed' 'probe-expect: safe pattern keeps a fixed runtime fixed'
+Assert-Equal (Get-ProbeReport 'nothing relevant').Results[0].Status 'Inconclusive' 'probe-expect: no pattern match is inconclusive, never fixed'
+Assert-Equal (Get-ProbeReport '     bool TestFlag = true' $false).Results[0].Status 'Inconclusive' 'probe-expect: a failed probe is inconclusive'
+$refused = Invoke-EloJavaVersion -JavaPath 'C:\nope\java.exe' -Arguments @('-version','; calc')
+Assert-Equal $refused.Succeeded $false 'probe arguments that are not plain java options are refused'
+Assert-Equal ($refused.Error -match 'plain java options') $true 'refusal names the reason'
 Write-Output "PASS: $script:Passed assertions"

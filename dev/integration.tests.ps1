@@ -17,6 +17,14 @@ foreach ($m in [regex]::Matches($source, '(?ms)^::ELO_PATCH_BEGIN:([A-Z_]+)\r?\n
     $blocks[$m.Groups[1].Value] = $m.Groups[2].Value.TrimEnd("`r", "`n")
 }
 # Exercise the packaged scanner independently of the development source.
+# The packaged catalog engine and its JSON are extracted next to each other (the engine finds vulndb.json beside itself).
+$catalogDir = Join-Path ([IO.Path]::GetTempPath()) ('elo-integration-catalog-' + [guid]::NewGuid().ToString('N'))
+$null = [IO.Directory]::CreateDirectory($catalogDir)
+Assert ($blocks.ContainsKey('VULNDB_PS') -and $blocks.ContainsKey('VULNDB_JSON')) 'the catalog engine and its JSON are packaged'
+[IO.File]::WriteAllText((Join-Path $catalogDir 'vulndb.ps1'), $blocks.VULNDB_PS, (New-Object Text.UTF8Encoding($false)))
+[IO.File]::WriteAllText((Join-Path $catalogDir 'vulndb.json'), $blocks.VULNDB_JSON, (New-Object Text.UTF8Encoding($false)))
+. (Join-Path $catalogDir 'vulndb.ps1')
+Assert (@(Get-EloActiveVulnerabilities).Count -ge 1) 'the packaged catalog loads'
 . ([scriptblock]::Create($blocks.SCAN_PS))
 $rootFixture=Get-EloJavaCandidates -DriveRoots @('C:\','D:\') -ManualPath 'C:\manual' -MaxEntries 1 -IsReparsePoint { $false } -GetChildren {
     param($Path)

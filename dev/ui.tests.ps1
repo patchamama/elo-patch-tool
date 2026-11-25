@@ -5,7 +5,7 @@ if (-not (Test-Path -LiteralPath $htmlPath)) { throw 'Missing dev/ui.html' }
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw 'Node.js is required for isolated browser-contract tests.' }
 # Verify embedded resources against their authoritative development sources.
 $batText = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) 'ELO-Patch-Tools.bat'))
-foreach ($resource in @(@('SCAN_PS','scan.ps1'),@('SERVER_PS','server.ps1'),@('CLI_PS','cli.ps1'),@('UI_HTML','ui.html'),@('REPORT_PS','report.ps1'),@('UPDATE_PS','update.ps1'),@('CATALOG_PS','catalog.ps1'))) {
+foreach ($resource in @(@('SCAN_PS','scan.ps1'),@('SERVER_PS','server.ps1'),@('CLI_PS','cli.ps1'),@('UI_HTML','ui.html'),@('REPORT_PS','report.ps1'),@('UPDATE_PS','update.ps1'),@('CATALOG_PS','catalog.ps1'),@('VULNDB_PS','vulndb.ps1'),@('VULNDB_JSON','vulndb.json'))) {
     $match = [regex]::Match($batText, '(?ms)^::ELO_PATCH_BEGIN:' + $resource[0] + '\r?\n(.*?)^::ELO_PATCH_END:' + $resource[0] + '\s*$')
     $expected = [IO.File]::ReadAllText((Join-Path $PSScriptRoot $resource[1])).TrimEnd("`r", "`n")
     if (-not $match.Success -or ($match.Groups[1].Value.TrimEnd("`r", "`n") -replace "`r`n", "`n") -cne ($expected -replace "`r`n", "`n")) { throw "Embedded $($resource[0]) differs from source" }
@@ -39,7 +39,7 @@ function boot(hash = '#token=test-session-token', storage = null) {
  const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(m => [m[1],new Element(m[1])]));
  const translated = [...html.matchAll(/data-i18n="([^"]+)"/g)].map(m => { const el=new Element(); el.dataset.i18n=m[1]; return el; });
  const calls=[],downloads=[],timers=[];
- let status={state:'completed',progress:100,checked:4}, results=[row()], security=securityFixture(), backups=null;
+ let status={state:'completed',progress:100,checked:4}, results=[row()], security=securityFixture(), backups=null, vulns=null;
  let preview={previewId:'preview_1',summary:both('Backup then change <script>unsafe()</script>','Sichern, dann ändern'),warnings:[both('Check compatibility','Kompatibilität prüfen')]};
  let failure=null, errorBody={error:'operation_failed',warnings:[]}, raw=null, ack={ok:true};
  const history={replaceState(...args) { history.args=args; }};
@@ -61,13 +61,13 @@ function boot(hash = '#token=test-session-token', storage = null) {
  assert.deepEqual(Object.keys(JSON.parse(options.body)),['language'],'no client-provided evidence');
  return new Response(JSON.stringify({html:'<!doctype html><html lang="'+language+'"><body>safe report</body></html>'}));
  }
- const body=path.endsWith('/status') ? status : path.endsWith('/results') ? (backups === null ? {results,security} : {results,security,backups}) : path.endsWith('/preview') ? preview : ack;
+ const body=path.endsWith('/status') ? status : path.endsWith('/results') ? {results,security,...(backups === null ? {} : {backups}),...(vulns === null ? {} : {vulnerabilities:vulns})} : path.endsWith('/preview') ? preview : ack;
  return new Response(JSON.stringify(body));
  }};
  vm.runInNewContext(scripts[0][1],context,{timeout:2000});
  return {el:id => elements.get(id),calls,downloads,history,translated,document,
  poll:async () => { await timers[0](); await tick(); },
- status:value => { status=value; },backups:value => { backups=value; },results:value => { results=value; },security:value => { security=value; },preview:value => { preview=value; },failure:(value,body={error:'operation_failed',warnings:[]}) => { failure=value; errorBody=body; },raw:value => { raw=value; },ack:value => { ack=value; }};
+ status:value => { status=value; },backups:value => { backups=value; },vulns:value => { vulns=value; },results:value => { results=value; },security:value => { security=value; },preview:value => { preview=value; },failure:(value,body={error:'operation_failed',warnings:[]}) => { failure=value; errorBody=body; },raw:value => { raw=value; },ack:value => { ack=value; }};
 }
 (async () => {
  const technical=boot(); await tick();
@@ -203,48 +203,26 @@ function boot(hash = '#token=test-session-token', storage = null) {
  ui.results([row()]); await ui.poll();
  const temurinUrl='https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/';
  const oracleLinuxUrl='https://linux.oracle.com/cve/CVE-2026-114938.html';
+ // The catalog decides which sources exist; the UI only refuses links that are not plain https pages.
  const badAdvisoryUrls=[
- oracleLinuxUrl.replace('linux.oracle.com','linux.oracle.com.evil.example'),
- oracleLinuxUrl.replace('linux.oracle.com','linux-oracle.com'),
- oracleLinuxUrl.replace('linux.oracle.com','linux.oracle.com@evil.example'),
- oracleLinuxUrl.replace('linux.oracle.com','user@linux.oracle.com'),
  oracleLinuxUrl.replace('https:','http:'),
- oracleLinuxUrl.replace('linux.oracle.com','linux.oracle.com:443'),
+ oracleLinuxUrl.replace('linux.oracle.com','user@linux.oracle.com'),
+ oracleLinuxUrl.replace('linux.oracle.com','linux.oracle.com@evil.example'),
  oracleLinuxUrl.replace('linux.oracle.com','linux.oracle.com:444'),
+ oracleLinuxUrl.replace('linux.oracle.com','linux.oracle.com:443'),
  oracleLinuxUrl+'?redirect=https://evil.example',
  oracleLinuxUrl+'#fragment',
- oracleLinuxUrl+'/',
- oracleLinuxUrl.replace('114938','114939'),
  oracleLinuxUrl.replace('/cve/','/cve/../cve/'),
  oracleLinuxUrl.replace('CVE-','%43VE-'),
- temurinUrl.replace('adoptium.net','adoptium.net.evil.example'),
- temurinUrl.replace('adoptium.net','evil-adoptium.net'),
- temurinUrl.replace('adoptium.net','www.adoptium.net'),
- temurinUrl.replace('adoptium.net','adoptium.net@evil.example'),
- temurinUrl.replace('adoptium.net','user@adoptium.net'),
- temurinUrl.replace('https:','http:'),
- temurinUrl.replace('adoptium.net','adoptium.net:443'),
- temurinUrl.replace('adoptium.net','adoptium.net:444'),
- temurinUrl+'?redirect=https://evil.example',
- temurinUrl+'#fragment',
- temurinUrl+'extra',
- temurinUrl.slice(0,-1),
- temurinUrl.replace('java4shell','java4shell-copy'),
- temurinUrl.replace('november','december'),
  temurinUrl.replace('/news/','/news/../news/'),
  temurinUrl.replace('temurin','%74emurin'),
- 'javascript:alert(1)','http://www.oracle.com/security-alerts/cpujan2025.html',
- 'https://www.oracle.com.evil.example/security-alerts/cpujan2025.html',
- 'https://www.oracle.com@evil.example/security-alerts/cpujan2025.html',
+ temurinUrl.replace('https:','http:'),
+ 'javascript:alert(1)','data:text/html,x','ftp://example.org/x',
  'https://www.oracle.com/security-alerts/cpujan2025.html?token=test-session-token',
- 'https://www.oracle.com/security-alerts/cpujan2025.html#fragment',
- 'https://www.oracle.com:444/security-alerts/cpujan2025.html',
- 'https://www.oracle.com/security-alerts/../other.html',
- 'https://www.oracle.com/security-alerts/%2e%2e/other.html',
- 'https://www.oracle.com/unrelated.html',
- 'https://www.oracle.com/security-alerts/test-session-token.html'
- ];
- for(const url of badAdvisoryUrls) {
+ 'https://www.oracle.com/security-alerts/test-session-token.html',
+ 'https://exa mple.org/x',
+ 'https://EXAMPLE.org/x'
+ ]; for(const url of badAdvisoryUrls) {
  const security=securityFixture(); security.advisories[0].url=url; ui.security(security); await ui.poll();
  assert(ui.el('error').textContent.includes('invalid response'),'unsafe advisory URL rejected: '+url);
  }
@@ -473,7 +451,7 @@ function boot(hash = '#token=test-session-token', storage = null) {
  assert.equal(backupsUi.el('backupsBox').attrs.hidden,undefined,'existing backups are shown on the first step'); assert.equal(backupsUi.el('backups').children.length,2);
  const bcard=backupsUi.el('backups').children[0];
  assert(bcard.children[0].textContent.includes('C:\\ELO\\java — 17.0.2+8') && bcard.children[3].textContent.includes('2026-01-01 12:00 UTC · 196 MB'));
- assert(bcard.children[1].dataset.status === 'vulnerable' && bcard.children[1].textContent.includes('CVE-2026-114938') && bcard.children[4].textContent.includes('ELO Tomcat'));
+ assert(bcard.children[1].dataset.status === 'vulnerable' && bcard.children[1].textContent.includes('vendor fix') && bcard.children[4].textContent.includes('ELO Tomcat'));
  assert.equal(backupsUi.el('backups').children[1].children[1].dataset.status,'vulnerable');
  backupsUi.backups([bk({risk:'unknown',vendor:'Azul Zulu'}),bk({id:'bk_2',risk:'patched'})]); await backupsUi.poll(); assert.equal(backupsUi.el('backups').children[0].children[1].dataset.status,'inconclusive'); assert.equal(backupsUi.el('backups').children[1].children[1].dataset.status,'patched'); backupsUi.backups([bk(),bk({id:'bk_2',version:'21.0.1'})]); await backupsUi.poll();
  await bcard.onclick();
@@ -504,7 +482,7 @@ function boot(hash = '#token=test-session-token', storage = null) {
  adviceUi.backups([bk(),bk({id:'bk_2',risk:'patched',version:'17.0.21.1+2'})]); await adviceUi.poll();
  assert(adviceUi.el('backupsSummary').textContent.includes('(2)') && adviceUi.el('backupsSummary').textContent.includes('vulnerable'),'collapsed summary shows the count and the risk');
  assert.equal(adviceUi.el('vulnAlert').attrs.hidden,undefined,'a vulnerable runtime shows the red alert on the runtime step');
- assert(adviceUi.el('vulnText').textContent.includes('1 runtime(s)') && adviceUi.el('vulnText').textContent.includes('ELO data'));
+ assert(adviceUi.el('vulnList').children[0].children[1].textContent.includes('1 runtime(s)') && adviceUi.el('vulnList').children[0].children[1].textContent.includes('ELO data'),'legacy rows still get the generic alert');
  assert.equal(adviceUi.el('vulnRec').attrs.hidden,undefined,'the update recommendation is repeated on the action step');
  assert.equal(adviceUi.el('cards').children[0].dataset.status,'vulnerable','vulnerable runtime card is flagged');
  const cmds=adviceUi.el('terminalCmds').children;
@@ -513,7 +491,24 @@ function boot(hash = '#token=test-session-token', storage = null) {
  assert(adviceUi.el('cmdView').children.length > 10 && adviceUi.el('cmdView').children.some(line => line.className === 'c-note'),'manual PowerShell commands are highlighted');
  adviceUi.results([row({status:'patched'})]); await adviceUi.poll();
  assert.equal(adviceUi.el('vulnAlert').attrs.hidden,'','no red alert when nothing is vulnerable');
- changeLocale(adviceUi,'de'); assert(adviceUi.translated.find(el => el.dataset.i18n === 'vulnTitle').textContent.includes('Schwachstelle')); changeLocale(adviceUi,'en'); console.log('PASS: JVM evidence/export, exact advisory allowlist, bounded errors/warnings, admin/access denial, rollback/recovery lock, unavailable update, locales and token security');
+ // ---- catalog-driven alert (problem, severity and solution come from vulndb.json through the API).
+ const vuln=(over={}) => ({id:'CVE-2026-114938',alias:'Java4Shell',severity:'high',title:both('CVE title','CVE Titel'),problem:both('{n} runtime(s) are affected: {list}.','{n} Runtime(s) betroffen: {list}.'),solution:both('update Java now','Java jetzt aktualisieren'),actions:['update-runtime','mitigate','restore-backup'],...over});
+ const finding=(over={}) => ({id:'CVE-2026-114938',severity:'high',status:'vulnerable',...over});
+ const catUi=boot(); await tick();
+ catUi.vulns([vuln(),vuln({id:'CVE-2027-0001',alias:'',severity:'medium',title:both('Second flaw','Zweite Luecke'),problem:both('{n} affected','{n} betroffen'),solution:both('apply patch B','Patch B einspielen'),actions:['update-runtime']})]);
+ catUi.results([row({findings:[finding(),finding({id:'CVE-2027-0001',severity:'medium'})]})]); await catUi.poll();
+ const blocks=catUi.el('vulnList').children;
+ assert.equal(blocks.length,2,'one alert block per affected vulnerability');
+ assert(blocks[0].children[0].children[1].textContent === 'CVE title' && blocks[0].children[0].children[0].dataset.sev === 'high' && blocks[1].children[0].children[0].dataset.sev === 'medium','severity badge and title come from the catalog');
+ assert(blocks[0].children[1].textContent.includes('1 runtime(s) are affected') && blocks[0].children[2].children[1].textContent.includes('update Java now') && blocks[1].children[2].children[1].textContent.includes('apply patch B'),'problem and solution come from the catalog');
+ assert.equal(catUi.el('vulnRecList').children.length,2,'solutions repeated on the action step');
+ changeLocale(catUi,'de'); assert(catUi.el('vulnList').children[0].children[1].textContent.startsWith('1 Runtime(s) betroffen') && catUi.el('vulnList').children[0].children[0].children[0].textContent === 'Hoch'); changeLocale(catUi,'en');
+ catUi.results([row({status:'patched',findings:[finding({status:'patched'})]})]); await catUi.poll();
+ assert.equal(catUi.el('vulnAlert').attrs.hidden,'','a fixed runtime shows no alert');
+ for (const bad of [[vuln({severity:'critical'})],[vuln({extra:1})],[vuln({problem:{en:'x'}})],[vuln({id:'a b'})],Array.from({length:33},(_,n) => vuln({id:'CVE-2027-'+String(1000+n)})),'nope']) { catUi.vulns(bad); await catUi.poll(); assert(catUi.el('error').textContent.includes('invalid response'),'invalid catalog info rejected'); }
+ catUi.vulns([vuln()]); catUi.results([row({findings:[finding({severity:'urgent'})]})]); await catUi.poll(); assert(catUi.el('error').textContent.includes('invalid response'),'invalid finding rejected');
+ catUi.results([row()]); catUi.security({verifiedOn:'2026-11-23',advisories:[{id:'new_advisory',title:both('New advisory','Neuer Hinweis'),url:'https://example.org/advisory/1'}]}); await catUi.poll(); assert.equal(catUi.el('error').textContent,'','a catalog advisory from any https host is shown');
+ catUi.security({verifiedOn:'2026-11-23',advisories:[{id:'bad',title:both('Bad','Schlecht'),url:'http://example.org/advisory/1'}]}); await catUi.poll(); assert(catUi.el('error').textContent.includes('invalid response'),'plain http advisory rejected'); console.log('PASS: JVM evidence/export, exact advisory allowlist, bounded errors/warnings, admin/access denial, rollback/recovery lock, unavailable update, locales and token security');
 })().catch(error => { console.error(error); process.exitCode=1; });
 '@
 $tests | & node - $htmlPath

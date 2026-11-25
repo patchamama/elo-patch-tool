@@ -25,6 +25,14 @@ Usage (embedded launcher): ELO-Patch-Tools.bat [options]
   --update-runtime        Separate option: update the selected runtime to the newest release of its branch
                           (Eclipse Temurin / Azul Zulu). Needs --target N --confirm-admin --confirm-update and
                           a typed APPLY UPDATE; a verified backup ZIP and automatic rollback are included.
+  --catalog-validate FILE Validate a vulnerability catalog (JSON) without using it. Read-only.
+  --catalog-simulate ID|FILE  Replay the catalog entry's (or every entry of a FILE, e.g. an AI draft) simulated java output through the real classifier
+                          (shows how the vulnerability would be detected; no Java is run). Read-only.
+  --catalog-install FILE  Install a reviewed catalog (needs --confirm-admin). The installed file it
+                          replaces is copied to the quarantine folder first.
+  --catalog-list          List quarantined catalog copies (%ProgramData%\ELO-Patch-Tools\quarantine).
+  --catalog-restore ID    Put a quarantined copy back (needs --confirm-admin); the file it replaces is
+                          quarantined too, so a restore can be undone.
 No credentials, arbitrary commands, downloads, automatic updates or restarts.
 Unknown/duplicate options, conflicting modes and malformed paths are rejected.
 Quote paths with spaces. UNC, relative, device and command-like paths are rejected.
@@ -218,6 +226,12 @@ function New-EloCliConsole {
     }
 }
 
+function Assert-EloCliCatalogPath {
+    param([string]$Path)
+    if ($Path.Length -gt 1024 -or $Path -cnotmatch '^[A-Za-z]:\\' -or $Path -match '[\x00-\x1f\x7f"<>|?*/;`$]' -or $Path.Substring(2).Contains(':')) { throw 'Invalid literal local file path.' }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw 'Catalog file not found.' }
+    return $Path
+}
 function Invoke-EloCli {
     param(
         [string[]]$Arguments = @(),
@@ -226,15 +240,19 @@ function Invoke-EloCli {
         [hashtable]$Console = (New-EloCliConsole)
     )
     $ErrorActionPreference = 'Stop'
+    # Advisories, dates and sources come from the catalog (vulndb.json).
+    $securitySource=''; $securityAdvisories=@(); $securityVerified=''
+    foreach ($v in (Get-EloActiveVulnerabilities)) {
+        if (-not $securityVerified -or [string]$v.verifiedOn -gt $securityVerified) { $securityVerified=[string]$v.verifiedOn }
+        foreach ($vendor in $v.detection.vendors.PSObject.Properties) { if (-not $securitySource) { $securitySource=[string]$vendor.Value.fixedSource } }
+        # Directly fetched sources are listed before user-supplied ones.
+        foreach ($kind in @('Fetched','Supplied')) { foreach ($adv in @(@($v.advisories) | Where-Object { [string]$_.provenance -ceq $kind })) { $securityAdvisories+=@{ url=[string]$adv.url; provenance=[string]$adv.provenanceNote } } }
+    }
     $report = [ordered]@{ readOnly=$true; noBrowser=$true; keepTemp=$false
-        security=@{ verifiedOn='2026-11-23'; sourceDate='2026-11'
-            source='https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/'
+        security=@{ verifiedOn=$securityVerified; sourceDate=($securityVerified.Substring(0,[Math]::Min(7,$securityVerified.Length)))
+            source=$securitySource
             provenance='Parent verification supplied to this module; no runtime fetching.'
-            advisories=@(
-                @{ url='https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/'; provenance='Official Adoptium vendor advisory directly fetched by parent.' },
-                @{ url='https://linux.oracle.com/cve/CVE-2026-114938.html'; provenance='Oracle Linux source directly fetched by parent.' },
-                @{ url='https://openjdk.org/groups/vulnerability/advisories/2026-11-17'; provenance='User-supplied OpenJDK text reviewed by parent; not independently fetched.' }
-            )
+            advisories=$securityAdvisories
             warning='Unknown JVM vendors/builds remain inconclusive; source verification is not ELO compatibility verification or proof of whole-system safety or exploitability.' }
         scan=$null; action=$null; error=$null }
     $code = 2
@@ -244,22 +262,25 @@ function Invoke-EloCli {
         $options = @{}
         $allowed = @('--help','--cli','--scan','--json','--no-browser','--keep-temp',
             '--manual-path','--manual','--mitigate','--target','--confirm-admin',
-            '--confirm-mitigation','--confirm-update','--update-runtime')
+            '--confirm-mitigation','--confirm-update','--update-runtime',
+            '--catalog-validate','--catalog-install','--catalog-simulate','--catalog-list','--catalog-restore')
         for ($i=0; $i -lt $Arguments.Count; $i++) {
             $arg = $Arguments[$i]
             if ($allowed -cnotcontains $arg -or $options.ContainsKey($arg)) { throw 'Unknown or duplicate option.' }
             $value = $true
-            if ($arg -cin @('--manual-path','--target')) {
+            if ($arg -cin @('--manual-path','--target','--catalog-validate','--catalog-install','--catalog-simulate','--catalog-restore')) {
                 $i++
                 if ($i -ge $Arguments.Count -or $Arguments[$i].StartsWith('--')) { throw 'Missing option value.' }
                 $value = $Arguments[$i]
             }
             $options[$arg] = $value
         }
+        $catalogMode = @('--catalog-validate','--catalog-install','--catalog-simulate','--catalog-list','--catalog-restore') | Where-Object { $options.ContainsKey($_) }
         $modes = @('--help','--manual','--mitigate','--update-runtime') | Where-Object { $options.ContainsKey($_) }
+        if (@($catalogMode).Count -gt 0 -and (@($catalogMode).Count -gt 1 -or @($modes).Count -gt 0 -or $options.ContainsKey('--scan') -or $options.ContainsKey('--manual-path') -or $options.ContainsKey('--target') -or $options.ContainsKey('--confirm-mitigation') -or $options.ContainsKey('--confirm-update'))) { throw 'Conflicting modes.' }
         if (@($modes).Count -gt 1 -or ($options.ContainsKey('--scan') -and @($modes).Count -gt 0)) { throw 'Conflicting modes.' }
         $isAction = $options.ContainsKey('--mitigate') -or $options.ContainsKey('--update-runtime')
-        if (-not $isAction -and
+        if (-not $isAction -and @($catalogMode).Count -eq 0 -and
             ($options.ContainsKey('--target') -or $options.ContainsKey('--confirm-admin') -or $options.ContainsKey('--confirm-mitigation') -or $options.ContainsKey('--confirm-update'))) {
             throw 'Action arguments require --mitigate or --update-runtime.'
         }
@@ -269,6 +290,50 @@ function Invoke-EloCli {
             $text = Get-EloCliReadme
             if ($json) { $text = @{ readme=$text } | ConvertTo-Json -Depth 4 }
             return [pscustomobject]@{ ExitCode=0; Output=$text }
+        }
+        # Catalog maintenance (vulndb.json): validate, simulate, install (with quarantine of the old file), list, restore.
+        if (@($catalogMode).Count -gt 0) {
+            $verb = [string]@($catalogMode)[0]
+            $isChange = $verb -cin @('--catalog-install','--catalog-restore')
+            if ($isChange -and -not $options.ContainsKey('--confirm-admin')) { throw ($verb + ' requires --confirm-admin; the previous file is quarantined first and can be restored.') }
+            if ($options.ContainsKey('--confirm-admin') -and -not $isChange) { throw '--confirm-admin only applies to --catalog-install and --catalog-restore.' }
+            if ($isChange -and (& $Actions.IsAdmin) -ne $true) { throw 'Administrator privileges required.' }
+            $arg = [string]$options[$verb]
+            $result = $null
+            switch ($verb) {
+                '--catalog-validate' {
+                    $path = Assert-EloCliCatalogPath $arg
+                    $db = Read-EloVulnDbFile $path
+                    $result = @{ valid = $true; file = $path; vulnerabilities = @(@($db.vulnerabilities) | ForEach-Object { @{ id = [string]$_.id; severity = [string]$_.severity; status = [string]$_.status } }) }
+                }
+                '--catalog-install' {
+                    $path = Assert-EloCliCatalogPath $arg
+                    $installed = Install-EloVulnDb -Source $path
+                    $result = @{ installed = $installed.installed; quarantinedPrevious = $installed.quarantined }
+                }
+                '--catalog-simulate' {
+                    if ($arg -cmatch '^[A-Za-z]:\\') {
+                        # A catalog FILE (e.g. an AI draft): simulate every entry in it, active or not.
+                        $db = Read-EloVulnDbFile (Assert-EloCliCatalogPath $arg)
+                        $result = @(@($db.vulnerabilities) | ForEach-Object { $s = Invoke-EloVulnSimulation $_ $db; @{ id = [string]$_.id; status = [string]$_.status; passed = [bool]$s.Passed; detected = [string]$s.Status; reason = [string]$s.Reason } })
+                    } else {
+                        if ($arg -cnotmatch '^[A-Za-z0-9._\-]{3,64}$') { throw 'Invalid vulnerability id.' }
+                        $db = Get-EloVulnDb
+                        $entry = @($db.vulnerabilities | Where-Object { $_.id -ceq $arg }) | Select-Object -First 1
+                        if (-not $entry) { throw 'Unknown vulnerability id.' }
+                        $result = Invoke-EloVulnSimulation $entry $db
+                    }
+                }
+                '--catalog-list' { $result = @(Get-EloQuarantineEntries | ForEach-Object { @{ id = [string]$_.id; originalPath = [string]$_.originalPath; reason = [string]$_.reason; createdUtc = [string]$_.createdUtc } }) }
+                '--catalog-restore' {
+                    $restored = Restore-EloFileFromQuarantine -Id $arg
+                    $result = @{ restored = $restored.restored; from = $restored.from; replacedCopy = $restored.replacedCopy }
+                }
+            }
+            $report.readOnly = ($verb -cnotin @('--catalog-install','--catalog-restore')); $report.action = @{ catalog = $verb.Substring(2); result = $result }
+            $code = 0
+            if ($json) { $output = ConvertTo-Json -InputObject $report -Depth 30 -Compress } else { $output = "ELO Patch Tools catalog`r`n" + (ConvertTo-Json -InputObject $report -Depth 30) }
+            return [pscustomobject]@{ ExitCode = $code; Output = $output }
         }
         $report.keepTemp = $options.ContainsKey('--keep-temp')
         $manualPath = $null

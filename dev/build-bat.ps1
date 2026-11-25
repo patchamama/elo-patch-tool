@@ -6,7 +6,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $batPath = Join-Path $root 'ELO-Patch-Tools.bat'
 $blocks = [ordered]@{
     SCAN_PS = 'scan.ps1'; CLI_PS = 'cli.ps1'; SERVER_PS = 'server.ps1'; UI_HTML = 'ui.html'
-    REPORT_PS = 'report.ps1'; UPDATE_PS = 'update.ps1'; CATALOG_PS = 'catalog.ps1'
+    REPORT_PS = 'report.ps1'; UPDATE_PS = 'update.ps1'; CATALOG_PS = 'catalog.ps1'; VULNDB_PS = 'vulndb.ps1'; VULNDB_JSON = 'vulndb.json'
 }
 $text = [IO.File]::ReadAllText($batPath)
 $text = $text -replace "`r`n", "`n"
@@ -30,9 +30,13 @@ if (-not $text.Contains("CATALOG_PS='catalog.ps1'")) {
     $text = $text.Replace("UPDATE_PS='update.ps1'}", "UPDATE_PS='update.ps1';CATALOG_PS='catalog.ps1'}")
     $text = $text.Replace('|REPORT_PS|UPDATE_PS)$', '|REPORT_PS|UPDATE_PS|CATALOG_PS)$')
 }
+if (-not $text.Contains("VULNDB_PS='vulndb.ps1'")) {
+    $text = $text.Replace("CATALOG_PS='catalog.ps1'}", "CATALOG_PS='catalog.ps1';VULNDB_PS='vulndb.ps1';VULNDB_JSON='vulndb.json'}")
+    $text = $text.Replace('|UPDATE_PS|CATALOG_PS)$', '|UPDATE_PS|CATALOG_PS|VULNDB_PS|VULNDB_JSON)$')
+}
 # Backend loads the update module next to the other trusted modules.
 $reportLine = '. (Join-Path $PSScriptRoot ''report.ps1'')'
-foreach ($module in @('catalog.ps1', 'update.ps1')) {
+foreach ($module in @('vulndb.ps1', 'catalog.ps1', 'update.ps1')) {
     $line = '. (Join-Path $PSScriptRoot ''' + $module + ''')'
     if (-not $text.Contains($line + "`n")) { $text = $text.Replace($reportLine + "`n", $reportLine + "`n" + $line + "`n") }
 }

@@ -76,12 +76,20 @@ function Get-EloReportWindowsResources {
 # Collectors and recovery evidence are trusted backend-only inputs, never HTTP input.
 # Recovery paths require a validated archive matched to the original runtime, and
 # an independently selected isolated destination. No filesystem access occurs here.
+function Get-EloMitigationOptionForReport {
+    $v=Get-EloActiveVulnerabilities | Where-Object { Get-EloVulnAction $_ 'jvm-option' } | Select-Object -First 1
+    if (-not $v) { return '' }
+    return [string](Get-EloVulnAction $v 'jvm-option').option
+}
 function Get-EloReportOptionState {
     param($Value)
     if ($null -eq $Value -or $Value -ceq '') { return 'Absent' }
     if ($Value -isnot [string]) { return 'Unknown' }
-    $minus=[regex]::IsMatch($Value, '(?<!\S)-XX:-UseBASE64Intrinsics(?!\S)')
-    $plus=[regex]::IsMatch($Value, '(?<!\S)-XX:\+UseBASE64Intrinsics(?!\S)')
+    # The mitigation option and the flag it controls come from the catalog (vulndb.json).
+    $option=[string](Get-EloMitigationOptionForReport)
+    $flag=[regex]::Escape([string]((Get-EloVulnAction (Get-EloActiveVulnerabilities | Where-Object { Get-EloVulnAction $_ 'jvm-option' } | Select-Object -First 1) 'jvm-option').conflictPattern))
+    $minus=[regex]::IsMatch($Value, '(?<!\S)'+[regex]::Escape($option)+'(?!\S)')
+    $plus=[regex]::IsMatch($Value, '(?<!\S)-XX:\+'+$flag+'(?!\S)')
     if ($plus) { return 'Conflict' }
     if ($minus) { return 'Present' }
     return 'Absent'
@@ -289,7 +297,7 @@ function ConvertTo-EloTechnicalReportHtml {
                 if ($a.Status -eq 'Proven' -and $a.EvidenceCode -ceq $scope) { $scopeState='Proven' }
                 $detail+='; '+$t[$scope]+': '+$t[$scopeState]
             }
-            if ($a.Status -eq 'Proven') { $detail+='; -XX:-UseBASE64Intrinsics' }
+            if ($a.Status -eq 'Proven') { $detail+='; '+(Get-EloMitigationOptionForReport) }
         }
         $lines.Add('<li>'+$t[$a.Kind]+': '+$t[$a.Status]+$detail+'</li>')
     }
@@ -321,7 +329,9 @@ function ConvertTo-EloTechnicalReportHtml {
     }
     $lines.Add('<h2>'+$t.Sources+'</h2><ul>')
     $lines.Add('<li>'+$t.Checked+': 2026-11-23. '+$t.Changes+'</li>')
-    foreach ($source in @(@('OpenJDK 2026-11-17','https://openjdk.org/groups/vulnerability/advisories/2026-11-17','Supplied'),@('Oracle CVE-2026-114938','https://linux.oracle.com/cve/CVE-2026-114938.html','Fetched'),@('Adoptium Temurin November 2026 CSPU','https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/','Fetched'))) {
+    $sources=@()
+    foreach ($v in (Get-EloActiveVulnerabilities)) { foreach ($adv in @($v.advisories)) { $label=[string]$adv.reportLabel; if (-not $label) { $label=[string]$adv.id }; $prov='Supplied'; if ([string]$adv.provenance -ceq 'Fetched') { $prov='Fetched' }; $sources+=,@($label,[string]$adv.url,$prov) } }
+    foreach ($source in $sources) {
         $lines.Add('<li><a href="'+$source[1]+'">'+$source[0]+'</a> - '+$t[$source[2]]+'</li>')
     }
     $lines.Add('</ul></body></html>')

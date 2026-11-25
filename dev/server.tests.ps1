@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot\vulndb.ps1"
 . "$PSScriptRoot\update.ps1"
 . "$PSScriptRoot\catalog.ps1"
 . "$PSScriptRoot\server.ps1"
@@ -149,7 +150,7 @@ try {
 
 # Trusted in-memory adapters: never touch real environment or installed Java.
 $script:Fake=@{Record=@{Exists=$true;Value='-Xmx1g -Dname="hello world"';Kind='ExpandString'};Admin=$true;Hash='original';Writes=0;Probes=0;FailProbe=0;FailWrite=$false;FailRollback=$false;Now=[DateTime]::UtcNow}
-$s.Adapters=@{ Log={ param($m) $script:LogLines.Add([string]$m) };
+$s.Adapters=@{ Log={ param($m) $script:LogLines.Add([string]$m) }; ScanRules={ ,@(Get-EloScanRules) };
     Admin={ $script:Fake.Admin }; Clock={ $script:Fake.Now }
     ReadOptions={ @{Exists=$script:Fake.Record.Exists;Value=$script:Fake.Record.Value;Kind=$script:Fake.Record.Kind} }
     WriteOptions={ param($Record)
@@ -367,6 +368,9 @@ try {
     Assert ($list[0].risk -ceq 'vulnerable' -and $list[0].vendor -ceq 'Temurin' -and $list[1].risk -ceq 'unknown' -and $list[0].created -ceq '2026-01-01 12:00' -and $list[0].version -ceq '17.0.2+8' -and $list[0].runtime -ceq (Join-Path $bkDir 'java') -and $list[1].version -ceq '21.0.1') 'newest first, version read from the ZIP, runtime derived from the file name'
     $s.BackupsCache=$null; $payload=Invoke-EloApi $s (Request GET '/api/results')
     Assert (@($payload.backups).Count -eq 2 -and -not ($payload | ConvertTo-Json -Depth 6).Contains('"Root"')) 'the results payload carries the backups (no internal fields)'
+    # The catalog information for the UI is a flat array (never nested) with severity, problem, solution and action ids.
+    $vulnJson = $payload | ConvertTo-Json -Depth 8 -Compress
+    Assert ($vulnJson -cnotmatch '"vulnerabilities":\[\[' -and @($payload.vulnerabilities).Count -eq 1 -and $payload.vulnerabilities[0].id -ceq 'CVE-2026-114938' -and $payload.vulnerabilities[0].severity -ceq 'high' -and $payload.vulnerabilities[0].problem.de -and @($payload.vulnerabilities[0].actions).Count -eq 3) 'results carry the catalog vulnerability info as a flat array'    $id=@($payload.backups)[0].id
     $id=@($payload.backups)[0].id
     $s.Adapters.Identity={ param($Path) @{Vendor='Eclipse Adoptium';Branch='17';Architecture='x64';ImageType='jdk';Version='17.0.2+8'} }
     $rp=Invoke-EloApi $s (Request POST /api/preview ('{"actionId":"restore-backup","resultId":"'+$id+'"}'))
@@ -416,7 +420,8 @@ Assert ($s.Results.Count -eq 1 -and $s.Results[0].status -ceq 'patched') 'exact 
 Assert ($s.Results[0].path -ceq $fixture.Location) 'result path identifies actual java.exe'
 $security=(Invoke-EloApi $s (Request -Path /api/results)).security
 Assert ($security.verifiedOn -ceq '2026-11-23' -and $security.advisories.Count -eq 3) 'parent-verified advisory date and complete metadata'
-Assert ($security.advisories[0].title.en.Contains('user-supplied text') -and $security.advisories[0].title.en.Contains('not fetched')) 'OpenJDK provenance is not presented as a direct fetch'
+$openjdk=@($security.advisories | Where-Object { $_.id -ceq 'openjdk-2026-11-17' })[0]
+Assert ($openjdk.title.en.Contains('user-supplied text') -and $openjdk.title.en.Contains('not fetched')) 'OpenJDK provenance is not presented as a direct fetch'
 Assert ($security.advisories[1].url -ceq 'https://linux.oracle.com/cve/CVE-2026-114938.html' -and $security.advisories[1].title.en.Contains('parent fetched directly')) 'Oracle direct-fetch provenance and exact URL'
 Assert ($s.Results[0].classificationEvidence.en.Contains('no ELO compatibility') -and $s.Results[0].classificationEvidence.en.Contains('64-bit')) 'scope limitations and original architecture evidence preserved'
 foreach ($advisory in $security.advisories) {

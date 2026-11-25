@@ -1,0 +1,7 @@
+{
+  "provider": "ollama",
+  "model": "llama3.1",
+  "baseUrl": "http://127.0.0.1:11434",
+  "apiKeyEnv": null,
+  "note": "Copy to ai.json (git-ignored). openai: provider \"openai\", apiKeyEnv \"OPENAI_API_KEY\". anthropic: provider \"anthropic\", apiKeyEnv \"ANTHROPIC_API_KEY\". The key itself is NEVER written to a file; only the NAME of the environment variable is."
+}

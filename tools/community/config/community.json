@@ -1,0 +1,25 @@
+{
+  "board": {
+    "name": "ELO Community knowledge board KBB103",
+    "url": "https://community.elo.com/community/plugin/de.elo.ix.plugin.proxy/wf/apps/app/sol.knowledge.apps.KnowledgeBoard/#/?board=KBB103&page=1",
+    "allowedHost": "community.elo.com"
+  },
+  "login": {
+    "note": "Observed on the sign-in page (2026-11): form#eloLoginForm with input[name=username], input[name=password] and a button labelled 'Anmelden'. Credentials come from ELO_COMMUNITY_USER / ELO_COMMUNITY_PASSWORD, never from this file.",
+    "form": "#eloLoginForm",
+    "username": "input[name=username]",
+    "password": "input[name=password]",
+    "submit": "#eloLoginForm button, #eloLoginForm input[type=submit]"
+  },
+  "list": {
+    "note": "The board is an AngularJS single-page app. These selectors are best-effort defaults that could not be verified without an account; adjust them here if the board markup differs.",
+    "item": "a[href*='#/'][href*='id='], a[href*='article'], .sol-knowledge-board-list a, .knowledge-board-entry a",
+    "dateAttr": "time[datetime]",
+    "waitMs": 4000
+  },
+  "article": {
+    "body": "main, .article, .sol-knowledge-article, body",
+    "waitMs": 3000
+  },
+  "limits": { "maxArticlesHard": 200, "maxCharsPerArticle": 12000, "politenessMs": 800 }
+}

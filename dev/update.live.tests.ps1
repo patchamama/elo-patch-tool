@@ -7,7 +7,7 @@
 # It never touches an installed runtime or a service. The scratch directory is deleted at the end.
 $ErrorActionPreference = 'Stop'
 if ($env:ELO_LIVE_UPDATE_TEST -ne '1') { Write-Output 'SKIP: set ELO_LIVE_UPDATE_TEST=1 to run the live update test'; return }
-. "$PSScriptRoot\update.ps1"; . "$PSScriptRoot\catalog.ps1"; . "$PSScriptRoot\scan.ps1"; . "$PSScriptRoot\server.ps1"; . "$PSScriptRoot\report.ps1"
+. "$PSScriptRoot\vulndb.ps1"; . "$PSScriptRoot\update.ps1"; . "$PSScriptRoot\catalog.ps1"; . "$PSScriptRoot\scan.ps1"; . "$PSScriptRoot\server.ps1"; . "$PSScriptRoot\report.ps1"
 function Assert-Live($Condition, $Message) { if (-not $Condition) { throw "ASSERT: $Message" }; Write-Host "PASS: $Message" }
 $work = Join-Path ([IO.Path]::GetTempPath()) ('elo-live-' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory $work

@@ -131,6 +131,7 @@ exit 23
     # No discovery, admin check, registry write or ELO access can occur here.
     $cliPayload = @'
 $cliArguments = @($args)
+. (Join-Path (Split-Path -Parent $env:ELO_LAUNCHER_TEST_CLI) 'vulndb.ps1')
 . $env:ELO_LAUNCHER_TEST_CLI
 $script:applied = $false
 $scanner = { param($ManualPath) [pscustomobject]@{ Results = @([pscustomobject]@{ Status = 'PotentiallyVulnerable' }); Cancelled = $false } }

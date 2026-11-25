@@ -2,9 +2,27 @@
 # This does not modify ELO/configuration, download files, or claim exploitability.
 # Launching an installed java.exe executes local code; use only on trusted installations.
 function Get-EloJavaClassification {
-    param([AllowEmptyString()][string]$Evidence)
-    $source = 'https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/'
-    $fixed = @('17.0.21.1+2', '21.0.13.1+2', '25.0.5.1+2', '27.0.1.1+4')
+    # Classifies one java -version evidence text against the catalog rules (vulndb.json): one finding per
+    # rule, the overall Status is the worst one (PotentiallyVulnerable > Inconclusive > KnownFixed).
+    param([AllowEmptyString()][string]$Evidence, $Rules = $null)
+    if ($null -eq $Rules -and (Get-Command Get-EloScanRules -CommandType Function -ErrorAction SilentlyContinue)) { $Rules = Get-EloScanRules }
+    $usable = @($Rules | Where-Object { $_ -and [string]$_.Parser -ceq 'temurin-build' -and [string]$_.Vendor -ceq 'Temurin' })
+    if ($usable.Count -eq 0) { $usable = @(@{ Id = ''; Severity = ''; Fixed = @(); Source = '' }) }
+    $findings = @(); $first = $null
+    foreach ($rule in $usable) {
+        $item = Get-EloJavaClassificationForRule -Evidence $Evidence -Fixed @($rule.Fixed) -Source ([string]$rule.Source)
+        if ($null -eq $first) { $first = $item }
+        if ($rule.Id) { $findings += [pscustomobject]@{ Id = [string]$rule.Id; Severity = [string]$rule.Severity; Status = $item.Status; Source = $item.Source; Reason = $item.Reason } }
+        $rank = @{ PotentiallyVulnerable = 3; Inconclusive = 2; KnownFixed = 1 }
+        if ($rank[$item.Status] -gt $rank[$first.Status]) { $first = $item }
+    }
+    $first | Add-Member -NotePropertyName Findings -NotePropertyValue $findings -Force
+    return $first
+}
+function Get-EloJavaClassificationForRule {
+    param([AllowEmptyString()][string]$Evidence, [string[]]$Fixed = @(), [string]$Source = '')
+    $source = $Source
+    $fixed = @($Fixed)
     $vendor = 'Unknown'
     if ($Evidence -match '(?i)\bTemurin\b') { $vendor = 'Temurin' }
     # Include VM build tokens as well as runtime tokens: conflicting versions must
@@ -88,16 +106,19 @@ function Invoke-EloJavaVersion {
     param(
         [Parameter(Mandatory = $true)][string]$JavaPath,
         [ValidateRange(1, 120)][int]$TimeoutSeconds = 10,
-        [scriptblock]$ShouldCancel = { $false }
+        [scriptblock]$ShouldCancel = { $false },
+        [string[]]$Arguments = @('-version')
     )
     $result = [ordered]@{ Succeeded = $false; Cancelled = $false; Evidence = ''; Error = $null; ExitCode = $null }
+    # Only plain java options from the catalog: never a path, a pipe or a shell construct.
+    foreach ($a in @($Arguments)) { if ($a -cnotmatch '^-[A-Za-z0-9:+=_.\-]{1,64}$') { $result.Error = 'Probe arguments are not plain java options.'; return [pscustomobject]$result } }
     $process = $null
     try {
         if (& $ShouldCancel) { $result.Cancelled = $true; return [pscustomobject]$result }
         if (-not [IO.File]::Exists($JavaPath)) { throw 'Java executable does not exist.' }
         $info = New-Object System.Diagnostics.ProcessStartInfo
         $info.FileName = $JavaPath
-        $info.Arguments = '-version'
+        $info.Arguments = (@($Arguments) -join ' ')
         $info.UseShellExecute = $false
         $info.CreateNoWindow = $true
         $info.RedirectStandardOutput = $true
@@ -296,7 +317,9 @@ function Invoke-EloJavaScan {
         [scriptblock]$ShouldCancel = { $false },
         [scriptblock]$GetChildren = { param($Path) Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop },
         [scriptblock]$IsReparsePoint = { param($Path) ((Get-Item -LiteralPath $Path -Force -ErrorAction Stop).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 },
-        [scriptblock]$ProbeJava = { param($Path, $Cancel) Invoke-EloJavaVersion -JavaPath $Path -ShouldCancel $Cancel }
+        [scriptblock]$ProbeJava = { param($Path, $Cancel) Invoke-EloJavaVersion -JavaPath $Path -ShouldCancel $Cancel },
+        [scriptblock]$ProbeExtra = { param($Path, $ProbeArgs, $Timeout, $Cancel) Invoke-EloJavaVersion -JavaPath $Path -Arguments $ProbeArgs -TimeoutSeconds $Timeout -ShouldCancel $Cancel },
+        $Rules = $null
     )
     $arguments = @{ ManualPath = $ManualPath; MaxDepth = $MaxDepth; MaxEntries = $MaxEntries; ShouldCancel = $ShouldCancel; GetChildren = $GetChildren; IsReparsePoint = $IsReparsePoint }
     if ($PSBoundParameters.ContainsKey('DriveRoots')) { $arguments.DriveRoots = $DriveRoots }
@@ -308,8 +331,33 @@ function Invoke-EloJavaScan {
         if ($cancelled -or (& $ShouldCancel)) { $cancelled = $true; break }
         try { $probe = & $ProbeJava $location $ShouldCancel }
         catch { $probe = [pscustomobject]@{ Succeeded = $false; Cancelled = $false; Evidence = ''; Error = $_.Exception.Message; ExitCode = $null } }
-        $classification = Get-EloJavaClassification -Evidence $probe.Evidence
-        if (-not $probe.Succeeded) { $classification.Status = 'Inconclusive'; $classification.Reason = 'Java version probe did not complete successfully; exploitability is not determined.' }
+        $classification = Get-EloJavaClassification -Evidence $probe.Evidence -Rules $Rules
+        # Catalog entries of method probe-expect run their own java probe and match the output with expect patterns.
+        $hadVersionRules = (@($classification.Findings).Count -gt 0); $probeStatuses = @()
+        foreach ($rule in @($Rules | Where-Object { $_ -and [string]$_.Method -ceq 'probe-expect' })) {
+            if (& $ShouldCancel) { break }
+            $extra = $null
+            try { $extra = & $ProbeExtra $location @($rule.ProbeArgs) ([int]$rule.TimeoutSec) $ShouldCancel } catch { $extra = $null }
+            $fs = 'Inconclusive'; $fr = 'The catalog probe did not complete; the vulnerability is not determined.'
+            if ($extra -and $extra.Succeeded) {
+                try {
+                    $re = New-Object Text.RegularExpressions.Regex([string]$rule.VulnerablePattern, [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2))
+                    if ($re.IsMatch([string]$extra.Evidence)) { $fs = 'PotentiallyVulnerable'; $fr = 'The catalog probe output matches the vulnerable pattern.' }
+                    elseif ($rule.SafePattern -and (New-Object Text.RegularExpressions.Regex([string]$rule.SafePattern, [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2))).IsMatch([string]$extra.Evidence)) { $fs = 'KnownFixed'; $fr = 'The catalog probe output matches the safe pattern.' }
+                    else { $fr = 'The catalog probe output matches neither the vulnerable nor the safe pattern.' }
+                } catch { $fr = 'The catalog pattern could not be evaluated.' }
+            }
+            $classification.Findings = @($classification.Findings) + [pscustomobject]@{ Id = [string]$rule.Id; Severity = [string]$rule.Severity; Status = $fs; Source = [string]$rule.Source; Reason = $fr }
+            $rank = @{ PotentiallyVulnerable = 3; Inconclusive = 2; KnownFixed = 1 }
+            $probeStatuses += $fs
+            if ($hadVersionRules) {
+                if ($rank[$fs] -gt $rank[$classification.Status] -or ($fs -ceq 'Inconclusive' -and $classification.Status -ceq 'KnownFixed')) { $classification.Status = $fs; $classification.Reason = $fr; $classification.Source = [string]$rule.Source }
+            }
+        }
+        if (-not $hadVersionRules -and $probeStatuses.Count -gt 0) {
+            $worst = 'KnownFixed'; foreach ($s in $probeStatuses) { if ($rank[$s] -gt $rank[$worst]) { $worst = $s } }
+            $classification.Status = $worst; $last = @($classification.Findings)[-1]; $classification.Reason = $last.Reason; $classification.Source = $last.Source
+        }        if (-not $probe.Succeeded) { $classification.Status = 'Inconclusive'; $classification.Reason = 'Java version probe did not complete successfully; exploitability is not determined.' }
         $runtimeRoot = Split-Path -Path $location -Parent
         $rootReason = 'Executable directory; runtime layout is not verified.'
         if ((Split-Path -Path $runtimeRoot -Leaf) -ieq 'bin') {
@@ -321,7 +369,7 @@ function Invoke-EloJavaScan {
             EloCandidateRoot = $candidate.EloCandidateRoot; EloPathRationale = $candidate.EloPathRationale
             FullVersion = $classification.FullVersion; Architecture = $classification.Architecture
             Status = $classification.Status; Vendor = $classification.Vendor; Build = $classification.Build
-            Evidence = $probe.Evidence; Error = $probe.Error; ExitCode = $probe.ExitCode; Reason = $classification.Reason; Source = $classification.Source
+            Evidence = $probe.Evidence; Error = $probe.Error; ExitCode = $probe.ExitCode; Reason = $classification.Reason; Source = $classification.Source; Findings = @($classification.Findings)
         })
         if ($probe.Cancelled) { $cancelled = $true; break }
     }

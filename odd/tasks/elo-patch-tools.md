@@ -46,3 +46,27 @@ T9 [S14] Remaining limits: drive-root runtimes, opt-in service stop/restart, aut
 L10: Mejora el frontend y hazlo más moderno poniendo iconos minimalistas, un wizard por pasos y estructurando mejor la experiencia IX/IU y el frontend se queda en "Progress unavailable" y no continua así que hay problemas ahí, así que testealo que funcione. Mejora el soporte de las diferentes versiones de de java con azul zulu usando siempre la última version de cada branch, 21, 17,... y corrije todos los límites que quedan
 L11: Diagnosis (real Chrome + real server): scan completes, but the progress bar stays indeterminate with "Progress unavailable" after completion and nothing guides the user to the next step; results table is unreadable.
 L12: Root causes found and fixed while testing for real: Azul API reports a rounded size (exact Content-Length check rejected every Zulu download); PowerShell 5.1 does not unroll JSON arrays (Zulu catalog returned nothing); 'Progress unavailable' was a label that never cleared after the scan (UX, not a hang); ELO version.txt is 90 KB (size cap rejected it).
+
+# Feature: vulnerability catalog as JSON + AI-assisted community analysis (feature id: vulndb-json)
+Branch: main (direct, user-requested push); delivery: work-unit commits; runner: dev/*.tests.ps1 (PS 5.1; ui.tests under pwsh 7), Node tests for tools/community.
+
+## Specs (vulndb-json)
+V1. "hagas un refactoring de la app de forma que sea más genérica y que en un json esté toda la información, comandos del terminal para determinar vulnerabilidades, posibles respuestas para detectar vulnerabilidades (expect), mensaje de problema de privacidad, acciones para solucionarlo y reporte final, de forma que en el futuro se puedan agregar más acciones ante nuevas vulnerabilidades de forma sencilla."
+V2. "Revisa todo lo implementado hasta el momento y adapta todo para usar el json de configuración."
+V3. "si se define en la app el uso de una IA como openai, anthropic, ollama, que sea capaz de leer y analizar articulos de reportes de vulnerabilidades del canal de elo community: https://community.elo.com/community/plugin/de.elo.ix.plugin.proxy/wf/apps/app/sol.knowledge.apps.KnowledgeBoard/#/?board=KBB103&page=1"
+V4. "que de estos articulos se analice el nivel de la vulnerabilidad (alto, medio, bajo) y si se reportan soluciones y que ayude a generar una entrada en el archivo de acciones de json con reporte para solucionar el problema de la vulnerabilidad y también para testearlo generando quizás mocks o alguna forma de que parezca que la vulnerabilidad está ahí y que ayude a simularlo"
+V5. "para acceder a elo community se necesitan datos de acceso como un usuario y contraseña y con playwright y puedes ver como acceder y que se ponga también un límite de artículos a analizar (por ejemplo, último mes, o últimos x meses, años, días y que tras el análisis reporte soluciones)."
+V6. "Toda esa información del json y url a elo community (sin contraseñas) debe de compartirse en gh."
+V7. "Siempre se harían copia de seguridad de los archivos que se modificarán y opción de restaurar, y estos archivos se deben de copiar a alguna carpeta de cuarentena."
+
+## Tasks (vulndb-json)
+T12 [V1,V2,V6] dev/vulndb.json + dev/vulndb.ps1 (loader, schema validation, expect engine, simulation) + tests; route: inline; DONE (vulndb.tests.ps1 56 assertions).
+T13 [V1,V2] Adapt scan, server, report, CLI and UI to read rules, messages, actions and sources from the JSON; route: inline; DONE (scan rules incl. probe-expect, server metadata/mitigation/restore messages, report sources, CLI security block, UI alert/severity from API). Known limit: static UI help prose still describes the built-in CVE.
+T14 [V7] Quarantine + backup + restore for every file the tool modifies (catalog installs/drafts); route: inline; DONE (Backup/Restore-EloFileFromQuarantine, Install-EloVulnDb, CLI --catalog-*; drafts are written to the quarantine folder).
+T15 [V3,V4,V5,V6] tools/community: Playwright fetch with credentials from env only, date/count limits, AI providers (OpenAI, Anthropic, Ollama), draft JSON entry with simulation mock, quarantine of drafts; route: inline; DONE (23 Node tests, drafts validated by the app). NOT verified: board markup after sign-in and real AI answers (no account/keys).
+T16 [V1-V7] Docs, rebuild BAT, full suites, commit + push; route: inline; DONE.
+
+## Log (vulndb-json)
+L1 2026-11-25 user: "commit + push origin main. Me gustaría que hagas un refactoring ..." (full text in V1-V7).
+L2 2026-11-25 decisions: AI/community pipeline is an OPTIONAL Node tool (Playwright cannot run inside the PowerShell BAT); it writes DRAFTS only (never applies); credentials/API keys only from environment variables, never in JSON/GH; JSON commands are argument arrays for java.exe only (no shell, validated) so a draft cannot run arbitrary commands.
+L3 2026-11-25 observed: sign-in page of the community is form#eloLoginForm (username/password, button Anmelden) behind /plugin/auth2/sign-in; the board is an AngularJS SPA. Tool quirk: Bash heredocs lose backslashes - write files with the Write/Edit tools.

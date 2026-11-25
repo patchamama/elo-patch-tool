@@ -1,3 +1,7 @@
 dev/e2e/node_modules/
 dev/e2e/package-lock.json
 dev/update-live-fixtures/
+tools/community/node_modules/
+tools/community/package-lock.json
+tools/community/config/ai.json
+tools/community/drafts/

@@ -1,5 +1,6 @@
 # Deterministic Windows PowerShell 5.1 tests: no real scanner or machine writes.
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot\vulndb.ps1"
 . "$PSScriptRoot\cli.ps1"
 $script:checks = 0
 function Assert($Condition, $Message) {
@@ -151,6 +152,7 @@ $r = Invoke-InteractiveTestCli -Arguments $modify -Scanner $scanner -Actions $or
 Assert ($r.ExitCode -eq 0) 'separate confirmation allows action'
 # Exercise the real callable backend with ALL machine adapters replaced by memory.
 # Dot-sourcing server.ps1 defines functions only; no host/process/registry is started.
+. "$PSScriptRoot\vulndb.ps1"
 . "$PSScriptRoot\server.ps1"
 . "$PSScriptRoot\scan.ps1"
 Assert ((Get-EloCliReadme).Contains('Technical HTML report (web mode)') -and (Get-EloCliReadme).Contains('ELO version remains unknown')) 'help documents sanitized report and unknown ELO API'
@@ -197,4 +199,54 @@ Assert ($fixture.State.Options.Value -ceq '  -Xmx512m  ') 'rollback restores ori
 $fixture = New-TestBackendSession; $fixture.Session.RecoveryRequired=$true
 $r = Invoke-EloCli -Arguments $modify -Scanner $backendScanner -Actions (New-EloCliBackendAdapters $fixture.Session)
 Assert ($r.ExitCode -ne 0 -and $fixture.State.Writes -eq 0) 'pending recovery rejects bridge action'
+# ---- catalog maintenance commands (temp ProgramData; nothing machine-wide is touched)
+$catalogFile = Join-Path $PSScriptRoot 'vulndb.json'
+$admin = @{ IsAdmin = { $true } }
+$r = Invoke-EloCli -Arguments @('--cli','--catalog-validate',$catalogFile,'--json') -Actions $admin
+$j = $r.Output | ConvertFrom-Json
+Assert ($r.ExitCode -eq 0 -and $j.action.result.valid -eq $true -and $j.action.result.vulnerabilities[0].id -ceq 'CVE-2026-114938' -and $j.readOnly -eq $true) 'catalog validate is read-only and lists the entries'
+$r = Invoke-EloCli -Arguments @('--cli','--catalog-simulate','CVE-2026-114938','--json') -Actions $admin
+$j = $r.Output | ConvertFrom-Json
+Assert ($r.ExitCode -eq 0 -and $j.action.result.Passed -eq $true -and $j.action.result.Status -ceq 'PotentiallyVulnerable') 'catalog simulate reproduces the vulnerable verdict'
+foreach ($bad in @(@('--catalog-simulate','a b'),@('--catalog-simulate','CVE-9999-0000'),@('--catalog-validate','relative.json'),@('--catalog-validate','C:\no-such-file.json'),@('--catalog-install',$catalogFile),@('--catalog-restore','x'),@('--catalog-list','--confirm-admin'),@('--catalog-validate',$catalogFile,'--scan'),@('--catalog-validate',$catalogFile,'--target','0'),@('--catalog-validate'))) {
+    $r = Invoke-EloCli -Arguments (@('--cli') + $bad + @('--json')) -Actions $admin
+    Assert ($r.ExitCode -ne 0) ('catalog command refused: ' + ($bad -join ' '))
+}
+# A draft file (e.g. produced by the AI helper) is simulated entry by entry without being installed.
+$draftDb = [IO.File]::ReadAllText($catalogFile) | ConvertFrom-Json
+$draftEntry = $draftDb.vulnerabilities[0] | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+$draftEntry.id = 'ELO-DRAFT-FLAG'; $draftEntry.status = 'draft'; $draftEntry.severity = 'medium'
+$draftEntry.detection = [pscustomobject]@{ method = 'probe-expect'; probes = @([pscustomobject]@{ id = 'flags'; args = @('-XX:+PrintFlagsFinal','-version'); timeoutSec = 10; expect = @() }); rule = [pscustomobject]@{ probe = 'flags'; vulnerablePattern = '(?m)^\s*bool\s+TestFlag\s*=\s*true' } }
+$draftEntry.simulation = [pscustomobject]@{ description = 'flag on'; probes = [pscustomobject]@{ flags = '     bool TestFlag = true {product}' }; expected = [pscustomobject]@{ status = 'PotentiallyVulnerable' } }
+$draftDb.vulnerabilities = @($draftDb.vulnerabilities[0], $draftEntry)
+$draftFile = Join-Path ([IO.Path]::GetTempPath()) ('elo-cli-draft-' + [guid]::NewGuid().ToString('N') + '.json')
+try {
+    [IO.File]::WriteAllText($draftFile, ($draftDb | ConvertTo-Json -Depth 20))
+    $r = Invoke-EloCli -Arguments @('--cli','--catalog-simulate',$draftFile,'--json') -Actions $admin
+    $j = $r.Output | ConvertFrom-Json
+    $results = @($j.action.result)
+    Assert ($r.ExitCode -eq 0 -and $results.Count -eq 2 -and $results[0].passed -eq $true -and $results[1].id -ceq 'ELO-DRAFT-FLAG' -and $results[1].status -ceq 'draft' -and $results[1].passed -eq $true -and $results[1].detected -ceq 'PotentiallyVulnerable') 'a draft catalog file is simulated entry by entry (probe-expect and version-table)'
+} finally { Remove-Item -LiteralPath $draftFile -Force -ErrorAction SilentlyContinue }$r = Invoke-EloCli -Arguments @('--cli','--catalog-install',$catalogFile,'--json') -Actions @{ IsAdmin = { $false } }
+Assert ($r.ExitCode -ne 0) 'catalog install without --confirm-admin is refused'
+$tmpPd = Join-Path ([IO.Path]::GetTempPath()) ('elo-cli-pd-' + [guid]::NewGuid().ToString('N'))
+$savedPd = $env:ProgramData
+try {
+    $env:ProgramData = $tmpPd
+    $r = Invoke-EloCli -Arguments @('--cli','--catalog-install',$catalogFile,'--confirm-admin','--json') -Actions @{ IsAdmin = { $false } }
+    Assert ($r.ExitCode -ne 0 -and -not (Test-Path (Join-Path $tmpPd 'ELO-Patch-Tools\vulndb.json'))) 'catalog install needs a real administrator'
+    $r = Invoke-EloCli -Arguments @('--cli','--catalog-install',$catalogFile,'--confirm-admin','--json') -Actions $admin
+    Assert ($r.ExitCode -eq 0 -and (Test-Path (Join-Path $tmpPd 'ELO-Patch-Tools\vulndb.json'))) 'catalog install copies a validated catalog'
+    $r = Invoke-EloCli -Arguments @('--cli','--catalog-install',$catalogFile,'--confirm-admin','--json') -Actions $admin
+    $j = $r.Output | ConvertFrom-Json
+    Assert ($r.ExitCode -eq 0 -and $j.action.result.quarantinedPrevious) 'a second install quarantines the previous catalog'
+    $r = Invoke-EloCli -Arguments @('--cli','--catalog-list','--json') -Actions $admin
+    $j = $r.Output | ConvertFrom-Json
+    Assert ($r.ExitCode -eq 0 -and @($j.action.result).Count -eq 1 -and $j.readOnly -eq $true) 'quarantine listing shows the quarantined copy'
+    $r = Invoke-EloCli -Arguments @('--cli','--catalog-restore',[string]@($j.action.result)[0].id,'--confirm-admin','--json') -Actions $admin
+    Assert ($r.ExitCode -eq 0) 'quarantined catalog can be restored'
+} finally {
+    $env:ProgramData = $savedPd
+    $full = [IO.Path]::GetFullPath($tmpPd)
+    if ($full.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()), [StringComparison]::OrdinalIgnoreCase) -and (Split-Path -Leaf $full) -like 'elo-cli-pd-*') { Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue }
+}
 Write-Output "PASS: $script:checks CLI assertions"

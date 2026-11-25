@@ -20,7 +20,7 @@
 
 ## Contents
 
-[What it does](#what-it-does) · [Quick start](#quick-start) · [Restore a Java backup](#restore-a-java-backup) · [Safety](#safety-and-limitations) · [Requirements](#requirements) · [Development](#development) · [Security information](#security-information)
+[What it does](#what-it-does) · [Quick start](#quick-start) · [Restore a Java backup](#restore-a-java-backup) · [Vulnerability catalog](#the-vulnerability-catalog-devvulndbjson) · [Safety](#safety-and-limitations) · [Requirements](#requirements) · [Development](#development) · [Security information](#security-information)
 
 ## What it does
 
@@ -106,6 +106,47 @@ move "C:\ELO\java.restore\tree" "C:\ELO\java"
 
 The ZIP holds `manifest.json` (every file, size, SHA256, permissions) and a `tree\` folder with the runtime. The CLI has no restore command.
 
+## The vulnerability catalog (`dev/vulndb.json`)
+
+Everything the tool knows about a vulnerability lives in **one JSON file** that is shared in this repository (it never contains passwords or API keys). The scan, the web UI, the CLI, the restore warnings and the technical report all read it, so supporting a new vulnerability is an edit of the JSON, not of the code.
+
+| Section of an entry | What it holds |
+| --- | --- |
+| `id`, `severity` (`high` / `medium` / `low`), `status` (`active` / `draft` / `retired`) | Identity and level. A `draft` is validated but never used by the scan. |
+| `advisories` | Links shown in the UI, the report and `--help` (https only), with their provenance. |
+| `detection.probes` | The `java.exe` argument lists to run (`-version`, `-XX:+PrintFlagsFinal -version`, ...) and the **expect** patterns that mean something. Never a shell, never a path. |
+| `detection.method` | `version-table`: fixed builds per vendor (Temurin build strings). `probe-expect`: a probe plus `vulnerablePattern` / `safePattern`. |
+| `problem`, `solution` | The red alert of the UI (EN/DE), with `{n}` and `{list}` placeholders. |
+| `actions` | `runtime-update`, `jvm-option` (one `-XX:` flag in `JAVA_TOOL_OPTIONS`, with a `verify` probe) and `restore-backup`. Only these three action types exist, so an entry can never run arbitrary commands. |
+| `messages`, `report` | Texts of the restore warnings, the backend log and the final report. |
+| `simulation` | Canned probe output that makes the vulnerability look present, so detection, alert, mitigation and report can be tested without a vulnerable Java. |
+
+```powershell
+# Validate a catalog (read-only), replay its simulations, install it, undo it
+ELO-Patch-Tools.bat --cli --catalog-validate  C:\drafts\draft-vulndb.json
+ELO-Patch-Tools.bat --cli --catalog-simulate  C:\drafts\draft-vulndb.json      # every entry, drafts included
+ELO-Patch-Tools.bat --cli --catalog-simulate  CVE-2026-114938                  # one entry of the active catalog
+ELO-Patch-Tools.bat --cli --catalog-install   C:\drafts\draft-vulndb.json --confirm-admin
+ELO-Patch-Tools.bat --cli --catalog-list                                       # quarantined copies
+ELO-Patch-Tools.bat --cli --catalog-restore   20261125101500123-vulndb.json --confirm-admin
+```
+
+**Quarantine.** Before the tool replaces a file it copies the old one to `%ProgramData%\ELO-Patch-Tools\quarantine\<timestamp>-<name>\` with a manifest (original path, SHA256, reason). A restore verifies the hash and quarantines whatever it replaces, so a restore can itself be undone. An installed catalog (`%ProgramData%\ELO-Patch-Tools\vulndb.json`) wins over the packaged one; a broken installed file falls back to the packaged catalog instead of disabling detection.
+
+## AI-assisted drafts from the ELO Community (`tools/community`)
+
+An **optional** Node.js helper reads vulnerability articles from the [ELO Community board KBB103](https://community.elo.com/community/plugin/de.elo.ix.plugin.proxy/wf/apps/app/sol.knowledge.apps.KnowledgeBoard/#/?board=KBB103&page=1) with Playwright and asks an AI (OpenAI, Anthropic or a local Ollama) to rate the vulnerability (high / medium / low), report the solutions the article names and **draft** a catalog entry together with a simulation mock. It only writes drafts into the quarantine folder; nothing is installed or run automatically.
+
+```powershell
+npm install --prefix tools/community
+$env:ELO_COMMUNITY_USER = 'you@example.org'; $env:ELO_COMMUNITY_PASSWORD = '...'   # environment only, never stored
+$env:ANTHROPIC_API_KEY = '...'                                                      # or OPENAI_API_KEY; Ollama needs none
+node tools/community/bin/elo-community.js run --since 3m --max 20 --provider anthropic --model claude-sonnet-5-5
+node tools/community/bin/elo-community.js check      # validate + simulate the draft with the app
+```
+
+Limits: `--since 30d|8w|3m|1y|YYYY-MM-DD` and `--max N`. Details, safety rules and the unverified parts are in [`tools/community/README.md`](tools/community/README.md).
+
 ## Safety and limitations
 
 - **Services.** A runtime in use cannot be replaced. The preview lists the Windows services that use it (found through loaded modules and process ancestry, e.g. ELO's Procrun services); confirming stops exactly those right before the swap and starts them again afterwards, also after a failure. Any other process using the runtime blocks the update; the tool never kills processes.
@@ -115,7 +156,8 @@ The ZIP holds `manifest.json` (every file, size, SHA256, permissions) and a `tre
 - Runtimes directly below a drive root (e.g. `C:\java`) are supported.
 - The mitigation changes machine-wide `JAVA_TOOL_OPTIONS` and can affect other Java applications; running processes are not protected until restarted. Save the previous value and type independently: its rollback backup is session-only.
 - The ELO version in the report is read from the installed Indexserver files (`servers\*\webapps\ix-*\version.txt`); no API, no credentials. Unknown stays unknown.
-- Vulnerability *classification* is conservative and limited to identifiable Temurin builds; other vendors stay inconclusive, but the update still offers the newest release of their branch.
+- Vulnerability *classification* is conservative: the catalog decides what is vulnerable, and version tables are supported for identifiable Temurin builds (other vendors stay inconclusive unless an entry uses a `probe-expect` rule), but the update still offers the newest release of their branch.
+- The static help texts of the UI (manual instructions, action descriptions) still describe the built-in vulnerability; the alert, severity, problem, solution, advisories, mitigation, restore warnings, report sources, CLI security block and scan rules come from the catalog.
 - Raw JSON exports may include local paths; review them before sharing.
 
 ## Requirements
@@ -130,13 +172,16 @@ The ZIP holds `manifest.json` (every file, size, SHA256, permissions) and a `tre
 | Layer | Technology |
 | --- | --- |
 | Packaging | One `.bat` that extracts embedded resources to a temp folder (`dev/build-bat.ps1` regenerates them) |
-| Backend | Windows PowerShell 5.1 modules (`scan`, `server`, `update`, `catalog`, `report`, `cli`), loopback HTTP server with session token |
+| Backend | Windows PowerShell 5.1 modules (`scan`, `server`, `update`, `catalog`, `vulndb`, `report`, `cli`), loopback HTTP server with session token |
+| Catalog | `dev/vulndb.json`: detection probes + expect patterns, problem, actions, report and simulation per vulnerability |
+| AI helper | Optional Node.js tool (`tools/community`): Playwright + OpenAI / Anthropic / Ollama, drafts only |
 | Frontend | Single HTML file, vanilla JS, inline SVG icons, no external assets, strict CSP |
 | Tests | PowerShell (`dev/*.tests.ps1`), Node (UI contract), opt-in live and browser E2E (Playwright + Chrome) |
 
-- `dev/*.tests.ps1` — deterministic tests (scan, server, cli, launcher, report, update, integration) in PowerShell 5.1; `dev/ui.tests.ps1` also needs PowerShell 7 and Node.js.
+- `dev/*.tests.ps1` — deterministic tests (vulndb, scan, server, cli, launcher, report, update, integration) in PowerShell 5.1; `dev/ui.tests.ps1` also needs PowerShell 7 and Node.js.
 - `dev/update.live.tests.ps1` — opt-in (`ELO_LIVE_UPDATE_TEST=1`, administrator, network, ~1.5 GB): updates, restores and rolls back scratch Temurin 17, Zulu 17 and Zulu 8 runtimes through the server API.
 - `dev/e2e/wizard.e2e.js` — opt-in (`ELO_E2E=1`, Chrome, `npm install --prefix dev/e2e`): real server + real browser through scan, update, report, restore and start over.
+- `tools/community` — `npm test --prefix tools/community` (Node, no network).
 - After editing any file in `dev/`, run `pwsh dev/build-bat.ps1` to regenerate the BAT.
 
 ## Security information

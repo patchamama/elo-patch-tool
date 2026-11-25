@@ -1,0 +1,16 @@
+{
+  "name": "elo-patch-tools-community",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Optional helper: reads vulnerability articles from the ELO Community board and drafts vulndb.json entries with an AI provider (OpenAI, Anthropic or Ollama). Drafts only; a human reviews and installs them.",
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": { "elo-community": "bin/elo-community.js" },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\""
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "playwright-core": "1.65.1"
+  }
+}

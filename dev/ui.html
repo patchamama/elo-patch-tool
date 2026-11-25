@@ -195,6 +195,10 @@ ol.manual li{margin:.35rem 0}
 .alert h3{display:flex;align-items:center;gap:8px;margin:0 0 6px;color:var(--bad);font-size:1.05rem}
 .alert p{margin:.35rem 0}
 .alert .fix{font-weight:600}
+.alert .vuln+.vuln{border-top:1px solid var(--bad);margin-top:10px;padding-top:10px}
+.sev{display:inline-block;font-size:.6875rem;font-weight:800;letter-spacing:.04em;text-transform:uppercase;padding:.1rem .45rem;border-radius:6px;color:#fff;background:var(--bad)}
+.sev[data-sev=medium]{background:#c2410c}
+.sev[data-sev=low]{background:#a16207}
 .rt[data-status=vulnerable]{border-color:var(--bad)}
 .cmdbox{margin:16px 0 8px}
 .cmdbox h3{display:flex;align-items:center;gap:8px;font-size:1rem;margin:0 0 6px}
@@ -264,7 +268,7 @@ pre.cmd .c-str{color:#fca5a5}
 <section class="panel" id="step2" aria-labelledby="h2s" hidden>
 <h2 id="h2s"><span class="ico"><svg class="i"><use href="#i-cpu"/></svg></span><span data-i18n="step2Title"></span></h2>
 <p class="lead" data-i18n="step2Text"></p>
-<div id="vulnAlert" class="alert" role="alert" hidden><h3><svg class="i"><use href="#i-shield"/></svg><span data-i18n="vulnTitle"></span></h3><p id="vulnText"></p><p class="fix"><strong data-i18n="vulnFixLabel"></strong> <span data-i18n="vulnFix"></span></p></div>
+<div id="vulnAlert" class="alert" role="alert" hidden><div id="vulnList"></div></div>
 <div class="cards" id="cards" role="radiogroup" aria-labelledby="h2s"></div>
 <label class="field" hidden><span data-i18n="results"></span><select id="results"></select></label>
 <details><summary><svg class="i"><use href="#i-info"/></svg><span data-i18n="evidence"></span></summary><div class="body">
@@ -280,7 +284,7 @@ pre.cmd .c-str{color:#fca5a5}
 <section class="panel" id="step3" aria-labelledby="h3s" hidden>
 <h2 id="h3s"><span class="ico"><svg class="i"><use href="#i-update"/></svg></span><span data-i18n="step3Title"></span></h2>
 <p class="lead" data-i18n="warning"></p>
-<div id="vulnRec" class="alert" role="alert" hidden><p><strong data-i18n="vulnFixLabel"></strong> <span data-i18n="vulnFix"></span></p></div>
+<div id="vulnRec" class="alert" role="alert" hidden><div id="vulnRecList"></div></div>
 <div class="cards">
 <button id="update" class="card rec" type="button" disabled><span class="ico"><svg class="i"><use href="#i-update"/></svg></span><span><span class="tt" data-i18n="update"></span><span class="dd" data-i18n="updateDesc"></span></span></button>
 <button id="mitigate" class="card" type="button" disabled><span class="ico"><svg class="i"><use href="#i-shield"/></svg></span><span><span class="tt" data-i18n="mitigate"></span><span class="dd" data-i18n="mitigateDesc"></span></span></button>
@@ -354,8 +358,8 @@ const messages = {
  'Stop only the affected service during the approved window, apply the chosen change using the vendor procedure, then restart. Check service health and effective JVM options/version. If checks fail, stop and restore the saved configuration/runtime.',
  'Rescan and document the outcome. Keep the backup until validated. Contact ELO support if paths, service ownership or compatibility are uncertain.'],
  manualCommandsTitle:'PowerShell commands (administrator)',manualCommands:'# Run in an ADMINISTRATOR PowerShell. Adjust the paths and service names to your scan result.\n\n# 1) Find the runtime, its version and the services that use it\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nGet-Content \'C:\\ELO\\java\\release\' | Select-String \'IMPLEMENTOR|JAVA_RUNTIME_VERSION|OS_ARCH\'\nGet-CimInstance Win32_Service | Where-Object { $_.PathName -match \'ELO\' } | Select-Object Name, State, PathName\n[Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\')\n\n# 2) Back up the runtime (ZIP) before changing anything\nCompress-Archive -LiteralPath \'C:\\ELO\\java\' -DestinationPath \'C:\\ELO\\java-backup.zip\'\n\n# 3) Temporary mitigation (machine-wide): KEEP the old value and append, never overwrite\n$old = [Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\'); $old\n[Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', (($old + \' -XX:-UseBASE64Intrinsics\').Trim()), \'Machine\')\n# Undo: [Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', $old, \'Machine\')   (use $null if it was empty)\n# Services only see the change after they are restarted.\n\n# 4) Update the runtime by hand (download the newest release of the SAME vendor and branch first)\n(Get-FileHash \'C:\\Downloads\\new-java.zip\' -Algorithm SHA256).Hash        # compare with the vendor\'s published SHA256\nStop-Service \'ELO-SRV01-1\' -Force                                        # every service that uses this Java\nRename-Item \'C:\\ELO\\java\' \'java.old\'\nExpand-Archive -LiteralPath \'C:\\Downloads\\new-java.zip\' -DestinationPath \'C:\\ELO\\java-new\'\nMove-Item (Get-ChildItem \'C:\\ELO\\java-new\' -Directory | Select-Object -First 1).FullName \'C:\\ELO\\java\'\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nStart-Service \'ELO-SRV01-1\'\n\n# 5) If something fails: stop the services, put the old runtime back, start the services\nStop-Service \'ELO-SRV01-1\' -Force\nRename-Item \'C:\\ELO\\java\' \'java.failed\'; Rename-Item \'C:\\ELO\\java.old\' \'java\'\nStart-Service \'ELO-SRV01-1\'\n# Or restore from the ZIP: Expand-Archive \'C:\\ELO\\java-backup.zip\' -DestinationPath \'C:\\ELO\\restore\'; then move the java folder back',
- backupsTitle:'Existing backups',backupsText:'Backups made by this tool were found on this server. Pick one to bring that Java version back; the runtime that is installed now is kept next to it.',vulnTitle:'Vulnerability found: CVE-2026-114938 (Java4Shell)',vulnText:'{n} runtime(s) are before the fixed release: {list}. The JIT BASE64 intrinsics flaw lets this Java produce wrong results; the vendor fixed it in a newer release.',vulnFixLabel:'Solution:',vulnFix:'update Java to the current release of the same branch (step 3, Update Java runtime). The temporary mitigation only reduces the risk until you update.',terminalTitle:'Run it from the terminal (administrator PowerShell)',terminalCmdsText:'# Update Java to the current release (recommended)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Temporary mitigation only (adds -XX:-UseBASE64Intrinsics; restart the ELO services afterwards)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Check the result (--target is the position in the scan list, starting at 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'contains a vulnerable Java',
-restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: before the CVE-2026-114938 fix',backupRisk_patched:'Listed as fixed for CVE-2026-114938',backupRisk_unknown:'Security status unknown: treat as potentially vulnerable',backupStop:'Restoring stops the ELO Tomcat services that use this Java (ELO is unavailable meanwhile) and starts them again afterwards.',
+ backupsTitle:'Existing backups',backupsText:'Backups made by this tool were found on this server. Pick one to bring that Java version back; the runtime that is installed now is kept next to it.',severity_high:'High',severity_medium:'Medium',severity_low:'Low',vulnTitle:'Vulnerability found: CVE-2026-114938 (Java4Shell)',vulnText:'{n} runtime(s) are before the fixed release: {list}. The JIT BASE64 intrinsics flaw lets this Java produce wrong results; the vendor fixed it in a newer release.',vulnFixLabel:'Solution:',vulnFix:'update Java to the current release of the same branch (step 3, Update Java runtime). The temporary mitigation only reduces the risk until you update.',terminalTitle:'Run it from the terminal (administrator PowerShell)',terminalCmdsText:'# Update Java to the current release (recommended)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Temporary mitigation only (adds -XX:-UseBASE64Intrinsics; restart the ELO services afterwards)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Check the result (--target is the position in the scan list, starting at 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'contains a vulnerable Java',
+restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: this version is before the vendor fix for a catalog vulnerability',backupRisk_patched:'Listed as fixed for every catalog vulnerability',backupRisk_unknown:'Security status unknown: treat as potentially vulnerable',backupStop:'Restoring stops the ELO Tomcat services that use this Java (ELO is unavailable meanwhile) and starts them again afterwards.',
  exportHeading:'Activity log',exportJson:'Export JSON results',exportLog:'Export activity log',
  idle:'Ready',scanning:'Scanning',cancelling:'Cancellation requested; waiting for the scanner',completed:'Scan completed',cancelled:'Scan cancelled; results may be incomplete',error:'Operation failed',unknown:'Unknown',
  vulnerable:'Potentially vulnerable',safe:'No vulnerability detected by current rules',mitigated:'Mitigation detected',unsupported:'Unsupported runtime',
@@ -414,8 +418,8 @@ restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: before the
  'Stoppen Sie nur den betroffenen Dienst im genehmigten Wartungsfenster, führen Sie die gewählte Änderung nach Herstellerverfahren aus und starten Sie ihn erneut. Prüfen Sie Dienstzustand und wirksame JVM-Optionen beziehungsweise Version. Bei Fehlern stoppen und gesicherte Konfiguration oder Laufzeit wiederherstellen.',
  'Scannen Sie erneut und dokumentieren Sie das Ergebnis. Bewahren Sie die Sicherung bis zur erfolgreichen Prüfung auf. Bei unklaren Pfaden, Dienstzuordnung oder Kompatibilität wenden Sie sich an den ELO-Support.'],
  manualCommandsTitle:'PowerShell-Befehle (Administrator)',manualCommands:'# In einer ADMINISTRATOR-PowerShell ausfuehren. Pfade und Dienstnamen an das Scan-Ergebnis anpassen.\n\n# 1) Runtime, Version und die Dienste finden, die sie verwenden\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nGet-Content \'C:\\ELO\\java\\release\' | Select-String \'IMPLEMENTOR|JAVA_RUNTIME_VERSION|OS_ARCH\'\nGet-CimInstance Win32_Service | Where-Object { $_.PathName -match \'ELO\' } | Select-Object Name, State, PathName\n[Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\')\n\n# 2) Runtime vor jeder Aenderung als ZIP sichern\nCompress-Archive -LiteralPath \'C:\\ELO\\java\' -DestinationPath \'C:\\ELO\\java-backup.zip\'\n\n# 3) Vorlaeufige Risikominderung (systemweit): alten Wert BEHALTEN und anhaengen, nie ueberschreiben\n$old = [Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\'); $old\n[Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', (($old + \' -XX:-UseBASE64Intrinsics\').Trim()), \'Machine\')\n# Rueckgaengig: [Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', $old, \'Machine\')   ($null, falls leer)\n# Dienste sehen die Aenderung erst nach einem Neustart.\n\n# 4) Runtime manuell aktualisieren (zuerst die neueste Version DESSELBEN Herstellers und Branches laden)\n(Get-FileHash \'C:\\Downloads\\new-java.zip\' -Algorithm SHA256).Hash        # mit der veroeffentlichten SHA256 des Herstellers vergleichen\nStop-Service \'ELO-SRV01-1\' -Force                                        # jeden Dienst, der dieses Java verwendet\nRename-Item \'C:\\ELO\\java\' \'java.old\'\nExpand-Archive -LiteralPath \'C:\\Downloads\\new-java.zip\' -DestinationPath \'C:\\ELO\\java-new\'\nMove-Item (Get-ChildItem \'C:\\ELO\\java-new\' -Directory | Select-Object -First 1).FullName \'C:\\ELO\\java\'\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nStart-Service \'ELO-SRV01-1\'\n\n# 5) Bei Fehlern: Dienste stoppen, alte Runtime zurueckstellen, Dienste starten\nStop-Service \'ELO-SRV01-1\' -Force\nRename-Item \'C:\\ELO\\java\' \'java.failed\'; Rename-Item \'C:\\ELO\\java.old\' \'java\'\nStart-Service \'ELO-SRV01-1\'\n# Oder aus dem ZIP: Expand-Archive \'C:\\ELO\\java-backup.zip\' -DestinationPath \'C:\\ELO\\restore\'; dann den java-Ordner zurueckverschieben',
- backupsTitle:'Vorhandene Backups',backupsText:'Auf diesem Server wurden Backups dieses Werkzeugs gefunden. Wählen Sie eines, um diese Java-Version zurückzuholen; die aktuell installierte Runtime bleibt daneben erhalten.',vulnTitle:'Schwachstelle gefunden: CVE-2026-114938 (Java4Shell)',vulnText:'{n} Runtime(s) liegen vor der behobenen Version: {list}. Der Fehler in den JIT-BASE64-Intrinsics kann falsche Ergebnisse liefern; der Hersteller hat ihn in einer neueren Version behoben.',vulnFixLabel:'Loesung:',vulnFix:'Java auf die aktuelle Version desselben Branches aktualisieren (Schritt 3, Java-Runtime aktualisieren). Die vorlaeufige Risikominderung senkt das Risiko nur bis zum Update.',terminalTitle:'Im Terminal ausfuehren (Administrator-PowerShell)',terminalCmdsText:'# Java auf die aktuelle Version aktualisieren (empfohlen)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Nur vorlaeufige Risikominderung (haengt -XX:-UseBASE64Intrinsics an; danach die ELO-Dienste neu starten)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Ergebnis pruefen (--target ist die Position in der Scan-Liste, ab 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'enthaelt ein verwundbares Java',
-restoreShort:'Dieses Backup wiederherstellen',backupRisk_vulnerable:'Verwundbar: vor dem Fix für CVE-2026-114938',backupRisk_patched:'Für CVE-2026-114938 als behoben aufgeführt',backupRisk_unknown:'Sicherheitsstatus unbekannt: als potenziell verwundbar behandeln',backupStop:'Die Wiederherstellung beendet die ELO-Tomcat-Dienste, die dieses Java verwenden (ELO ist solange nicht verfügbar), und startet sie danach wieder.',
+ backupsTitle:'Vorhandene Backups',backupsText:'Auf diesem Server wurden Backups dieses Werkzeugs gefunden. Wählen Sie eines, um diese Java-Version zurückzuholen; die aktuell installierte Runtime bleibt daneben erhalten.',severity_high:'Hoch',severity_medium:'Mittel',severity_low:'Niedrig',vulnTitle:'Schwachstelle gefunden: CVE-2026-114938 (Java4Shell)',vulnText:'{n} Runtime(s) liegen vor der behobenen Version: {list}. Der Fehler in den JIT-BASE64-Intrinsics kann falsche Ergebnisse liefern; der Hersteller hat ihn in einer neueren Version behoben.',vulnFixLabel:'Loesung:',vulnFix:'Java auf die aktuelle Version desselben Branches aktualisieren (Schritt 3, Java-Runtime aktualisieren). Die vorlaeufige Risikominderung senkt das Risiko nur bis zum Update.',terminalTitle:'Im Terminal ausfuehren (Administrator-PowerShell)',terminalCmdsText:'# Java auf die aktuelle Version aktualisieren (empfohlen)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Nur vorlaeufige Risikominderung (haengt -XX:-UseBASE64Intrinsics an; danach die ELO-Dienste neu starten)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Ergebnis pruefen (--target ist die Position in der Scan-Liste, ab 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'enthaelt ein verwundbares Java',
+restoreShort:'Dieses Backup wiederherstellen',backupRisk_vulnerable:'Verwundbar: diese Version liegt vor dem Herstellerfix einer Katalog-Schwachstelle',backupRisk_patched:'Für alle Katalog-Schwachstellen als behoben aufgeführt',backupRisk_unknown:'Sicherheitsstatus unbekannt: als potenziell verwundbar behandeln',backupStop:'Die Wiederherstellung beendet die ELO-Tomcat-Dienste, die dieses Java verwenden (ELO ist solange nicht verfügbar), und startet sie danach wieder.',
  exportHeading:'Aktivitätsprotokoll',exportJson:'JSON-Ergebnisse exportieren',exportLog:'Aktivitätsprotokoll exportieren',
  idle:'Bereit',scanning:'Scan läuft',cancelling:'Abbruch angefordert; Scanner wird abgewartet',completed:'Scan abgeschlossen',cancelled:'Scan abgebrochen; Ergebnisse möglicherweise unvollständig',error:'Vorgang fehlgeschlagen',unknown:'Unbekannt',
  vulnerable:'Möglicherweise verwundbar',safe:'Nach aktuellen Regeln keine Schwachstelle erkannt',mitigated:'Risikominderung erkannt',unsupported:'Nicht unterstützte Laufzeit',
@@ -457,7 +461,7 @@ try {
 } catch (_) { /* storage unavailable: the link must be reopened after a refresh */ }
 const forgetToken = () => { try { sessionStorage.removeItem('eloSessionToken'); } catch (_) { } };
 let language = 'en', state = 'idle', rows = [], preview = null, pending = false, polling = false, lastError = '';
-let backups = [], backupsKey = '', progress = null, checked = null, lastSuccessfulRefresh = null, security = {verifiedOn:null,advisories:[]};
+let vulns = [], backups = [], backupsKey = '', progress = null, checked = null, lastSuccessfulRefresh = null, security = {verifiedOn:null,advisories:[]};
 let lastWarnings = [], errorFromPoll = false, recoveryRequired = false, recoveryWarnings = [];
 let step = 1, awaitingScan = false, scanStartedAt = null, finalKind = '', canRestore = false, cardsKey = '';
 const events = [], states = ['idle','scanning','cancelling','completed','cancelled','error'];
@@ -471,22 +475,21 @@ const bilingual = (value,max) => keys(value,['en','de']) && text(value.en,max) &
 const classifications = ['vulnerable','patched','not-affected','inconclusive','mitigated','unsupported','safe'];
 const rowFields = ['id','path','runtimeRoot','version','vendor','architecture','status','eloRationale','classificationEvidence'];
 const validBackup = item => keys(item,['id','path','runtime','version','vendor','risk','created','size']) && validId(item.id) && text(item.path,1024) && text(item.runtime,1024) && text(item.version,128) && text(item.vendor,32) && ['vulnerable','patched','unknown'].includes(item.risk) && text(item.created,32) && Number.isSafeInteger(item.size) && item.size >= 0;
-const validRow = row => keys(row,rowFields) && validId(row.id) && text(row.path,1024) && text(row.runtimeRoot,1024) && text(row.version,128) && text(row.vendor,256) && ['x86','x64','arm64','unknown'].includes(row.architecture) && classifications.includes(row.status) && bilingual(row.eloRationale,2048) && bilingual(row.classificationEvidence,4096);
+const severities = ['high','medium','low'];
+const validVuln = item => keys(item,['id','alias','severity','title','problem','solution','actions']) && /^[A-Za-z0-9._-]{3,64}$/.test(item.id) && typeof item.alias === 'string' && item.alias.length <= 64 && severities.includes(item.severity) && bilingual(item.title,2048) && bilingual(item.problem,2048) && bilingual(item.solution,2048) && Array.isArray(item.actions) && item.actions.length <= 16 && item.actions.every(action => typeof action === 'string' && action.length <= 32);
+const validFinding = item => keys(item,['id','severity','status']) && /^[A-Za-z0-9._-]{3,64}$/.test(item.id) && severities.includes(item.severity) && ['vulnerable','patched','inconclusive'].includes(item.status);
+const validRow = row => keys(row,rowFields,['findings']) && (row.findings === undefined || (Array.isArray(row.findings) && row.findings.length <= 32 && row.findings.every(validFinding))) && validId(row.id) && text(row.path,1024) && text(row.runtimeRoot,1024) && text(row.version,128) && text(row.vendor,256) && ['x86','x64','arm64','unknown'].includes(row.architecture) && classifications.includes(row.status) && bilingual(row.eloRationale,2048) && bilingual(row.classificationEvidence,4096);
 function validSearchPath(value) {
  return value.length <= 1024 && /^[A-Za-z]:\\/.test(value) && !/[\u0000-\u001f\u007f"<>|?*\/]/.test(value) && !value.slice(2).includes(':') && !value.split('\\').slice(1).some(part => /[. ]$/.test(part) || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part));
 }
 function officialUrl(value) {
+ // Advisory links come from the catalog (vulndb.json): any plain https URL, no credentials, port, query or fragment.
  if (!text(value,512) || (token && value.includes(token))) return false;
  try {
  const url = new URL(value);
- return url.href === value && url.protocol === 'https:' && !url.username && !url.password && !url.port && !url.search && !url.hash &&
- ((url.hostname === 'www.oracle.com' && /^\/security-alerts\/(?:[a-z0-9-]+\.html)?$/.test(url.pathname)) ||
- (url.hostname === 'openjdk.org' && /^\/groups\/vulnerability\/advisories\/(?:[a-z0-9-]+(?:\.html|\/)?)?$/.test(url.pathname)) ||
- value === 'https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/' ||
- value === 'https://linux.oracle.com/cve/CVE-2026-114938.html');
+ return url.href === value && url.protocol === 'https:' && !url.username && !url.password && !url.port && !url.search && !url.hash && /^[a-z0-9.-]+$/.test(url.hostname) && /^\/[A-Za-z0-9._~\/-]*$/.test(url.pathname);
  } catch (_) { return false; }
-}
-function validSecurity(value) {
+}function validSecurity(value) {
  if (!keys(value,['verifiedOn','advisories']) || !Array.isArray(value.advisories) || value.advisories.length > 16) return false;
  if (!value.advisories.length) return value.verifiedOn === null;
  const date = value.verifiedOn;
@@ -596,12 +599,41 @@ function highlightInto(el, source) {
  });
 }
 let cmdKey = '';
+const fill = (template, values) => template.replace(/\{(n|list)\}/g,(_, key) => values[key]);
+function adviceBlock(vuln, affected, solutionOnly) {
+ const box = document.createElement('div'), head = document.createElement('h3'), sev = document.createElement('span'), title = document.createElement('span'), problem = document.createElement('p'), fix = document.createElement('p'), label = document.createElement('strong'), solution = document.createElement('span');
+ box.className = 'vuln'; fix.className = 'fix';
+ sev.className = 'sev'; sev.dataset.sev = vuln.severity; sev.textContent = t('severity_'+vuln.severity);
+ title.textContent = localized(vuln.title);
+ const list = affected.slice(0,5).map(item => safeText(item.vendor)+' '+safeText(item.version)+' ('+safeText(item.runtimeRoot)+')').join('; ');
+ problem.textContent = fill(localized(vuln.problem),{n:String(affected.length),list});
+ label.textContent = t('vulnFixLabel')+' '; solution.textContent = localized(vuln.solution);
+ fix.append(label); fix.append(solution);
+ if (!solutionOnly) { head.append(sev); head.append(title); box.append(head); box.append(problem); }
+ box.append(fix);
+ return box;
+}
 function renderAdvice(row) {
- const vulnerable = rows.filter(item => item.status === 'vulnerable');
- toggle('vulnAlert',vulnerable.length === 0); toggle('vulnRec',!(row && row.status === 'vulnerable'));
- const list = vulnerable.slice(0,5).map(item => safeText(item.vendor)+' '+safeText(item.version)+' ('+safeText(item.runtimeRoot)+')').join('; ');
- $('vulnText').textContent = vulnerable.length ? t('vulnText').replace('{n}',() => String(vulnerable.length)).replace('{list}',() => list) : '';
- const n = Math.max(0,rows.findIndex(item => row && item.id === row.id));
+ const affects = id => item => (item.findings || []).some(f => f.id === id && f.status === 'vulnerable');
+ const blocks = [], recs = [];
+ vulns.forEach(vuln => {
+ const affected = rows.filter(affects(vuln.id));
+ if (affected.length) blocks.push(adviceBlock(vuln,affected,false));
+ if (row && affects(vuln.id)(row)) recs.push(adviceBlock(vuln,[row],true));
+ });
+ // Rows without catalog findings (older results) still get the generic alert.
+ const legacy = rows.filter(item => item.status === 'vulnerable' && !(item.findings || []).length);
+ if (legacy.length && !vulns.length) {
+ const box = document.createElement('div'), head = document.createElement('h3'), problem = document.createElement('p'), fix = document.createElement('p'), label = document.createElement('strong'), solution = document.createElement('span');
+ box.className = 'vuln'; fix.className = 'fix'; head.textContent = t('vulnTitle');
+ problem.textContent = fill(t('vulnText'),{n:String(legacy.length),list:legacy.slice(0,5).map(item => safeText(item.vendor)+' '+safeText(item.version)+' ('+safeText(item.runtimeRoot)+')').join('; ')});
+ label.textContent = t('vulnFixLabel')+' '; solution.textContent = t('vulnFix'); fix.append(label); fix.append(solution);
+ box.append(head); box.append(problem); box.append(fix); blocks.push(box);
+ if (row && row.status === 'vulnerable') { const rec = document.createElement('div'), p2 = document.createElement('p'), l2 = document.createElement('strong'), s2 = document.createElement('span'); l2.textContent = t('vulnFixLabel')+' '; s2.textContent = t('vulnFix'); p2.append(l2); p2.append(s2); rec.append(p2); recs.push(rec); }
+ }
+ $('vulnList').replaceChildren(); blocks.forEach(block => $('vulnList').append(block));
+ $('vulnRecList').replaceChildren(); recs.forEach(block => $('vulnRecList').append(block));
+ toggle('vulnAlert',blocks.length === 0); toggle('vulnRec',recs.length === 0);const n = Math.max(0,rows.findIndex(item => row && item.id === row.id));
  const key = language+'|'+n; if (key === cmdKey) return; cmdKey = key;
  highlightInto($('terminalCmds'),t('terminalCmdsText').replace(/\{n\}/g,() => String(n)));
  highlightInto($('cmdView'),t('manualCommands'));
@@ -696,11 +728,11 @@ async function refresh() {
  const status = await api('status');
  if (!keys(status,['state'],['progress','checked']) || !states.includes(status.state) || (status.progress !== undefined && (!Number.isFinite(status.progress) || status.progress < 0 || status.progress > 100)) || (status.checked !== undefined && (!Number.isSafeInteger(status.checked) || status.checked < 0))) throw 'invalid';
  const result = await api('results');
- if (!keys(result,['results','security'],['backups']) || (result.backups !== undefined && (!Array.isArray(result.backups) || result.backups.length > 50 || result.backups.some(item => !validBackup(item)) || new Set(result.backups.map(item => item.id)).size !== result.backups.length)) || !Array.isArray(result.results) || result.results.length > 250 || result.results.some(row => !validRow(row)) || new Set(result.results.map(row => row.id)).size !== result.results.length || !validSecurity(result.security)) throw 'invalid';
+ if (!keys(result,['results','security'],['backups','vulnerabilities']) || (result.vulnerabilities !== undefined && (!Array.isArray(result.vulnerabilities) || result.vulnerabilities.length > 32 || result.vulnerabilities.some(item => !validVuln(item)))) || (result.backups !== undefined && (!Array.isArray(result.backups) || result.backups.length > 50 || result.backups.some(item => !validBackup(item)) || new Set(result.backups.map(item => item.id)).size !== result.backups.length)) || !Array.isArray(result.results) || result.results.length > 250 || result.results.some(row => !validRow(row)) || new Set(result.results.map(row => row.id)).size !== result.results.length || !validSecurity(result.security)) throw 'invalid';
  const nextRows = result.results;
  if (state !== status.state || JSON.stringify(rows) !== JSON.stringify(nextRows) || JSON.stringify(security) !== JSON.stringify(result.security)) clearPreview();
  if (status.state === 'scanning' && scanStartedAt === null) scanStartedAt = Date.now();
- state = status.state; rows = nextRows; security = result.security; backups = result.backups || [];
+ state = status.state; rows = nextRows; security = result.security; backups = result.backups || []; vulns = result.vulnerabilities || [];
  if (state !== 'scanning' && state !== 'cancelling') scanStartedAt = null;
  // A finished scan moves the wizard on by itself; anything else releases the wait.
  if (awaitingScan && state === 'completed') { awaitingScan = false; if (rows.length) step = 2; }

@@ -11,7 +11,7 @@ rem Only an ASCII session ID crosses FOR /F; Unicode TEMP paths stay in the envi
 set "ELO_PATCH_BASE=%TEMP%"
 if not defined ELO_PATCH_BASE set "ELO_PATCH_BASE=%TMP%"
 if not defined ELO_PATCH_BASE exit /b 1
-for /f "usebackq delims=" %%D in (`powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $dir=$null; try { $files=@{BOOTSTRAP_PS='launcher.ps1';BACKEND_PS='backend.ps1';SCAN_PS='scan.ps1';SERVER_PS='server.ps1';CLI_PS='cli.ps1';UI_HTML='ui.html';REPORT_PS='report.ps1';UPDATE_PS='update.ps1';CATALOG_PS='catalog.ps1'}; $blocks=@{}; $active=$null; $buffer=New-Object 'System.Collections.Generic.List[string]'; foreach($line in [IO.File]::ReadAllLines($env:ELO_PATCH_SOURCE,[Text.Encoding]::UTF8)) { if($line.TrimStart().StartsWith('::ELO_PATCH_',[StringComparison]::OrdinalIgnoreCase)) { if($line -cnotmatch '^::ELO_PATCH_(BEGIN|END):(BOOTSTRAP_PS|BACKEND_PS|SCAN_PS|SERVER_PS|CLI_PS|UI_HTML|REPORT_PS|UPDATE_PS|CATALOG_PS)$') { throw 'Malformed extraction marker' }; $kind=$Matches[1]; $name=$Matches[2]; if($kind -ceq 'BEGIN') { if($null -ne $active -or $blocks.ContainsKey($name)) { throw 'Duplicate or nested extraction marker' }; $active=$name; $buffer.Clear() } else { if($active -cne $name) { throw 'Unmatched extraction marker' }; $blocks[$name]=[string]::Join([Environment]::NewLine,$buffer); $active=$null } } elseif($null -ne $active) { $buffer.Add($line) } }; if($null -ne $active -or $blocks.Count -ne $files.Count) { throw 'Missing extraction marker' }; $id=[guid]::NewGuid().ToString('N'); $dir=Join-Path $env:ELO_PATCH_BASE ('elo-patch-'+$id); [void][IO.Directory]::CreateDirectory($dir); foreach($name in $files.Keys) { [IO.File]::WriteAllText((Join-Path $dir $files[$name]),$blocks[$name],[Text.Encoding]::UTF8) }; Write-Output $id } catch { if($null -ne $dir -and [IO.Directory]::Exists($dir)) { [IO.Directory]::Delete($dir,$true) }; [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"`) do set "ELO_PATCH_SESSION=%ELO_PATCH_BASE%\elo-patch-%%D"
+for /f "usebackq delims=" %%D in (`powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $dir=$null; try { $files=@{BOOTSTRAP_PS='launcher.ps1';BACKEND_PS='backend.ps1';SCAN_PS='scan.ps1';SERVER_PS='server.ps1';CLI_PS='cli.ps1';UI_HTML='ui.html';REPORT_PS='report.ps1';UPDATE_PS='update.ps1';CATALOG_PS='catalog.ps1';VULNDB_PS='vulndb.ps1';VULNDB_JSON='vulndb.json'}; $blocks=@{}; $active=$null; $buffer=New-Object 'System.Collections.Generic.List[string]'; foreach($line in [IO.File]::ReadAllLines($env:ELO_PATCH_SOURCE,[Text.Encoding]::UTF8)) { if($line.TrimStart().StartsWith('::ELO_PATCH_',[StringComparison]::OrdinalIgnoreCase)) { if($line -cnotmatch '^::ELO_PATCH_(BEGIN|END):(BOOTSTRAP_PS|BACKEND_PS|SCAN_PS|SERVER_PS|CLI_PS|UI_HTML|REPORT_PS|UPDATE_PS|CATALOG_PS|VULNDB_PS|VULNDB_JSON)$') { throw 'Malformed extraction marker' }; $kind=$Matches[1]; $name=$Matches[2]; if($kind -ceq 'BEGIN') { if($null -ne $active -or $blocks.ContainsKey($name)) { throw 'Duplicate or nested extraction marker' }; $active=$name; $buffer.Clear() } else { if($active -cne $name) { throw 'Unmatched extraction marker' }; $blocks[$name]=[string]::Join([Environment]::NewLine,$buffer); $active=$null } } elseif($null -ne $active) { $buffer.Add($line) } }; if($null -ne $active -or $blocks.Count -ne $files.Count) { throw 'Missing extraction marker' }; $id=[guid]::NewGuid().ToString('N'); $dir=Join-Path $env:ELO_PATCH_BASE ('elo-patch-'+$id); [void][IO.Directory]::CreateDirectory($dir); foreach($name in $files.Keys) { [IO.File]::WriteAllText((Join-Path $dir $files[$name]),$blocks[$name],[Text.Encoding]::UTF8) }; Write-Output $id } catch { if($null -ne $dir -and [IO.Directory]::Exists($dir)) { [IO.Directory]::Delete($dir,$true) }; [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"`) do set "ELO_PATCH_SESSION=%ELO_PATCH_BASE%\elo-patch-%%D"
 if not defined ELO_PATCH_SESSION exit /b 1
 rem Keep a live console for CLI confirmation; read-only modes never prompt.
 powershell.exe -NoProfile -File "%ELO_PATCH_SESSION%\launcher.ps1" %*
@@ -57,6 +57,7 @@ $script:EloPackagedRoot = $PSScriptRoot
 . (Join-Path $PSScriptRoot 'scan.ps1')
 . (Join-Path $PSScriptRoot 'server.ps1')
 . (Join-Path $PSScriptRoot 'report.ps1')
+. (Join-Path $PSScriptRoot 'vulndb.ps1')
 . (Join-Path $PSScriptRoot 'catalog.ps1')
 . (Join-Path $PSScriptRoot 'update.ps1')
 . (Join-Path $PSScriptRoot 'cli.ps1')
@@ -155,9 +156,27 @@ if (-not $LoadOnly) {
 # This does not modify ELO/configuration, download files, or claim exploitability.
 # Launching an installed java.exe executes local code; use only on trusted installations.
 function Get-EloJavaClassification {
-    param([AllowEmptyString()][string]$Evidence)
-    $source = 'https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/'
-    $fixed = @('17.0.21.1+2', '21.0.13.1+2', '25.0.5.1+2', '27.0.1.1+4')
+    # Classifies one java -version evidence text against the catalog rules (vulndb.json): one finding per
+    # rule, the overall Status is the worst one (PotentiallyVulnerable > Inconclusive > KnownFixed).
+    param([AllowEmptyString()][string]$Evidence, $Rules = $null)
+    if ($null -eq $Rules -and (Get-Command Get-EloScanRules -CommandType Function -ErrorAction SilentlyContinue)) { $Rules = Get-EloScanRules }
+    $usable = @($Rules | Where-Object { $_ -and [string]$_.Parser -ceq 'temurin-build' -and [string]$_.Vendor -ceq 'Temurin' })
+    if ($usable.Count -eq 0) { $usable = @(@{ Id = ''; Severity = ''; Fixed = @(); Source = '' }) }
+    $findings = @(); $first = $null
+    foreach ($rule in $usable) {
+        $item = Get-EloJavaClassificationForRule -Evidence $Evidence -Fixed @($rule.Fixed) -Source ([string]$rule.Source)
+        if ($null -eq $first) { $first = $item }
+        if ($rule.Id) { $findings += [pscustomobject]@{ Id = [string]$rule.Id; Severity = [string]$rule.Severity; Status = $item.Status; Source = $item.Source; Reason = $item.Reason } }
+        $rank = @{ PotentiallyVulnerable = 3; Inconclusive = 2; KnownFixed = 1 }
+        if ($rank[$item.Status] -gt $rank[$first.Status]) { $first = $item }
+    }
+    $first | Add-Member -NotePropertyName Findings -NotePropertyValue $findings -Force
+    return $first
+}
+function Get-EloJavaClassificationForRule {
+    param([AllowEmptyString()][string]$Evidence, [string[]]$Fixed = @(), [string]$Source = '')
+    $source = $Source
+    $fixed = @($Fixed)
     $vendor = 'Unknown'
     if ($Evidence -match '(?i)\bTemurin\b') { $vendor = 'Temurin' }
     # Include VM build tokens as well as runtime tokens: conflicting versions must
@@ -241,16 +260,19 @@ function Invoke-EloJavaVersion {
     param(
         [Parameter(Mandatory = $true)][string]$JavaPath,
         [ValidateRange(1, 120)][int]$TimeoutSeconds = 10,
-        [scriptblock]$ShouldCancel = { $false }
+        [scriptblock]$ShouldCancel = { $false },
+        [string[]]$Arguments = @('-version')
     )
     $result = [ordered]@{ Succeeded = $false; Cancelled = $false; Evidence = ''; Error = $null; ExitCode = $null }
+    # Only plain java options from the catalog: never a path, a pipe or a shell construct.
+    foreach ($a in @($Arguments)) { if ($a -cnotmatch '^-[A-Za-z0-9:+=_.\-]{1,64}$') { $result.Error = 'Probe arguments are not plain java options.'; return [pscustomobject]$result } }
     $process = $null
     try {
         if (& $ShouldCancel) { $result.Cancelled = $true; return [pscustomobject]$result }
         if (-not [IO.File]::Exists($JavaPath)) { throw 'Java executable does not exist.' }
         $info = New-Object System.Diagnostics.ProcessStartInfo
         $info.FileName = $JavaPath
-        $info.Arguments = '-version'
+        $info.Arguments = (@($Arguments) -join ' ')
         $info.UseShellExecute = $false
         $info.CreateNoWindow = $true
         $info.RedirectStandardOutput = $true
@@ -449,7 +471,9 @@ function Invoke-EloJavaScan {
         [scriptblock]$ShouldCancel = { $false },
         [scriptblock]$GetChildren = { param($Path) Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop },
         [scriptblock]$IsReparsePoint = { param($Path) ((Get-Item -LiteralPath $Path -Force -ErrorAction Stop).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 },
-        [scriptblock]$ProbeJava = { param($Path, $Cancel) Invoke-EloJavaVersion -JavaPath $Path -ShouldCancel $Cancel }
+        [scriptblock]$ProbeJava = { param($Path, $Cancel) Invoke-EloJavaVersion -JavaPath $Path -ShouldCancel $Cancel },
+        [scriptblock]$ProbeExtra = { param($Path, $ProbeArgs, $Timeout, $Cancel) Invoke-EloJavaVersion -JavaPath $Path -Arguments $ProbeArgs -TimeoutSeconds $Timeout -ShouldCancel $Cancel },
+        $Rules = $null
     )
     $arguments = @{ ManualPath = $ManualPath; MaxDepth = $MaxDepth; MaxEntries = $MaxEntries; ShouldCancel = $ShouldCancel; GetChildren = $GetChildren; IsReparsePoint = $IsReparsePoint }
     if ($PSBoundParameters.ContainsKey('DriveRoots')) { $arguments.DriveRoots = $DriveRoots }
@@ -461,8 +485,33 @@ function Invoke-EloJavaScan {
         if ($cancelled -or (& $ShouldCancel)) { $cancelled = $true; break }
         try { $probe = & $ProbeJava $location $ShouldCancel }
         catch { $probe = [pscustomobject]@{ Succeeded = $false; Cancelled = $false; Evidence = ''; Error = $_.Exception.Message; ExitCode = $null } }
-        $classification = Get-EloJavaClassification -Evidence $probe.Evidence
-        if (-not $probe.Succeeded) { $classification.Status = 'Inconclusive'; $classification.Reason = 'Java version probe did not complete successfully; exploitability is not determined.' }
+        $classification = Get-EloJavaClassification -Evidence $probe.Evidence -Rules $Rules
+        # Catalog entries of method probe-expect run their own java probe and match the output with expect patterns.
+        $hadVersionRules = (@($classification.Findings).Count -gt 0); $probeStatuses = @()
+        foreach ($rule in @($Rules | Where-Object { $_ -and [string]$_.Method -ceq 'probe-expect' })) {
+            if (& $ShouldCancel) { break }
+            $extra = $null
+            try { $extra = & $ProbeExtra $location @($rule.ProbeArgs) ([int]$rule.TimeoutSec) $ShouldCancel } catch { $extra = $null }
+            $fs = 'Inconclusive'; $fr = 'The catalog probe did not complete; the vulnerability is not determined.'
+            if ($extra -and $extra.Succeeded) {
+                try {
+                    $re = New-Object Text.RegularExpressions.Regex([string]$rule.VulnerablePattern, [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2))
+                    if ($re.IsMatch([string]$extra.Evidence)) { $fs = 'PotentiallyVulnerable'; $fr = 'The catalog probe output matches the vulnerable pattern.' }
+                    elseif ($rule.SafePattern -and (New-Object Text.RegularExpressions.Regex([string]$rule.SafePattern, [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2))).IsMatch([string]$extra.Evidence)) { $fs = 'KnownFixed'; $fr = 'The catalog probe output matches the safe pattern.' }
+                    else { $fr = 'The catalog probe output matches neither the vulnerable nor the safe pattern.' }
+                } catch { $fr = 'The catalog pattern could not be evaluated.' }
+            }
+            $classification.Findings = @($classification.Findings) + [pscustomobject]@{ Id = [string]$rule.Id; Severity = [string]$rule.Severity; Status = $fs; Source = [string]$rule.Source; Reason = $fr }
+            $rank = @{ PotentiallyVulnerable = 3; Inconclusive = 2; KnownFixed = 1 }
+            $probeStatuses += $fs
+            if ($hadVersionRules) {
+                if ($rank[$fs] -gt $rank[$classification.Status] -or ($fs -ceq 'Inconclusive' -and $classification.Status -ceq 'KnownFixed')) { $classification.Status = $fs; $classification.Reason = $fr; $classification.Source = [string]$rule.Source }
+            }
+        }
+        if (-not $hadVersionRules -and $probeStatuses.Count -gt 0) {
+            $worst = 'KnownFixed'; foreach ($s in $probeStatuses) { if ($rank[$s] -gt $rank[$worst]) { $worst = $s } }
+            $classification.Status = $worst; $last = @($classification.Findings)[-1]; $classification.Reason = $last.Reason; $classification.Source = $last.Source
+        }        if (-not $probe.Succeeded) { $classification.Status = 'Inconclusive'; $classification.Reason = 'Java version probe did not complete successfully; exploitability is not determined.' }
         $runtimeRoot = Split-Path -Path $location -Parent
         $rootReason = 'Executable directory; runtime layout is not verified.'
         if ((Split-Path -Path $runtimeRoot -Leaf) -ieq 'bin') {
@@ -474,7 +523,7 @@ function Invoke-EloJavaScan {
             EloCandidateRoot = $candidate.EloCandidateRoot; EloPathRationale = $candidate.EloPathRationale
             FullVersion = $classification.FullVersion; Architecture = $classification.Architecture
             Status = $classification.Status; Vendor = $classification.Vendor; Build = $classification.Build
-            Evidence = $probe.Evidence; Error = $probe.Error; ExitCode = $probe.ExitCode; Reason = $classification.Reason; Source = $classification.Source
+            Evidence = $probe.Evidence; Error = $probe.Error; ExitCode = $probe.ExitCode; Reason = $classification.Reason; Source = $classification.Source; Findings = @($classification.Findings)
         })
         if ($probe.Cancelled) { $cancelled = $true; break }
     }
@@ -510,6 +559,14 @@ Usage (embedded launcher): ELO-Patch-Tools.bat [options]
   --update-runtime        Separate option: update the selected runtime to the newest release of its branch
                           (Eclipse Temurin / Azul Zulu). Needs --target N --confirm-admin --confirm-update and
                           a typed APPLY UPDATE; a verified backup ZIP and automatic rollback are included.
+  --catalog-validate FILE Validate a vulnerability catalog (JSON) without using it. Read-only.
+  --catalog-simulate ID|FILE  Replay the catalog entry's (or every entry of a FILE, e.g. an AI draft) simulated java output through the real classifier
+                          (shows how the vulnerability would be detected; no Java is run). Read-only.
+  --catalog-install FILE  Install a reviewed catalog (needs --confirm-admin). The installed file it
+                          replaces is copied to the quarantine folder first.
+  --catalog-list          List quarantined catalog copies (%ProgramData%\ELO-Patch-Tools\quarantine).
+  --catalog-restore ID    Put a quarantined copy back (needs --confirm-admin); the file it replaces is
+                          quarantined too, so a restore can be undone.
 No credentials, arbitrary commands, downloads, automatic updates or restarts.
 Unknown/duplicate options, conflicting modes and malformed paths are rejected.
 Quote paths with spaces. UNC, relative, device and command-like paths are rejected.
@@ -703,6 +760,12 @@ function New-EloCliConsole {
     }
 }
 
+function Assert-EloCliCatalogPath {
+    param([string]$Path)
+    if ($Path.Length -gt 1024 -or $Path -cnotmatch '^[A-Za-z]:\\' -or $Path -match '[\x00-\x1f\x7f"<>|?*/;`$]' -or $Path.Substring(2).Contains(':')) { throw 'Invalid literal local file path.' }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw 'Catalog file not found.' }
+    return $Path
+}
 function Invoke-EloCli {
     param(
         [string[]]$Arguments = @(),
@@ -711,15 +774,19 @@ function Invoke-EloCli {
         [hashtable]$Console = (New-EloCliConsole)
     )
     $ErrorActionPreference = 'Stop'
+    # Advisories, dates and sources come from the catalog (vulndb.json).
+    $securitySource=''; $securityAdvisories=@(); $securityVerified=''
+    foreach ($v in (Get-EloActiveVulnerabilities)) {
+        if (-not $securityVerified -or [string]$v.verifiedOn -gt $securityVerified) { $securityVerified=[string]$v.verifiedOn }
+        foreach ($vendor in $v.detection.vendors.PSObject.Properties) { if (-not $securitySource) { $securitySource=[string]$vendor.Value.fixedSource } }
+        # Directly fetched sources are listed before user-supplied ones.
+        foreach ($kind in @('Fetched','Supplied')) { foreach ($adv in @(@($v.advisories) | Where-Object { [string]$_.provenance -ceq $kind })) { $securityAdvisories+=@{ url=[string]$adv.url; provenance=[string]$adv.provenanceNote } } }
+    }
     $report = [ordered]@{ readOnly=$true; noBrowser=$true; keepTemp=$false
-        security=@{ verifiedOn='2026-11-23'; sourceDate='2026-11'
-            source='https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/'
+        security=@{ verifiedOn=$securityVerified; sourceDate=($securityVerified.Substring(0,[Math]::Min(7,$securityVerified.Length)))
+            source=$securitySource
             provenance='Parent verification supplied to this module; no runtime fetching.'
-            advisories=@(
-                @{ url='https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/'; provenance='Official Adoptium vendor advisory directly fetched by parent.' },
-                @{ url='https://linux.oracle.com/cve/CVE-2026-114938.html'; provenance='Oracle Linux source directly fetched by parent.' },
-                @{ url='https://openjdk.org/groups/vulnerability/advisories/2026-11-17'; provenance='User-supplied OpenJDK text reviewed by parent; not independently fetched.' }
-            )
+            advisories=$securityAdvisories
             warning='Unknown JVM vendors/builds remain inconclusive; source verification is not ELO compatibility verification or proof of whole-system safety or exploitability.' }
         scan=$null; action=$null; error=$null }
     $code = 2
@@ -729,22 +796,25 @@ function Invoke-EloCli {
         $options = @{}
         $allowed = @('--help','--cli','--scan','--json','--no-browser','--keep-temp',
             '--manual-path','--manual','--mitigate','--target','--confirm-admin',
-            '--confirm-mitigation','--confirm-update','--update-runtime')
+            '--confirm-mitigation','--confirm-update','--update-runtime',
+            '--catalog-validate','--catalog-install','--catalog-simulate','--catalog-list','--catalog-restore')
         for ($i=0; $i -lt $Arguments.Count; $i++) {
             $arg = $Arguments[$i]
             if ($allowed -cnotcontains $arg -or $options.ContainsKey($arg)) { throw 'Unknown or duplicate option.' }
             $value = $true
-            if ($arg -cin @('--manual-path','--target')) {
+            if ($arg -cin @('--manual-path','--target','--catalog-validate','--catalog-install','--catalog-simulate','--catalog-restore')) {
                 $i++
                 if ($i -ge $Arguments.Count -or $Arguments[$i].StartsWith('--')) { throw 'Missing option value.' }
                 $value = $Arguments[$i]
             }
             $options[$arg] = $value
         }
+        $catalogMode = @('--catalog-validate','--catalog-install','--catalog-simulate','--catalog-list','--catalog-restore') | Where-Object { $options.ContainsKey($_) }
         $modes = @('--help','--manual','--mitigate','--update-runtime') | Where-Object { $options.ContainsKey($_) }
+        if (@($catalogMode).Count -gt 0 -and (@($catalogMode).Count -gt 1 -or @($modes).Count -gt 0 -or $options.ContainsKey('--scan') -or $options.ContainsKey('--manual-path') -or $options.ContainsKey('--target') -or $options.ContainsKey('--confirm-mitigation') -or $options.ContainsKey('--confirm-update'))) { throw 'Conflicting modes.' }
         if (@($modes).Count -gt 1 -or ($options.ContainsKey('--scan') -and @($modes).Count -gt 0)) { throw 'Conflicting modes.' }
         $isAction = $options.ContainsKey('--mitigate') -or $options.ContainsKey('--update-runtime')
-        if (-not $isAction -and
+        if (-not $isAction -and @($catalogMode).Count -eq 0 -and
             ($options.ContainsKey('--target') -or $options.ContainsKey('--confirm-admin') -or $options.ContainsKey('--confirm-mitigation') -or $options.ContainsKey('--confirm-update'))) {
             throw 'Action arguments require --mitigate or --update-runtime.'
         }
@@ -754,6 +824,50 @@ function Invoke-EloCli {
             $text = Get-EloCliReadme
             if ($json) { $text = @{ readme=$text } | ConvertTo-Json -Depth 4 }
             return [pscustomobject]@{ ExitCode=0; Output=$text }
+        }
+        # Catalog maintenance (vulndb.json): validate, simulate, install (with quarantine of the old file), list, restore.
+        if (@($catalogMode).Count -gt 0) {
+            $verb = [string]@($catalogMode)[0]
+            $isChange = $verb -cin @('--catalog-install','--catalog-restore')
+            if ($isChange -and -not $options.ContainsKey('--confirm-admin')) { throw ($verb + ' requires --confirm-admin; the previous file is quarantined first and can be restored.') }
+            if ($options.ContainsKey('--confirm-admin') -and -not $isChange) { throw '--confirm-admin only applies to --catalog-install and --catalog-restore.' }
+            if ($isChange -and (& $Actions.IsAdmin) -ne $true) { throw 'Administrator privileges required.' }
+            $arg = [string]$options[$verb]
+            $result = $null
+            switch ($verb) {
+                '--catalog-validate' {
+                    $path = Assert-EloCliCatalogPath $arg
+                    $db = Read-EloVulnDbFile $path
+                    $result = @{ valid = $true; file = $path; vulnerabilities = @(@($db.vulnerabilities) | ForEach-Object { @{ id = [string]$_.id; severity = [string]$_.severity; status = [string]$_.status } }) }
+                }
+                '--catalog-install' {
+                    $path = Assert-EloCliCatalogPath $arg
+                    $installed = Install-EloVulnDb -Source $path
+                    $result = @{ installed = $installed.installed; quarantinedPrevious = $installed.quarantined }
+                }
+                '--catalog-simulate' {
+                    if ($arg -cmatch '^[A-Za-z]:\\') {
+                        # A catalog FILE (e.g. an AI draft): simulate every entry in it, active or not.
+                        $db = Read-EloVulnDbFile (Assert-EloCliCatalogPath $arg)
+                        $result = @(@($db.vulnerabilities) | ForEach-Object { $s = Invoke-EloVulnSimulation $_ $db; @{ id = [string]$_.id; status = [string]$_.status; passed = [bool]$s.Passed; detected = [string]$s.Status; reason = [string]$s.Reason } })
+                    } else {
+                        if ($arg -cnotmatch '^[A-Za-z0-9._\-]{3,64}$') { throw 'Invalid vulnerability id.' }
+                        $db = Get-EloVulnDb
+                        $entry = @($db.vulnerabilities | Where-Object { $_.id -ceq $arg }) | Select-Object -First 1
+                        if (-not $entry) { throw 'Unknown vulnerability id.' }
+                        $result = Invoke-EloVulnSimulation $entry $db
+                    }
+                }
+                '--catalog-list' { $result = @(Get-EloQuarantineEntries | ForEach-Object { @{ id = [string]$_.id; originalPath = [string]$_.originalPath; reason = [string]$_.reason; createdUtc = [string]$_.createdUtc } }) }
+                '--catalog-restore' {
+                    $restored = Restore-EloFileFromQuarantine -Id $arg
+                    $result = @{ restored = $restored.restored; from = $restored.from; replacedCopy = $restored.replacedCopy }
+                }
+            }
+            $report.readOnly = ($verb -cnotin @('--catalog-install','--catalog-restore')); $report.action = @{ catalog = $verb.Substring(2); result = $result }
+            $code = 0
+            if ($json) { $output = ConvertTo-Json -InputObject $report -Depth 30 -Compress } else { $output = "ELO Patch Tools catalog`r`n" + (ConvertTo-Json -InputObject $report -Depth 30) }
+            return [pscustomobject]@{ ExitCode = $code; Output = $output }
         }
         $report.keepTemp = $options.ContainsKey('--keep-temp')
         $manualPath = $null
@@ -870,6 +984,7 @@ function New-EloServerSession {
         Adapters=@{
             NewUpdateContext={ param($Root,$Runtime,$StopServices) New-EloUpdateContext -Adapters (New-EloWindowsUpdateAdapters -ApprovedRoot $Root -Runtime $Runtime -AllowServiceStop:([bool]$StopServices)) -Production }
             BackupRoots={ @([IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -in @([IO.DriveType]::Fixed,[IO.DriveType]::Removable) -and $_.Name -cmatch '^[C-Z]:\\$' } | ForEach-Object { $_.RootDirectory.FullName }) }
+            ScanRules={ if (Get-Command Get-EloScanRules -CommandType Function -ErrorAction SilentlyContinue) { ,@(Get-EloScanRules) } else { ,@() } }
             Log={ param($Message) Write-Host ((Get-Date).ToString('HH:mm:ss')+'  '+$Message) }
             Identity={ param($Path) Get-EloRuntimeIdentity $Path }
             EloVersion={ param($Roots) Get-EloInstalledIndexserverVersion $Roots }
@@ -945,32 +1060,47 @@ function Start-EloScanWorker {
     $roots = @([IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -in @([IO.DriveType]::Fixed,[IO.DriveType]::Removable) } | ForEach-Object { $_.RootDirectory.FullName })
     $ps = [PowerShell]::Create()
     $wrapper = @'
-param($source,$roots,$manual,$control)
+param($source,$roots,$manual,$control,$rules)
 $ErrorActionPreference='Stop'
 . ([scriptblock]::Create($source))
 $cancel = { [bool]$control.Cancel }.GetNewClosure()
-Invoke-EloJavaScan -DriveRoots $roots -ManualPath $manual -ShouldCancel $cancel
+Invoke-EloJavaScan -DriveRoots $roots -ManualPath $manual -ShouldCancel $cancel -Rules $rules
 '@
     try {
-        $null = $ps.AddScript($wrapper).AddArgument($Session.ScanSource).AddArgument($roots).AddArgument($ManualPath).AddArgument($control)
+        $null = $ps.AddScript($wrapper).AddArgument($Session.ScanSource).AddArgument($roots).AddArgument($ManualPath).AddArgument($control).AddArgument((& $Session.Adapters.ScanRules))
         $handle = $ps.BeginInvoke()
         $Session.Worker = @{PowerShell=$ps; Handle=$handle; Control=$control}
         $Session.State = 'scanning'
     } catch { $ps.Dispose(); $Session.State='error'; throw }
 }
 function Get-EloSecurityMetadata {
-    # Verification supplied by the primary parent, NOT fetched by this module.
-    # Titles carry provenance because the HTML contract has no provenance field.
-    return @{verifiedOn='2026-11-23';advisories=@(
-        @{id='openjdk-2026-11-17';url='https://openjdk.org/groups/vulnerability/advisories/2026-11-17';title=@{
-            en='OpenJDK advisory: parent reviewed user-supplied text; not fetched directly (2026-11-23)'
-            de='OpenJDK: Elternagent pruefte vom Benutzer gelieferten Text; nicht direkt abgerufen (2026-11-23)'}},
-        @{id='oracle-cve-2026-114938';url='https://linux.oracle.com/cve/CVE-2026-114938.html';title=@{
-            en='Oracle Linux CVE-2026-114938: parent fetched directly (2026-11-23); not ELO compatibility verification'
-            de='Oracle Linux CVE-2026-114938: Elternagent rief direkt ab (2026-11-23); keine ELO-Kompatibilitaetspruefung'}},
-        @{id='temurin-november-2026';url='https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/';title=@{
-            en='Temurin vendor advisory: parent fetched directly (2026-11-23); exact listed Temurin builds only'
-            de='Temurin-Herstellerhinweis: Elternagent rief direkt ab (2026-11-23); nur exakt aufgefuehrte Temurin-Builds'}})}
+    # Advisories of every active catalog vulnerability (vulndb.json). Verification dates and provenance come
+    # from the catalog; this module does not fetch them.
+    $items=@(); $verified=@()
+    foreach ($v in (Get-EloActiveVulnerabilities)) {
+        if ($v.verifiedOn) { $verified+=[string]$v.verifiedOn }
+        foreach ($a in @($v.advisories)) { $items+=@{id=[string]$a.id;url=[string]$a.url;title=@{en=[string]$a.title.en;de=[string]$a.title.de}} }
+    }
+    if ($items.Count -eq 0) { return @{verifiedOn=$null;advisories=@()} }
+    return @{verifiedOn=[string]($verified | Sort-Object -Descending | Select-Object -First 1);advisories=$items}
+}
+function Get-EloVulnerabilityInfo {
+    # What the UI needs per active vulnerability: severity, problem and solution texts, and the action ids.
+    $list=@()
+    foreach ($v in (Get-EloActiveVulnerabilities)) {
+        $list+=@{id=[string]$v.id;alias=[string](@($v.aliases) | Select-Object -First 1);severity=[string]$v.severity
+            title=@{en=[string]$v.title.en;de=[string]$v.title.de};problem=@{en=[string]$v.problem.en;de=[string]$v.problem.de};solution=@{en=[string]$v.solution.en;de=[string]$v.solution.de}
+            actions=@(@($v.actions) | ForEach-Object { [string]$_.id })}
+    }
+    return $list
+}
+function Get-EloMitigationAction {
+    # The jvm-option action of the first active vulnerability that has one.
+    foreach ($v in (Get-EloActiveVulnerabilities)) {
+        $a=Get-EloVulnAction $v 'jvm-option'
+        if ($a) { return @{Vulnerability=$v;Action=$a} }
+    }
+    return $null
 }
 function ConvertTo-EloUiResults {
     param($Session,$Scan)
@@ -980,12 +1110,14 @@ function ConvertTo-EloUiResults {
     foreach ($item in $Scan.Results) {
         $id = New-EloSecret
         $status = 'inconclusive'
-        if ($item.Status -ceq 'PotentiallyVulnerable' -and $item.Vendor -ceq 'Temurin') { $status='vulnerable' }
+        if ($item.Status -ceq 'PotentiallyVulnerable') { $status='vulnerable' }
         # Narrow exact-build allowlist from parent-verified Temurin evidence.
         # No extrapolation to later versions, other vendors or ELO compatibility.
-        $fixed=@('17.0.21.1+2','21.0.13.1+2','25.0.5.1+2','27.0.1.1+4')
+        $rules=@(); if ($Session.Adapters.ScanRules) { $rules=@(& $Session.Adapters.ScanRules | Where-Object { $_.Vendor -ceq 'Temurin' }) }
+        $fixed=@($rules | ForEach-Object { $_.Fixed } | ForEach-Object { [string]$_ })
+        $sources=@($rules | ForEach-Object { [string]$_.Source })
         if ($item.Status -ceq 'KnownFixed' -and $item.Vendor -ceq 'Temurin' -and $fixed -ccontains $item.FullVersion -and
-            $item.Build -ceq $item.FullVersion -and $item.Source -ceq 'https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/') { $status='patched' }
+            $item.Build -ceq $item.FullVersion -and $sources -ccontains [string]$item.Source) { $status='patched' }
         $architecture = 'unknown'
         if ($item.Architecture -in @('x86','x64','ARM64')) { $architecture=$item.Architecture.ToLowerInvariant() }
         $version = 'Unknown'; if ($item.FullVersion) { $version=[string]$item.FullVersion }
@@ -995,7 +1127,15 @@ function ConvertTo-EloUiResults {
         $rationale += " Runtime-root inference: $($item.RuntimeRootRationale)"
         $provenance='Parent verification 2026-11-23: OpenJDK advisory reviewed as user-supplied text, not fetched directly; Oracle Linux CVE-2026-114938 and Temurin vendor advisory fetched directly by parent. This module did not fetch them. Exact listed Temurin builds only; no ELO compatibility or other vendor verification. Patched is a narrow advisory classification, not a whole-system safety claim.'
         $evidence = "$provenance`nScanner classification: $($item.Status). $($item.Reason)`n$($item.Evidence)`nReported architecture: $($item.Architecture)`nProbe error: $($item.Error)`nRule source: $($item.Source)"
+        # One finding per catalog vulnerability evaluated for this runtime (UI statuses).
+        $findings=@()
+        foreach ($f in @($item.Findings | Where-Object { $_ -and $_.Id })) {
+            $fs='inconclusive'; if ($f.Status -ceq 'PotentiallyVulnerable') { $fs='vulnerable' } elseif ($f.Status -ceq 'KnownFixed' -and $status -ceq 'patched') { $fs='patched' }
+            $sev='high'; if (@('high','medium','low') -ccontains [string]$f.Severity) { $sev=[string]$f.Severity }
+            $findings+=[pscustomobject]@{id=[string]$f.Id;severity=$sev;status=$fs}
+        }
         $row = [ordered]@{id=$id;path=[string]$item.Location;runtimeRoot=[string]$item.RuntimeRoot;version=$version;vendor=$vendor;architecture=$architecture;status=$status
+            findings=@($findings)
             eloRationale=@{en=$rationale;de="ELO-Zuordnung nicht verifiziert. Technischer Nachweis: $rationale"}
             classificationEvidence=@{en=$evidence;de="Elternagent pruefte Quellen am 2026-11-23: OpenJDK nur als Benutzertext, Oracle Linux und Temurin direkt abgerufen. Keine ELO-Kompatibilitaets- oder andere Herstellerpruefung. Technischer Nachweis: $evidence"}}
         foreach ($pair in @(@($row.path,1024),@($row.runtimeRoot,1024),@($version,128),@($vendor,256),@($row.eloRationale.en,2048),@($row.eloRationale.de,2048),@($row.classificationEvidence.en,4096),@($row.classificationEvidence.de,4096))) {
@@ -1006,7 +1146,10 @@ function ConvertTo-EloUiResults {
     $payload = @{results=@($rows.ToArray());security=(Get-EloSecurityMetadata)}
     if ([Text.Encoding]::UTF8.GetByteCount(($payload | ConvertTo-Json -Depth 8 -Compress)) -gt 4MB) { Stop-EloRequest 422 'narrow_scan_root' }
     $Session.Results=$rows.ToArray(); $Session.Targets=$targets
-    Write-EloLog $Session ('Scan finished: '+$rows.Count+' Java runtime(s) found, '+@($rows | Where-Object { $_.status -ceq 'vulnerable' }).Count+' vulnerable (CVE-2026-114938).')
+    $primary=Get-EloPrimaryVulnerability
+    $scanTemplate='Scan finished: {count} Java runtime(s) found, {vulnerable} vulnerable ({id}).'
+    if ($primary -and $primary.messages.logScan) { $scanTemplate=[string]$primary.messages.logScan }
+    Write-EloLog $Session (Format-EloVulnText $scanTemplate @{count=$rows.Count;vulnerable=@($rows | Where-Object { $_.status -ceq 'vulnerable' }).Count;id=$(if ($primary) { [string]$primary.id } else { '' })})
     $Session.ReportIndexes=@{}
     foreach ($row in $Session.Results) {
         $item=$targets[$row.id]
@@ -1083,7 +1226,9 @@ function Set-EloMachineOptions {
     } finally { $key.Dispose() }
 }
 function Merge-EloJavaOptions {
-    param([AllowNull()][AllowEmptyString()][string]$Existing)
+    param([AllowNull()][AllowEmptyString()][string]$Existing,$Action=$null)
+    if ($null -eq $Action) { $Action=(Get-EloMitigationAction).Action }
+    $option=[string]$Action.option; $flag=[string]$Action.conflictPattern
     if ($Existing.Length -gt 1000 -or $Existing -match '[\x00-\x08\x0a-\x1f\x7f]') { Stop-EloRequest 409 'unsupported_options' }
     # Conservative JAVA_TOOL_OPTIONS token grammar: whitespace separates outside
     # balanced single/double quotes. Escaped quotes are deliberately unsupported:
@@ -1106,12 +1251,12 @@ function Merge-EloJavaOptions {
         }
         if ($quote -ne [char]0) { Stop-EloRequest 409 'malformed_option_quoting' }
         $token=$decoded.ToString()
-        if ($token -cmatch '^-XX:[+-]UseBASE64Intrinsics$') { continue }
-        if ($token -match '^-XX:.*UseBASE64Intrinsics') { Stop-EloRequest 409 'ambiguous_intrinsics_option' }
+        if ($token -cmatch ('^-XX:[+-]'+[regex]::Escape($flag)+'$')) { continue }
+        if ($token -match ('^-XX:.*'+[regex]::Escape($flag))) { Stop-EloRequest 409 'ambiguous_intrinsics_option' }
         $null=$kept.Append($Existing.Substring($start,$i-$start))
     }
-    if ($kept.Length -eq 0) { return '-XX:-UseBASE64Intrinsics' }
-    return $kept.ToString() + ' -XX:-UseBASE64Intrinsics'
+    if ($kept.Length -eq 0) { return $option }
+    return $kept.ToString() + ' ' + $option
 }
 function Get-EloJavaFingerprint {
     param([string]$Path)
@@ -1123,9 +1268,11 @@ function Get-EloJavaFingerprint {
     return (Get-FileHash -LiteralPath $canonical -Algorithm SHA256 -ErrorAction Stop).Hash
 }
 function Test-EloFlagEvidence {
-    param([string]$Evidence)
-    $matches=[regex]::Matches($Evidence,'(?m)^\s*bool\s+UseBASE64Intrinsics\s*(?::=|=)\s*(true|false)\b[^\r\n]*$')
-    return $matches.Count -eq 1 -and $matches[0].Groups[1].Value -ceq 'false'
+    param([string]$Evidence,$Action=$null)
+    if ($null -eq $Action) { $Action=(Get-EloMitigationAction).Action }
+    $re=New-Object Text.RegularExpressions.Regex([string]$Action.verify.expect,[Text.RegularExpressions.RegexOptions]::None,[TimeSpan]::FromSeconds(2))
+    $matches=$re.Matches($Evidence)
+    return $matches.Count -eq 1 -and $matches[0].Groups[1].Value -ceq [string]$Action.verify.mustBe
 }
 function Invoke-EloFlagProbe {
     param([string]$JavaPath,[string]$Options)
@@ -1139,7 +1286,8 @@ function Invoke-EloFlagProbe {
     $p=New-Object Diagnostics.Process
     try {
         $info=New-Object Diagnostics.ProcessStartInfo
-        $info.FileName=$JavaPath; $info.Arguments='-XX:+PrintFlagsFinal -version'
+        $verifyArgs=(@((Get-EloMitigationAction).Action.verify.args) | ForEach-Object { [string]$_ }) -join ' '
+        $info.FileName=$JavaPath; $info.Arguments=$verifyArgs
         $info.UseShellExecute=$false; $info.CreateNoWindow=$true
         $info.RedirectStandardOutput=$true; $info.RedirectStandardError=$true
         $info.EnvironmentVariables['JAVA_TOOL_OPTIONS']=$Options
@@ -1178,15 +1326,18 @@ function New-EloMitigationPreview {
     # Preserve raw REG_EXPAND_SZ bytes, but do not pretend a process-local probe
     # proves Windows' future service expansion against an unknown environment.
     if ($before.Kind -ceq 'ExpandString' -and $before.Value -match '%') { Stop-EloRequest 409 'ambiguous_environment_expansion' }
-    $after=@{Exists=$true;Value=(Merge-EloJavaOptions $before.Value);Kind=$before.Kind}
+    $spec=Get-EloMitigationAction
+    if (-not $spec) { Stop-EloRequest 409 'target_not_eligible' }
+    $after=@{Exists=$true;Value=(Merge-EloJavaOptions $before.Value $spec.Action);Kind=$before.Kind}
     $fingerprint=& $Session.Adapters.Fingerprint $target.Location
     # Preview is read-only, including registry/configuration. A disposable JVM is
     # started only after explicit action confirmation, never during preview.
     $preview=@{Id=(New-EloSecret);ResultId=$ResultId;ActionId='mitigate';Before=$before;After=$after;Fingerprint=$fingerprint
         JavaPath=$target.Location;Expires=(& $Session.Adapters.Clock).AddMinutes(2)}
     $old='(absent)'; if ($before.Exists) { $old="[$($before.Value)]" }
-    $summaryEn="Set exactly one -XX:-UseBASE64Intrinsics in MACHINE JAVA_TOOL_OPTIONS, removing standalone duplicate/conflicting +/- flags (all future inheriting JVMs, not just ELO). Previous value: $old (registry type: $($before.Kind)). New value: [$($after.Value)]. Registry type and all other option bytes are preserved. Backup: exact previous value retained in this session. On verification failure restore it automatically; after success use an approved Registry Editor procedure to restore JAVA_TOOL_OPTIONS under HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment with the previous value AND registry type above (delete it if absent). No ELO files are changed. Confirmation authorizes one disposable java -XX:+PrintFlagsFinal -version probe with the proposed options, followed by registry write, readback and a second probe."
-    $summaryDe="Genau einmal -XX:-UseBASE64Intrinsics in der systemweiten Variable JAVA_TOOL_OPTIONS setzen; eigenstaendige doppelte/widerspruechliche +/- Optionen entfernen (alle kuenftig erbenden JVMs, nicht nur ELO). Alter Wert: $old (Registrierungstyp: $($before.Kind)). Neuer Wert: [$($after.Value)]. Typ und alle anderen Optionszeichen bleiben erhalten. Sicherung: exakter alter Wert in dieser Sitzung. Bei Prueffehler automatische Wiederherstellung; nach Erfolg per freigegebenem Registrierungseditor JAVA_TOOL_OPTIONS unter HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment mit altem Wert UND Typ wiederherstellen (bei zuvor fehlendem Wert loeschen). Keine ELO-Dateien werden geaendert. Bestaetigung erlaubt einen Test mit java -XX:+PrintFlagsFinal -version, danach Registrierungsaenderung, Ruecklesen und zweiten Test."
+    $values=@{option=[string]$spec.Action.option;variable=[string]$spec.Action.variable;old=$old;kind=[string]$before.Kind;new=[string]$after.Value}
+    $summaryEn=Format-EloVulnText ([string]$spec.Action.summary.en) $values
+    $summaryDe=Format-EloVulnText ([string]$spec.Action.summary.de) $values
     $Session.Preview=$preview
     return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe};warnings=@(
         @{en='Existing JVMs are NOT protected. No restart is performed. Windows services may retain an old environment even after restart; a verified PrintFlagsFinal probe is not proof of service protection. Coordinate supported ELO configuration with your administrator.';de='Bestehende JVMs sind NICHT geschuetzt. Kein Neustart. Windows-Dienste koennen alte Umgebungswerte behalten. Der PrintFlagsFinal-Test beweist keinen Schutz des Dienstes. Unterstuetzte ELO-Konfiguration mit Administrator klaeren.'},
@@ -1282,21 +1433,51 @@ function Read-EloBackupRelease {
     } catch { }
     return @{Version=$version;Vendor=$vendor}
 }
-function Get-EloBackupRisk {
-    # vulnerable | patched | unknown for CVE-2026-114938, using the same exact Temurin fixed milestones as the scan.
-    # Other vendors and unlisted branches are never called safe: 'unknown'.
+function Get-EloBackupAssessment {
+    # Risk of a Java build against every active catalog vulnerability (version-table rules):
+    # vulnerable (any rule says so) | patched (all rules say fixed) | unknown. Other vendors and unlisted
+    # branches are never called safe. Also returns the vulnerability that decides the message.
     param([string]$Vendor,[string]$Version)
-    if ($Vendor -cne 'Temurin') { return 'unknown' }
-    $fixed=@('17.0.21.1+2','21.0.13.1+2','25.0.5.1+2','27.0.1.1+4')
+    $primary=Get-EloPrimaryVulnerability
+    $result=@{Risk='unknown';Vulnerability=$primary}
+    if ($Vendor -cne 'Temurin') { return $result }
     try {
         $v=ConvertTo-EloJavaVersion $Version
-        $milestone=@($fixed | Where-Object { ($_ -split '\.')[0] -ceq $v.Branch })
-        if ($milestone.Count -ne 1) { return 'unknown' }
-        if ((Compare-EloJavaVersion $v (ConvertTo-EloJavaVersion $milestone[0])) -lt 0) { return 'vulnerable' }
-        return 'patched'
-    } catch { return 'unknown' }
+        $verdicts=@(); $deciding=$null
+        foreach ($rule in @(Get-EloScanRules | Where-Object { $_.Vendor -ceq 'Temurin' })) {
+            $milestone=@(@($rule.Fixed) | Where-Object { ($_ -split '\.')[0] -ceq $v.Branch })
+            if ($milestone.Count -ne 1) { $verdicts+='unknown'; continue }
+            if ((Compare-EloJavaVersion $v (ConvertTo-EloJavaVersion $milestone[0])) -lt 0) { $verdicts+='vulnerable'; if (-not $deciding) { $deciding=$rule.Id } }
+            else { $verdicts+='patched' }
+        }
+        if ($verdicts -contains 'vulnerable') { $result.Risk='vulnerable' }
+        elseif ($verdicts.Count -gt 0 -and @($verdicts | Where-Object { $_ -cne 'patched' }).Count -eq 0) { $result.Risk='patched' }
+        if ($deciding) { $result.Vulnerability=@(Get-EloActiveVulnerabilities | Where-Object { $_.id -ceq $deciding })[0] }
+    } catch { }
+    return $result
 }
-function Get-EloBackupList {
+function Get-EloBackupRisk {
+    param([string]$Vendor,[string]$Version)
+    return [string](Get-EloBackupAssessment $Vendor $Version).Risk
+}
+function Get-EloVulnMessageValues {
+    # Placeholder values for catalog messages about one vulnerability.
+    param($Vulnerability,[string]$Vendor='',[string]$Version='',[string]$Runtime='')
+    $option=''
+    if ($Vulnerability) { $a=Get-EloVulnAction $Vulnerability 'jvm-option'; if ($a) { $option=[string]$a.option } }
+    return @{vendor=$Vendor;version=$Version;runtime=$Runtime;option=$option
+        id=$(if ($Vulnerability) { [string]$Vulnerability.id } else { '' });alias=$(if ($Vulnerability) { [string](@($Vulnerability.aliases) | Select-Object -First 1) } else { '' })}
+}
+function Get-EloRestoreSecurityWarning {
+    # Bilingual security warning for restoring a backup, from the catalog message of the deciding vulnerability.
+    param([string]$Risk,$Vulnerability,[string]$Vendor,[string]$Version)
+    if (-not $Vulnerability -or -not $Vulnerability.messages) { return @() }
+    $name='restoreUnknown'; if ($Risk -ceq 'vulnerable') { $name='restoreVulnerable' } elseif ($Risk -ceq 'patched') { $name='restoreFixed' }
+    $m=$Vulnerability.messages.$name
+    if (-not $m) { return @() }
+    $values=Get-EloVulnMessageValues $Vulnerability $Vendor $Version
+    return @(@{en=(Format-EloVulnText ([string]$m.en) $values);de=(Format-EloVulnText ([string]$m.de) $values)})
+}function Get-EloBackupList {
     # Backup ZIPs written by this tool (<runtime>.backup-<yyyyMMddHHmmss>.zip) next to a runtime, on every
     # drive at level 1 (X:\) and level 2 (X:\<folder>\). Read-only, bounded, cached for 30 s. The ids are
     # server-side capabilities: the UI never sends a path.
@@ -1482,11 +1663,8 @@ function New-EloRestorePreview {
     $summaryEn="Restore the runtime ($($preview.ToVersion)) of $($source.Runtime) from the backup ZIP $($source.Backup). Every file is hash-checked before the swap; the current runtime (if any) is renamed to $($source.Runtime).replaced-$($preview.Stamp) and kept; nothing is deleted."
     $summaryDe="Die Runtime ($($preview.ToVersion)) von $($source.Runtime) aus dem Backup-ZIP $($source.Backup) wiederherstellen. Jede Datei wird vor dem Austausch per Hash geprueft; die aktuelle Runtime (falls vorhanden) wird nach $($source.Runtime).replaced-$($preview.Stamp) umbenannt und bleibt erhalten; es wird nichts geloescht."
     $ver=[string]$preview.ToVersion; $vend=[string]$source.Vendor
-    $warnings=@(switch ([string]$source.Risk) {
-        'vulnerable' { @(@{en="SECURITY: this backup holds $vend $ver, which is BEFORE the fix for CVE-2026-114938 (Java4Shell, BASE64 intrinsics). Restoring brings the vulnerability back. After the restore, apply the temporary mitigation (-XX:-UseBASE64Intrinsics) or update the runtime again.";de="SICHERHEIT: Dieses Backup enthaelt $vend $ver, also eine Version VOR dem Fix fuer CVE-2026-114938 (Java4Shell, BASE64-Intrinsics). Die Wiederherstellung bringt die Schwachstelle zurueck. Nach der Wiederherstellung die temporaere Risikominderung (-XX:-UseBASE64Intrinsics) anwenden oder die Runtime erneut aktualisieren."}) }
-        'patched' { @(@{en="Security: $vend $ver is a build listed as fixed for CVE-2026-114938. This is a narrow advisory classification, not a whole-system safety claim, and ELO compatibility is not verified.";de="Sicherheit: $vend $ver ist ein fuer CVE-2026-114938 als behoben aufgefuehrter Build. Das ist eine enge Advisory-Einstufung, keine Gesamtaussage zur Systemsicherheit; die ELO-Kompatibilitaet ist nicht geprueft."}) }
-        default { @(@{en="SECURITY: the vulnerability status of $vend $ver for CVE-2026-114938 cannot be determined from the available evidence. Treat it as potentially vulnerable and apply the temporary mitigation (-XX:-UseBASE64Intrinsics) after the restore.";de="SICHERHEIT: Der Schwachstellenstatus von $vend $ver fuer CVE-2026-114938 ist mit den vorhandenen Nachweisen nicht bestimmbar. Als potenziell verwundbar behandeln und nach der Wiederherstellung die temporaere Risikominderung (-XX:-UseBASE64Intrinsics) anwenden."}) }
-    })
+    $assessment=Get-EloBackupAssessment $vend $ver
+    $warnings=@(Get-EloRestoreSecurityWarning ([string]$source.Risk) $assessment.Vulnerability $vend $ver)
     if ($services.Count -gt 0) {
         $list=Format-EloServiceList $services
         $warnings=@(@{en="The restore requires STOPPING the ELO services (Tomcat) that use this runtime: $list. ELO is unavailable while the runtime is swapped; they are started again afterwards. Confirming accepts this.";de="Die Wiederherstellung erfordert das BEENDEN der ELO-Dienste (Tomcat), die diese Runtime verwenden: $list. ELO ist waehrend des Austauschs nicht verfuegbar; die Dienste werden danach wieder gestartet. Mit der Bestaetigung wird dies akzeptiert."})+$warnings
@@ -1524,9 +1702,10 @@ function Invoke-EloRestoreAction {
         Classification=$classification;ClassificationVerified=($classification -cne 'Unknown');EvidenceCode=$code}
     $newIndex=$Session.ReportJvms.Count
     $Session.ReportActions+=@{Kind='Restore';Status='Proven';Verified=$true;RuntimeIndex=$newIndex;EvidenceCode='OriginalRuntimeRestored';EvidenceVerified=$true;FromVersion=$preview.FromVersion;ToVersion=$preview.ToVersion}
-    if ($classification -ceq 'PotentiallyVulnerable') { Write-EloLog $Session "SECURITY: $($preview.Runtime) was restored to $($restored.Version), which is BEFORE the CVE-2026-114938 fix. Update Java again or apply the mitigation (-XX:-UseBASE64Intrinsics)." }
-    elseif ($classification -ceq 'Unknown') { Write-EloLog $Session "SECURITY: $($preview.Runtime) was restored to $($restored.Version); its status for CVE-2026-114938 is unknown. Treat it as potentially vulnerable." }
-    else { Write-EloLog $Session "Restored $($preview.Runtime) to $($restored.Version) (listed as fixed for CVE-2026-114938)." }
+    $logAssessment=Get-EloBackupAssessment ([string]$preview.Vendor) ([string]$restored.Version)
+    $logValues=Get-EloVulnMessageValues $logAssessment.Vulnerability ([string]$preview.Vendor) ([string]$restored.Version) ([string]$preview.Runtime)
+    $logName='logRestoreFixed'; if ($classification -ceq 'PotentiallyVulnerable') { $logName='logRestoreVulnerable' } elseif ($classification -ceq 'Unknown') { $logName='logRestoreUnknown' }
+    if ($logAssessment.Vulnerability -and $logAssessment.Vulnerability.messages.$logName) { Write-EloLog $Session (Format-EloVulnText ([string]$logAssessment.Vulnerability.messages.$logName) $logValues) }
     $Session.LastUpdate=$null; $Session.BackupsCache=$null
     return @{ok=$true}
 }function Get-EloSessionReportHtml {
@@ -1562,7 +1741,7 @@ function Invoke-EloApi {
         if ($Request.Target -ceq '/api/status') { return @{state=$Session.State} }
         if ($Session.RecoveryRequired) { Stop-EloRequest 500 'rollback_failed_manual_recovery_required' }
         if ($Session.LastError) { Stop-EloRequest $Session.LastError.Status $Session.LastError.Code }
-        return @{results=@($Session.Results);security=(Get-EloSecurityMetadata);backups=@(Get-EloBackupList $Session)}
+        return @{results=@($Session.Results);security=(Get-EloSecurityMetadata);vulnerabilities=@(Get-EloVulnerabilityInfo);backups=@(Get-EloBackupList $Session)}
     }
     if ($Request.Headers['Content-Type'] -cnotin @('application/json','application/json; charset=utf-8')) { Stop-EloRequest 415 'json_required' }
     switch -CaseSensitive ($Request.Target) {
@@ -1951,6 +2130,10 @@ ol.manual li{margin:.35rem 0}
 .alert h3{display:flex;align-items:center;gap:8px;margin:0 0 6px;color:var(--bad);font-size:1.05rem}
 .alert p{margin:.35rem 0}
 .alert .fix{font-weight:600}
+.alert .vuln+.vuln{border-top:1px solid var(--bad);margin-top:10px;padding-top:10px}
+.sev{display:inline-block;font-size:.6875rem;font-weight:800;letter-spacing:.04em;text-transform:uppercase;padding:.1rem .45rem;border-radius:6px;color:#fff;background:var(--bad)}
+.sev[data-sev=medium]{background:#c2410c}
+.sev[data-sev=low]{background:#a16207}
 .rt[data-status=vulnerable]{border-color:var(--bad)}
 .cmdbox{margin:16px 0 8px}
 .cmdbox h3{display:flex;align-items:center;gap:8px;font-size:1rem;margin:0 0 6px}
@@ -2020,7 +2203,7 @@ pre.cmd .c-str{color:#fca5a5}
 <section class="panel" id="step2" aria-labelledby="h2s" hidden>
 <h2 id="h2s"><span class="ico"><svg class="i"><use href="#i-cpu"/></svg></span><span data-i18n="step2Title"></span></h2>
 <p class="lead" data-i18n="step2Text"></p>
-<div id="vulnAlert" class="alert" role="alert" hidden><h3><svg class="i"><use href="#i-shield"/></svg><span data-i18n="vulnTitle"></span></h3><p id="vulnText"></p><p class="fix"><strong data-i18n="vulnFixLabel"></strong> <span data-i18n="vulnFix"></span></p></div>
+<div id="vulnAlert" class="alert" role="alert" hidden><div id="vulnList"></div></div>
 <div class="cards" id="cards" role="radiogroup" aria-labelledby="h2s"></div>
 <label class="field" hidden><span data-i18n="results"></span><select id="results"></select></label>
 <details><summary><svg class="i"><use href="#i-info"/></svg><span data-i18n="evidence"></span></summary><div class="body">
@@ -2036,7 +2219,7 @@ pre.cmd .c-str{color:#fca5a5}
 <section class="panel" id="step3" aria-labelledby="h3s" hidden>
 <h2 id="h3s"><span class="ico"><svg class="i"><use href="#i-update"/></svg></span><span data-i18n="step3Title"></span></h2>
 <p class="lead" data-i18n="warning"></p>
-<div id="vulnRec" class="alert" role="alert" hidden><p><strong data-i18n="vulnFixLabel"></strong> <span data-i18n="vulnFix"></span></p></div>
+<div id="vulnRec" class="alert" role="alert" hidden><div id="vulnRecList"></div></div>
 <div class="cards">
 <button id="update" class="card rec" type="button" disabled><span class="ico"><svg class="i"><use href="#i-update"/></svg></span><span><span class="tt" data-i18n="update"></span><span class="dd" data-i18n="updateDesc"></span></span></button>
 <button id="mitigate" class="card" type="button" disabled><span class="ico"><svg class="i"><use href="#i-shield"/></svg></span><span><span class="tt" data-i18n="mitigate"></span><span class="dd" data-i18n="mitigateDesc"></span></span></button>
@@ -2110,8 +2293,8 @@ const messages = {
  'Stop only the affected service during the approved window, apply the chosen change using the vendor procedure, then restart. Check service health and effective JVM options/version. If checks fail, stop and restore the saved configuration/runtime.',
  'Rescan and document the outcome. Keep the backup until validated. Contact ELO support if paths, service ownership or compatibility are uncertain.'],
  manualCommandsTitle:'PowerShell commands (administrator)',manualCommands:'# Run in an ADMINISTRATOR PowerShell. Adjust the paths and service names to your scan result.\n\n# 1) Find the runtime, its version and the services that use it\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nGet-Content \'C:\\ELO\\java\\release\' | Select-String \'IMPLEMENTOR|JAVA_RUNTIME_VERSION|OS_ARCH\'\nGet-CimInstance Win32_Service | Where-Object { $_.PathName -match \'ELO\' } | Select-Object Name, State, PathName\n[Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\')\n\n# 2) Back up the runtime (ZIP) before changing anything\nCompress-Archive -LiteralPath \'C:\\ELO\\java\' -DestinationPath \'C:\\ELO\\java-backup.zip\'\n\n# 3) Temporary mitigation (machine-wide): KEEP the old value and append, never overwrite\n$old = [Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\'); $old\n[Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', (($old + \' -XX:-UseBASE64Intrinsics\').Trim()), \'Machine\')\n# Undo: [Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', $old, \'Machine\')   (use $null if it was empty)\n# Services only see the change after they are restarted.\n\n# 4) Update the runtime by hand (download the newest release of the SAME vendor and branch first)\n(Get-FileHash \'C:\\Downloads\\new-java.zip\' -Algorithm SHA256).Hash        # compare with the vendor\'s published SHA256\nStop-Service \'ELO-SRV01-1\' -Force                                        # every service that uses this Java\nRename-Item \'C:\\ELO\\java\' \'java.old\'\nExpand-Archive -LiteralPath \'C:\\Downloads\\new-java.zip\' -DestinationPath \'C:\\ELO\\java-new\'\nMove-Item (Get-ChildItem \'C:\\ELO\\java-new\' -Directory | Select-Object -First 1).FullName \'C:\\ELO\\java\'\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nStart-Service \'ELO-SRV01-1\'\n\n# 5) If something fails: stop the services, put the old runtime back, start the services\nStop-Service \'ELO-SRV01-1\' -Force\nRename-Item \'C:\\ELO\\java\' \'java.failed\'; Rename-Item \'C:\\ELO\\java.old\' \'java\'\nStart-Service \'ELO-SRV01-1\'\n# Or restore from the ZIP: Expand-Archive \'C:\\ELO\\java-backup.zip\' -DestinationPath \'C:\\ELO\\restore\'; then move the java folder back',
- backupsTitle:'Existing backups',backupsText:'Backups made by this tool were found on this server. Pick one to bring that Java version back; the runtime that is installed now is kept next to it.',vulnTitle:'Vulnerability found: CVE-2026-114938 (Java4Shell)',vulnText:'{n} runtime(s) are before the fixed release: {list}. The JIT BASE64 intrinsics flaw lets this Java produce wrong results; the vendor fixed it in a newer release.',vulnFixLabel:'Solution:',vulnFix:'update Java to the current release of the same branch (step 3, Update Java runtime). The temporary mitigation only reduces the risk until you update.',terminalTitle:'Run it from the terminal (administrator PowerShell)',terminalCmdsText:'# Update Java to the current release (recommended)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Temporary mitigation only (adds -XX:-UseBASE64Intrinsics; restart the ELO services afterwards)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Check the result (--target is the position in the scan list, starting at 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'contains a vulnerable Java',
-restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: before the CVE-2026-114938 fix',backupRisk_patched:'Listed as fixed for CVE-2026-114938',backupRisk_unknown:'Security status unknown: treat as potentially vulnerable',backupStop:'Restoring stops the ELO Tomcat services that use this Java (ELO is unavailable meanwhile) and starts them again afterwards.',
+ backupsTitle:'Existing backups',backupsText:'Backups made by this tool were found on this server. Pick one to bring that Java version back; the runtime that is installed now is kept next to it.',severity_high:'High',severity_medium:'Medium',severity_low:'Low',vulnTitle:'Vulnerability found: CVE-2026-114938 (Java4Shell)',vulnText:'{n} runtime(s) are before the fixed release: {list}. The JIT BASE64 intrinsics flaw lets this Java produce wrong results; the vendor fixed it in a newer release.',vulnFixLabel:'Solution:',vulnFix:'update Java to the current release of the same branch (step 3, Update Java runtime). The temporary mitigation only reduces the risk until you update.',terminalTitle:'Run it from the terminal (administrator PowerShell)',terminalCmdsText:'# Update Java to the current release (recommended)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Temporary mitigation only (adds -XX:-UseBASE64Intrinsics; restart the ELO services afterwards)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Check the result (--target is the position in the scan list, starting at 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'contains a vulnerable Java',
+restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: this version is before the vendor fix for a catalog vulnerability',backupRisk_patched:'Listed as fixed for every catalog vulnerability',backupRisk_unknown:'Security status unknown: treat as potentially vulnerable',backupStop:'Restoring stops the ELO Tomcat services that use this Java (ELO is unavailable meanwhile) and starts them again afterwards.',
  exportHeading:'Activity log',exportJson:'Export JSON results',exportLog:'Export activity log',
  idle:'Ready',scanning:'Scanning',cancelling:'Cancellation requested; waiting for the scanner',completed:'Scan completed',cancelled:'Scan cancelled; results may be incomplete',error:'Operation failed',unknown:'Unknown',
  vulnerable:'Potentially vulnerable',safe:'No vulnerability detected by current rules',mitigated:'Mitigation detected',unsupported:'Unsupported runtime',
@@ -2170,8 +2353,8 @@ restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: before the
  'Stoppen Sie nur den betroffenen Dienst im genehmigten Wartungsfenster, führen Sie die gewählte Änderung nach Herstellerverfahren aus und starten Sie ihn erneut. Prüfen Sie Dienstzustand und wirksame JVM-Optionen beziehungsweise Version. Bei Fehlern stoppen und gesicherte Konfiguration oder Laufzeit wiederherstellen.',
  'Scannen Sie erneut und dokumentieren Sie das Ergebnis. Bewahren Sie die Sicherung bis zur erfolgreichen Prüfung auf. Bei unklaren Pfaden, Dienstzuordnung oder Kompatibilität wenden Sie sich an den ELO-Support.'],
  manualCommandsTitle:'PowerShell-Befehle (Administrator)',manualCommands:'# In einer ADMINISTRATOR-PowerShell ausfuehren. Pfade und Dienstnamen an das Scan-Ergebnis anpassen.\n\n# 1) Runtime, Version und die Dienste finden, die sie verwenden\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nGet-Content \'C:\\ELO\\java\\release\' | Select-String \'IMPLEMENTOR|JAVA_RUNTIME_VERSION|OS_ARCH\'\nGet-CimInstance Win32_Service | Where-Object { $_.PathName -match \'ELO\' } | Select-Object Name, State, PathName\n[Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\')\n\n# 2) Runtime vor jeder Aenderung als ZIP sichern\nCompress-Archive -LiteralPath \'C:\\ELO\\java\' -DestinationPath \'C:\\ELO\\java-backup.zip\'\n\n# 3) Vorlaeufige Risikominderung (systemweit): alten Wert BEHALTEN und anhaengen, nie ueberschreiben\n$old = [Environment]::GetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', \'Machine\'); $old\n[Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', (($old + \' -XX:-UseBASE64Intrinsics\').Trim()), \'Machine\')\n# Rueckgaengig: [Environment]::SetEnvironmentVariable(\'JAVA_TOOL_OPTIONS\', $old, \'Machine\')   ($null, falls leer)\n# Dienste sehen die Aenderung erst nach einem Neustart.\n\n# 4) Runtime manuell aktualisieren (zuerst die neueste Version DESSELBEN Herstellers und Branches laden)\n(Get-FileHash \'C:\\Downloads\\new-java.zip\' -Algorithm SHA256).Hash        # mit der veroeffentlichten SHA256 des Herstellers vergleichen\nStop-Service \'ELO-SRV01-1\' -Force                                        # jeden Dienst, der dieses Java verwendet\nRename-Item \'C:\\ELO\\java\' \'java.old\'\nExpand-Archive -LiteralPath \'C:\\Downloads\\new-java.zip\' -DestinationPath \'C:\\ELO\\java-new\'\nMove-Item (Get-ChildItem \'C:\\ELO\\java-new\' -Directory | Select-Object -First 1).FullName \'C:\\ELO\\java\'\n& \'C:\\ELO\\java\\bin\\java.exe\' -version\nStart-Service \'ELO-SRV01-1\'\n\n# 5) Bei Fehlern: Dienste stoppen, alte Runtime zurueckstellen, Dienste starten\nStop-Service \'ELO-SRV01-1\' -Force\nRename-Item \'C:\\ELO\\java\' \'java.failed\'; Rename-Item \'C:\\ELO\\java.old\' \'java\'\nStart-Service \'ELO-SRV01-1\'\n# Oder aus dem ZIP: Expand-Archive \'C:\\ELO\\java-backup.zip\' -DestinationPath \'C:\\ELO\\restore\'; dann den java-Ordner zurueckverschieben',
- backupsTitle:'Vorhandene Backups',backupsText:'Auf diesem Server wurden Backups dieses Werkzeugs gefunden. Wählen Sie eines, um diese Java-Version zurückzuholen; die aktuell installierte Runtime bleibt daneben erhalten.',vulnTitle:'Schwachstelle gefunden: CVE-2026-114938 (Java4Shell)',vulnText:'{n} Runtime(s) liegen vor der behobenen Version: {list}. Der Fehler in den JIT-BASE64-Intrinsics kann falsche Ergebnisse liefern; der Hersteller hat ihn in einer neueren Version behoben.',vulnFixLabel:'Loesung:',vulnFix:'Java auf die aktuelle Version desselben Branches aktualisieren (Schritt 3, Java-Runtime aktualisieren). Die vorlaeufige Risikominderung senkt das Risiko nur bis zum Update.',terminalTitle:'Im Terminal ausfuehren (Administrator-PowerShell)',terminalCmdsText:'# Java auf die aktuelle Version aktualisieren (empfohlen)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Nur vorlaeufige Risikominderung (haengt -XX:-UseBASE64Intrinsics an; danach die ELO-Dienste neu starten)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Ergebnis pruefen (--target ist die Position in der Scan-Liste, ab 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'enthaelt ein verwundbares Java',
-restoreShort:'Dieses Backup wiederherstellen',backupRisk_vulnerable:'Verwundbar: vor dem Fix für CVE-2026-114938',backupRisk_patched:'Für CVE-2026-114938 als behoben aufgeführt',backupRisk_unknown:'Sicherheitsstatus unbekannt: als potenziell verwundbar behandeln',backupStop:'Die Wiederherstellung beendet die ELO-Tomcat-Dienste, die dieses Java verwenden (ELO ist solange nicht verfügbar), und startet sie danach wieder.',
+ backupsTitle:'Vorhandene Backups',backupsText:'Auf diesem Server wurden Backups dieses Werkzeugs gefunden. Wählen Sie eines, um diese Java-Version zurückzuholen; die aktuell installierte Runtime bleibt daneben erhalten.',severity_high:'Hoch',severity_medium:'Mittel',severity_low:'Niedrig',vulnTitle:'Schwachstelle gefunden: CVE-2026-114938 (Java4Shell)',vulnText:'{n} Runtime(s) liegen vor der behobenen Version: {list}. Der Fehler in den JIT-BASE64-Intrinsics kann falsche Ergebnisse liefern; der Hersteller hat ihn in einer neueren Version behoben.',vulnFixLabel:'Loesung:',vulnFix:'Java auf die aktuelle Version desselben Branches aktualisieren (Schritt 3, Java-Runtime aktualisieren). Die vorlaeufige Risikominderung senkt das Risiko nur bis zum Update.',terminalTitle:'Im Terminal ausfuehren (Administrator-PowerShell)',terminalCmdsText:'# Java auf die aktuelle Version aktualisieren (empfohlen)\n.\ELO-Patch-Tools.bat --cli --update-runtime --target {n} --confirm-admin --confirm-update\n\n# Nur vorlaeufige Risikominderung (haengt -XX:-UseBASE64Intrinsics an; danach die ELO-Dienste neu starten)\n.\ELO-Patch-Tools.bat --cli --mitigate --target {n} --confirm-admin --confirm-mitigation\n\n# Ergebnis pruefen (--target ist die Position in der Scan-Liste, ab 0)\n.\ELO-Patch-Tools.bat --cli --scan',backupsVuln:'enthaelt ein verwundbares Java',
+restoreShort:'Dieses Backup wiederherstellen',backupRisk_vulnerable:'Verwundbar: diese Version liegt vor dem Herstellerfix einer Katalog-Schwachstelle',backupRisk_patched:'Für alle Katalog-Schwachstellen als behoben aufgeführt',backupRisk_unknown:'Sicherheitsstatus unbekannt: als potenziell verwundbar behandeln',backupStop:'Die Wiederherstellung beendet die ELO-Tomcat-Dienste, die dieses Java verwenden (ELO ist solange nicht verfügbar), und startet sie danach wieder.',
  exportHeading:'Aktivitätsprotokoll',exportJson:'JSON-Ergebnisse exportieren',exportLog:'Aktivitätsprotokoll exportieren',
  idle:'Bereit',scanning:'Scan läuft',cancelling:'Abbruch angefordert; Scanner wird abgewartet',completed:'Scan abgeschlossen',cancelled:'Scan abgebrochen; Ergebnisse möglicherweise unvollständig',error:'Vorgang fehlgeschlagen',unknown:'Unbekannt',
  vulnerable:'Möglicherweise verwundbar',safe:'Nach aktuellen Regeln keine Schwachstelle erkannt',mitigated:'Risikominderung erkannt',unsupported:'Nicht unterstützte Laufzeit',
@@ -2213,7 +2396,7 @@ try {
 } catch (_) { /* storage unavailable: the link must be reopened after a refresh */ }
 const forgetToken = () => { try { sessionStorage.removeItem('eloSessionToken'); } catch (_) { } };
 let language = 'en', state = 'idle', rows = [], preview = null, pending = false, polling = false, lastError = '';
-let backups = [], backupsKey = '', progress = null, checked = null, lastSuccessfulRefresh = null, security = {verifiedOn:null,advisories:[]};
+let vulns = [], backups = [], backupsKey = '', progress = null, checked = null, lastSuccessfulRefresh = null, security = {verifiedOn:null,advisories:[]};
 let lastWarnings = [], errorFromPoll = false, recoveryRequired = false, recoveryWarnings = [];
 let step = 1, awaitingScan = false, scanStartedAt = null, finalKind = '', canRestore = false, cardsKey = '';
 const events = [], states = ['idle','scanning','cancelling','completed','cancelled','error'];
@@ -2227,22 +2410,21 @@ const bilingual = (value,max) => keys(value,['en','de']) && text(value.en,max) &
 const classifications = ['vulnerable','patched','not-affected','inconclusive','mitigated','unsupported','safe'];
 const rowFields = ['id','path','runtimeRoot','version','vendor','architecture','status','eloRationale','classificationEvidence'];
 const validBackup = item => keys(item,['id','path','runtime','version','vendor','risk','created','size']) && validId(item.id) && text(item.path,1024) && text(item.runtime,1024) && text(item.version,128) && text(item.vendor,32) && ['vulnerable','patched','unknown'].includes(item.risk) && text(item.created,32) && Number.isSafeInteger(item.size) && item.size >= 0;
-const validRow = row => keys(row,rowFields) && validId(row.id) && text(row.path,1024) && text(row.runtimeRoot,1024) && text(row.version,128) && text(row.vendor,256) && ['x86','x64','arm64','unknown'].includes(row.architecture) && classifications.includes(row.status) && bilingual(row.eloRationale,2048) && bilingual(row.classificationEvidence,4096);
+const severities = ['high','medium','low'];
+const validVuln = item => keys(item,['id','alias','severity','title','problem','solution','actions']) && /^[A-Za-z0-9._-]{3,64}$/.test(item.id) && typeof item.alias === 'string' && item.alias.length <= 64 && severities.includes(item.severity) && bilingual(item.title,2048) && bilingual(item.problem,2048) && bilingual(item.solution,2048) && Array.isArray(item.actions) && item.actions.length <= 16 && item.actions.every(action => typeof action === 'string' && action.length <= 32);
+const validFinding = item => keys(item,['id','severity','status']) && /^[A-Za-z0-9._-]{3,64}$/.test(item.id) && severities.includes(item.severity) && ['vulnerable','patched','inconclusive'].includes(item.status);
+const validRow = row => keys(row,rowFields,['findings']) && (row.findings === undefined || (Array.isArray(row.findings) && row.findings.length <= 32 && row.findings.every(validFinding))) && validId(row.id) && text(row.path,1024) && text(row.runtimeRoot,1024) && text(row.version,128) && text(row.vendor,256) && ['x86','x64','arm64','unknown'].includes(row.architecture) && classifications.includes(row.status) && bilingual(row.eloRationale,2048) && bilingual(row.classificationEvidence,4096);
 function validSearchPath(value) {
  return value.length <= 1024 && /^[A-Za-z]:\\/.test(value) && !/[\u0000-\u001f\u007f"<>|?*\/]/.test(value) && !value.slice(2).includes(':') && !value.split('\\').slice(1).some(part => /[. ]$/.test(part) || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part));
 }
 function officialUrl(value) {
+ // Advisory links come from the catalog (vulndb.json): any plain https URL, no credentials, port, query or fragment.
  if (!text(value,512) || (token && value.includes(token))) return false;
  try {
  const url = new URL(value);
- return url.href === value && url.protocol === 'https:' && !url.username && !url.password && !url.port && !url.search && !url.hash &&
- ((url.hostname === 'www.oracle.com' && /^\/security-alerts\/(?:[a-z0-9-]+\.html)?$/.test(url.pathname)) ||
- (url.hostname === 'openjdk.org' && /^\/groups\/vulnerability\/advisories\/(?:[a-z0-9-]+(?:\.html|\/)?)?$/.test(url.pathname)) ||
- value === 'https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/' ||
- value === 'https://linux.oracle.com/cve/CVE-2026-114938.html');
+ return url.href === value && url.protocol === 'https:' && !url.username && !url.password && !url.port && !url.search && !url.hash && /^[a-z0-9.-]+$/.test(url.hostname) && /^\/[A-Za-z0-9._~\/-]*$/.test(url.pathname);
  } catch (_) { return false; }
-}
-function validSecurity(value) {
+}function validSecurity(value) {
  if (!keys(value,['verifiedOn','advisories']) || !Array.isArray(value.advisories) || value.advisories.length > 16) return false;
  if (!value.advisories.length) return value.verifiedOn === null;
  const date = value.verifiedOn;
@@ -2352,12 +2534,41 @@ function highlightInto(el, source) {
  });
 }
 let cmdKey = '';
+const fill = (template, values) => template.replace(/\{(n|list)\}/g,(_, key) => values[key]);
+function adviceBlock(vuln, affected, solutionOnly) {
+ const box = document.createElement('div'), head = document.createElement('h3'), sev = document.createElement('span'), title = document.createElement('span'), problem = document.createElement('p'), fix = document.createElement('p'), label = document.createElement('strong'), solution = document.createElement('span');
+ box.className = 'vuln'; fix.className = 'fix';
+ sev.className = 'sev'; sev.dataset.sev = vuln.severity; sev.textContent = t('severity_'+vuln.severity);
+ title.textContent = localized(vuln.title);
+ const list = affected.slice(0,5).map(item => safeText(item.vendor)+' '+safeText(item.version)+' ('+safeText(item.runtimeRoot)+')').join('; ');
+ problem.textContent = fill(localized(vuln.problem),{n:String(affected.length),list});
+ label.textContent = t('vulnFixLabel')+' '; solution.textContent = localized(vuln.solution);
+ fix.append(label); fix.append(solution);
+ if (!solutionOnly) { head.append(sev); head.append(title); box.append(head); box.append(problem); }
+ box.append(fix);
+ return box;
+}
 function renderAdvice(row) {
- const vulnerable = rows.filter(item => item.status === 'vulnerable');
- toggle('vulnAlert',vulnerable.length === 0); toggle('vulnRec',!(row && row.status === 'vulnerable'));
- const list = vulnerable.slice(0,5).map(item => safeText(item.vendor)+' '+safeText(item.version)+' ('+safeText(item.runtimeRoot)+')').join('; ');
- $('vulnText').textContent = vulnerable.length ? t('vulnText').replace('{n}',() => String(vulnerable.length)).replace('{list}',() => list) : '';
- const n = Math.max(0,rows.findIndex(item => row && item.id === row.id));
+ const affects = id => item => (item.findings || []).some(f => f.id === id && f.status === 'vulnerable');
+ const blocks = [], recs = [];
+ vulns.forEach(vuln => {
+ const affected = rows.filter(affects(vuln.id));
+ if (affected.length) blocks.push(adviceBlock(vuln,affected,false));
+ if (row && affects(vuln.id)(row)) recs.push(adviceBlock(vuln,[row],true));
+ });
+ // Rows without catalog findings (older results) still get the generic alert.
+ const legacy = rows.filter(item => item.status === 'vulnerable' && !(item.findings || []).length);
+ if (legacy.length && !vulns.length) {
+ const box = document.createElement('div'), head = document.createElement('h3'), problem = document.createElement('p'), fix = document.createElement('p'), label = document.createElement('strong'), solution = document.createElement('span');
+ box.className = 'vuln'; fix.className = 'fix'; head.textContent = t('vulnTitle');
+ problem.textContent = fill(t('vulnText'),{n:String(legacy.length),list:legacy.slice(0,5).map(item => safeText(item.vendor)+' '+safeText(item.version)+' ('+safeText(item.runtimeRoot)+')').join('; ')});
+ label.textContent = t('vulnFixLabel')+' '; solution.textContent = t('vulnFix'); fix.append(label); fix.append(solution);
+ box.append(head); box.append(problem); box.append(fix); blocks.push(box);
+ if (row && row.status === 'vulnerable') { const rec = document.createElement('div'), p2 = document.createElement('p'), l2 = document.createElement('strong'), s2 = document.createElement('span'); l2.textContent = t('vulnFixLabel')+' '; s2.textContent = t('vulnFix'); p2.append(l2); p2.append(s2); rec.append(p2); recs.push(rec); }
+ }
+ $('vulnList').replaceChildren(); blocks.forEach(block => $('vulnList').append(block));
+ $('vulnRecList').replaceChildren(); recs.forEach(block => $('vulnRecList').append(block));
+ toggle('vulnAlert',blocks.length === 0); toggle('vulnRec',recs.length === 0);const n = Math.max(0,rows.findIndex(item => row && item.id === row.id));
  const key = language+'|'+n; if (key === cmdKey) return; cmdKey = key;
  highlightInto($('terminalCmds'),t('terminalCmdsText').replace(/\{n\}/g,() => String(n)));
  highlightInto($('cmdView'),t('manualCommands'));
@@ -2452,11 +2663,11 @@ async function refresh() {
  const status = await api('status');
  if (!keys(status,['state'],['progress','checked']) || !states.includes(status.state) || (status.progress !== undefined && (!Number.isFinite(status.progress) || status.progress < 0 || status.progress > 100)) || (status.checked !== undefined && (!Number.isSafeInteger(status.checked) || status.checked < 0))) throw 'invalid';
  const result = await api('results');
- if (!keys(result,['results','security'],['backups']) || (result.backups !== undefined && (!Array.isArray(result.backups) || result.backups.length > 50 || result.backups.some(item => !validBackup(item)) || new Set(result.backups.map(item => item.id)).size !== result.backups.length)) || !Array.isArray(result.results) || result.results.length > 250 || result.results.some(row => !validRow(row)) || new Set(result.results.map(row => row.id)).size !== result.results.length || !validSecurity(result.security)) throw 'invalid';
+ if (!keys(result,['results','security'],['backups','vulnerabilities']) || (result.vulnerabilities !== undefined && (!Array.isArray(result.vulnerabilities) || result.vulnerabilities.length > 32 || result.vulnerabilities.some(item => !validVuln(item)))) || (result.backups !== undefined && (!Array.isArray(result.backups) || result.backups.length > 50 || result.backups.some(item => !validBackup(item)) || new Set(result.backups.map(item => item.id)).size !== result.backups.length)) || !Array.isArray(result.results) || result.results.length > 250 || result.results.some(row => !validRow(row)) || new Set(result.results.map(row => row.id)).size !== result.results.length || !validSecurity(result.security)) throw 'invalid';
  const nextRows = result.results;
  if (state !== status.state || JSON.stringify(rows) !== JSON.stringify(nextRows) || JSON.stringify(security) !== JSON.stringify(result.security)) clearPreview();
  if (status.state === 'scanning' && scanStartedAt === null) scanStartedAt = Date.now();
- state = status.state; rows = nextRows; security = result.security; backups = result.backups || [];
+ state = status.state; rows = nextRows; security = result.security; backups = result.backups || []; vulns = result.vulnerabilities || [];
  if (state !== 'scanning' && state !== 'cancelling') scanStartedAt = null;
  // A finished scan moves the wizard on by itself; anything else releases the wait.
  if (awaitingScan && state === 'completed') { awaitingScan = false; if (rows.length) step = 2; }
@@ -2617,12 +2828,20 @@ function Get-EloReportWindowsResources {
 # Collectors and recovery evidence are trusted backend-only inputs, never HTTP input.
 # Recovery paths require a validated archive matched to the original runtime, and
 # an independently selected isolated destination. No filesystem access occurs here.
+function Get-EloMitigationOptionForReport {
+    $v=Get-EloActiveVulnerabilities | Where-Object { Get-EloVulnAction $_ 'jvm-option' } | Select-Object -First 1
+    if (-not $v) { return '' }
+    return [string](Get-EloVulnAction $v 'jvm-option').option
+}
 function Get-EloReportOptionState {
     param($Value)
     if ($null -eq $Value -or $Value -ceq '') { return 'Absent' }
     if ($Value -isnot [string]) { return 'Unknown' }
-    $minus=[regex]::IsMatch($Value, '(?<!\S)-XX:-UseBASE64Intrinsics(?!\S)')
-    $plus=[regex]::IsMatch($Value, '(?<!\S)-XX:\+UseBASE64Intrinsics(?!\S)')
+    # The mitigation option and the flag it controls come from the catalog (vulndb.json).
+    $option=[string](Get-EloMitigationOptionForReport)
+    $flag=[regex]::Escape([string]((Get-EloVulnAction (Get-EloActiveVulnerabilities | Where-Object { Get-EloVulnAction $_ 'jvm-option' } | Select-Object -First 1) 'jvm-option').conflictPattern))
+    $minus=[regex]::IsMatch($Value, '(?<!\S)'+[regex]::Escape($option)+'(?!\S)')
+    $plus=[regex]::IsMatch($Value, '(?<!\S)-XX:\+'+$flag+'(?!\S)')
     if ($plus) { return 'Conflict' }
     if ($minus) { return 'Present' }
     return 'Absent'
@@ -2830,7 +3049,7 @@ function ConvertTo-EloTechnicalReportHtml {
                 if ($a.Status -eq 'Proven' -and $a.EvidenceCode -ceq $scope) { $scopeState='Proven' }
                 $detail+='; '+$t[$scope]+': '+$t[$scopeState]
             }
-            if ($a.Status -eq 'Proven') { $detail+='; -XX:-UseBASE64Intrinsics' }
+            if ($a.Status -eq 'Proven') { $detail+='; '+(Get-EloMitigationOptionForReport) }
         }
         $lines.Add('<li>'+$t[$a.Kind]+': '+$t[$a.Status]+$detail+'</li>')
     }
@@ -2862,7 +3081,9 @@ function ConvertTo-EloTechnicalReportHtml {
     }
     $lines.Add('<h2>'+$t.Sources+'</h2><ul>')
     $lines.Add('<li>'+$t.Checked+': 2026-11-23. '+$t.Changes+'</li>')
-    foreach ($source in @(@('OpenJDK 2026-11-17','https://openjdk.org/groups/vulnerability/advisories/2026-11-17','Supplied'),@('Oracle CVE-2026-114938','https://linux.oracle.com/cve/CVE-2026-114938.html','Fetched'),@('Adoptium Temurin November 2026 CSPU','https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/','Fetched'))) {
+    $sources=@()
+    foreach ($v in (Get-EloActiveVulnerabilities)) { foreach ($adv in @($v.advisories)) { $label=[string]$adv.reportLabel; if (-not $label) { $label=[string]$adv.id }; $prov='Supplied'; if ([string]$adv.provenance -ceq 'Fetched') { $prov='Fetched' }; $sources+=,@($label,[string]$adv.url,$prov) } }
+    foreach ($source in $sources) {
         $lines.Add('<li><a href="'+$source[1]+'">'+$source[0]+'</a> - '+$t[$source[2]]+'</li>')
     }
     $lines.Add('</ul></body></html>')
@@ -3998,3 +4219,494 @@ function Resolve-EloLatestRelease {
     return Assert-EloReleaseRecord $raw
 }
 ::ELO_PATCH_END:CATALOG_PS
+
+::ELO_PATCH_BEGIN:VULNDB_PS
+# Vulnerability catalog engine (Windows PowerShell 5.1). Dot-source to load; no startup work.
+# The catalog (vulndb.json) holds everything about a vulnerability: detection probes (java.exe argument
+# lists, never a shell), expect patterns, problem/solution messages, fix actions and report text.
+# A catalog entry can only reference a fixed set of action TYPES and a fixed set of argument shapes, so a
+# new or AI-drafted entry can never run an arbitrary command. Drafts (status "draft") are validated but
+# never used by the scan. Passwords and API keys never belong in the catalog.
+
+$script:EloVulnPlaceholders = @('vendor','version','id','alias','option','runtime','count','vulnerable','n','list','variable','old','new','kind')
+$script:EloVulnSeverities = @('high','medium','low')
+$script:EloVulnStatuses = @('active','draft','retired')
+$script:EloActionTypes = @('runtime-update','jvm-option','restore-backup')
+$script:EloVulnCache = $null
+
+function Get-EloVulnDbPath {
+    # Reviewed catalog installed by the tool (see Install-EloVulnDb) wins over the packaged one.
+    param([string]$ProgramDataRoot = $env:ProgramData)
+    if ($ProgramDataRoot) {
+        $installed = Join-Path (Join-Path $ProgramDataRoot 'ELO-Patch-Tools') 'vulndb.json'
+        if (Test-Path -LiteralPath $installed -PathType Leaf) { return $installed }
+    }
+    return (Join-Path $PSScriptRoot 'vulndb.json')
+}
+function Test-EloVulnProbeArgs {
+    param($Args_)
+    $list = @($Args_)
+    if ($list.Count -lt 1 -or $list.Count -gt 6) { return $false }
+    foreach ($a in $list) { if ($a -isnot [string] -or $a -cnotmatch '^-[A-Za-z0-9:+=_.\-]{1,64}$') { return $false } }
+    return $true
+}
+function Test-EloRegex {
+    param([string]$Pattern)
+    if ([string]::IsNullOrEmpty($Pattern) -or $Pattern.Length -gt 512) { return $false }
+    try { $null = New-Object Text.RegularExpressions.Regex($Pattern, [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2)); return $true } catch { return $false }
+}
+function Test-EloBilingualText {
+    param($Value, [int]$Max = 4096)
+    if ($null -eq $Value) { return $false }
+    foreach ($lang in @('en','de')) {
+        $t = $Value.$lang
+        if ($t -isnot [string] -or $t.Trim().Length -lt 1 -or $t.Length -gt $Max -or $t -match '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]') { return $false }
+        foreach ($m in [regex]::Matches($t, '\{([A-Za-z]+)\}')) { if ($script:EloVulnPlaceholders -cnotcontains $m.Groups[1].Value) { return $false } }
+    }
+    return $true
+}
+function Test-EloVulnDb {
+    # Returns the list of problems (empty = valid). Pure validation: reads nothing, runs nothing.
+    param($Db)
+    $errors = New-Object 'System.Collections.Generic.List[string]'
+    if ($null -eq $Db -or $Db.schemaVersion -ne 1) { $errors.Add('schemaVersion must be 1'); return $errors.ToArray() }
+    foreach ($s in @($Db.sources)) {
+        if ($s.url -isnot [string] -or $s.url -cnotmatch '^https://[A-Za-z0-9.\-]+(:[0-9]+)?/[^\s"<>]{0,512}$') { $errors.Add("source '$($s.id)': url must be https") }
+        if ($s.PSObject.Properties.Name -contains 'password' -or $s.PSObject.Properties.Name -contains 'apiKey') { $errors.Add("source '$($s.id)': credentials are not allowed in the catalog") }
+    }
+    $seen = @{}
+    $vulns = @($Db.vulnerabilities)
+    if ($vulns.Count -gt 200) { $errors.Add('too many vulnerabilities') }
+    foreach ($v in $vulns) {
+        $id = [string]$v.id
+        $where = "vulnerability '$id'"
+        if ($id -cnotmatch '^[A-Za-z0-9._\-]{3,64}$') { $errors.Add("${where}: invalid id"); continue }
+        if ($seen.ContainsKey($id)) { $errors.Add("${where}: duplicate id") }
+        $seen[$id] = $true
+        if ($script:EloVulnSeverities -cnotcontains [string]$v.severity) { $errors.Add("${where}: severity must be high, medium or low") }
+        if ($script:EloVulnStatuses -cnotcontains [string]$v.status) { $errors.Add("${where}: status must be active, draft or retired") }
+        foreach ($field in @('title','problem','solution')) { if (-not (Test-EloBilingualText $v.$field 2048)) { $errors.Add("${where}: $field needs English and German text") } }
+        foreach ($adv in @($v.advisories)) {
+            if ($adv.url -isnot [string] -or $adv.url -cnotmatch '^https://[A-Za-z0-9.\-]+/[^\s"<>]{0,512}$') { $errors.Add("${where}: advisory '$($adv.id)' url must be https") }
+            if (-not (Test-EloBilingualText $adv.title 512)) { $errors.Add("${where}: advisory '$($adv.id)' title needs English and German text") }
+        }
+        $det = $v.detection
+        if ($null -eq $det -or @('version-table','probe-expect') -cnotcontains [string]$det.method) { $errors.Add("${where}: detection.method must be version-table or probe-expect") }
+        else {
+            $probes = @($det.probes)
+            if ($probes.Count -lt 1 -or $probes.Count -gt 4) { $errors.Add("${where}: 1 to 4 probes are required") }
+            $probeIds = @{}
+            foreach ($p in $probes) {
+                if ([string]$p.id -cnotmatch '^[a-z0-9\-]{1,32}$' -or $probeIds.ContainsKey([string]$p.id)) { $errors.Add("${where}: probe id invalid or duplicated") }
+                $probeIds[[string]$p.id] = $true
+                if (-not (Test-EloVulnProbeArgs $p.args)) { $errors.Add("${where}: probe '$($p.id)' args must be java.exe options such as -version (no shell, no paths)") }
+                if ($null -ne $p.timeoutSec -and ([int]$p.timeoutSec -lt 1 -or [int]$p.timeoutSec -gt 60)) { $errors.Add("${where}: probe '$($p.id)' timeoutSec must be 1..60") }
+                foreach ($e in @($p.expect)) { if (-not (Test-EloRegex ([string]$e.pattern))) { $errors.Add("${where}: probe '$($p.id)' expect '$($e.id)' is not a valid pattern") } }
+            }
+            if ([string]$det.method -ceq 'version-table') {
+                $vendors = $det.vendors
+                if ($null -eq $vendors -or @($vendors.PSObject.Properties).Count -lt 1) { $errors.Add("${where}: version-table needs vendors") }
+                else {
+                    foreach ($prop in $vendors.PSObject.Properties) {
+                        if ($prop.Name -cnotmatch '^[A-Za-z0-9 ]{1,32}$') { $errors.Add("${where}: vendor name invalid"); continue }
+                        if (@('temurin-build') -cnotcontains [string]$prop.Value.parser) { $errors.Add("${where}: vendor '$($prop.Name)' parser is not supported") }
+                        $fixed = @($prop.Value.fixed)
+                        if ($fixed.Count -lt 1 -or $fixed.Count -gt 64) { $errors.Add("${where}: vendor '$($prop.Name)' needs 1 to 64 fixed builds") }
+                        foreach ($f in $fixed) { if ([string]$f -cnotmatch '^[0-9]{1,3}(\.[0-9]{1,9}){0,3}\+[0-9]{1,9}$') { $errors.Add("${where}: fixed build '$f' is not a Java build such as 17.0.21.1+2") } }
+                        if ([string]$prop.Value.fixedSource -cnotmatch '^https://[A-Za-z0-9.\-]+/[^\s"<>]{0,512}$') { $errors.Add("${where}: vendor '$($prop.Name)' fixedSource must be https") }
+                    }
+                }
+            } else {
+                $rule = $det.rule
+                if ($null -eq $rule -or -not (Test-EloRegex ([string]$rule.vulnerablePattern)) -or ($rule.safePattern -and -not (Test-EloRegex ([string]$rule.safePattern))) -or [string]$rule.probe -cnotmatch '^[a-z0-9\-]{1,32}$' -or -not $probeIds.ContainsKey([string]$rule.probe)) { $errors.Add("${where}: probe-expect needs rule.probe and rule.vulnerablePattern") }
+            }
+        }
+        $actionIds = @{}
+        foreach ($a in @($v.actions)) {
+            $aid = [string]$a.id
+            if ($aid -cnotmatch '^[a-z0-9\-]{1,32}$' -or $actionIds.ContainsKey($aid)) { $errors.Add("${where}: action id invalid or duplicated"); continue }
+            $actionIds[$aid] = $true
+            if ($script:EloActionTypes -cnotcontains [string]$a.type) { $errors.Add("${where}: action '$aid' type must be one of $($script:EloActionTypes -join ', ')"); continue }
+            if (-not (Test-EloBilingualText $a.label 128)) { $errors.Add("${where}: action '$aid' label needs English and German text") }
+            if ([string]$a.type -ceq 'jvm-option') {
+                if ([string]$a.variable -cne 'JAVA_TOOL_OPTIONS') { $errors.Add("${where}: action '$aid' variable must be JAVA_TOOL_OPTIONS") }
+                if ([string]$a.option -cnotmatch '^-XX:[+-][A-Za-z0-9_]{1,64}$') { $errors.Add("${where}: action '$aid' option must be one -XX:+/-Flag") }
+                if ([string]$a.conflictPattern -cnotmatch '^[A-Za-z0-9_]{1,64}$') { $errors.Add("${where}: action '$aid' conflictPattern invalid") }
+                if (-not (Test-EloBilingualText $a.summary 4096)) { $errors.Add("${where}: action '$aid' summary needs English and German text") }
+                if ($null -ne $a.verify) {
+                    if (-not (Test-EloVulnProbeArgs $a.verify.args) -or -not (Test-EloRegex ([string]$a.verify.expect)) -or @('true','false') -cnotcontains [string]$a.verify.mustBe) { $errors.Add("${where}: action '$aid' verify is invalid") }
+                }
+            }
+        }
+        $actives = @($v.actions | Where-Object { $_.type -ceq 'jvm-option' })
+        if ($actives.Count -gt 1) { $errors.Add("${where}: at most one jvm-option action") }
+        foreach ($name in @('restoreVulnerable','restoreFixed','restoreUnknown')) { if ($null -ne $v.messages -and $null -ne $v.messages.$name -and -not (Test-EloBilingualText $v.messages.$name 2048)) { $errors.Add("${where}: messages.$name needs English and German text") } }
+        if ($null -ne $v.report -and $null -ne $v.report.headline -and -not (Test-EloBilingualText $v.report.headline 512)) { $errors.Add("${where}: report.headline needs English and German text") }
+        $sim = $v.simulation
+        if ($null -ne $sim) {
+            foreach ($prop in @($sim.probes.PSObject.Properties)) { if ($prop.Value -isnot [string] -or $prop.Value.Length -gt 8192) { $errors.Add("${where}: simulation probe '$($prop.Name)' must be text up to 8 KiB") } }
+        }
+    }
+    return $errors.ToArray()
+}
+function Read-EloVulnDbFile {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    $info = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($info.PSIsContainer -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'vulndb_not_a_file' }
+    if ($info.Length -gt 1MB) { throw 'vulndb_too_large' }
+    $text = [IO.File]::ReadAllText($info.FullName, (New-Object Text.UTF8Encoding($false,$true)))
+    try { $db = $text | ConvertFrom-Json } catch { throw 'vulndb_invalid_json' }
+    $problems = @(Test-EloVulnDb $db)
+    if ($problems.Count -gt 0) { throw ('vulndb_invalid: ' + (($problems | Select-Object -First 5) -join '; ')) }
+    return $db
+}
+function Get-EloVulnDb {
+    param([string]$Path, [switch]$Refresh)
+    if (-not $Path -and $script:EloVulnCache -and -not $Refresh) { return $script:EloVulnCache }
+    $explicit = [bool]$Path
+    if (-not $Path) { $Path = Get-EloVulnDbPath }
+    try { $db = Read-EloVulnDbFile $Path }
+    catch {
+        # A broken installed catalog never disables detection: fall back to the packaged one.
+        $packaged = Join-Path $PSScriptRoot 'vulndb.json'
+        if ($explicit -or $Path -ceq $packaged) { throw }
+        $db = Read-EloVulnDbFile $packaged
+    }
+    if (-not $explicit) { $script:EloVulnCache = $db }
+    return $db
+}
+function Get-EloActiveVulnerabilities {
+    param($Db = (Get-EloVulnDb))
+    return @($Db.vulnerabilities | Where-Object { $_.status -ceq 'active' })
+}
+function Format-EloVulnText {
+    # Replaces {name} placeholders from a fixed allowlist; unknown names are left untouched. Never evaluates anything.
+    param([AllowNull()][string]$Template, [hashtable]$Values = @{})
+    if ($null -eq $Template) { return '' }
+    return [regex]::Replace($Template, '\{([A-Za-z]+)\}', {
+        param($m)
+        $key = $m.Groups[1].Value
+        if ($script:EloVulnPlaceholders -ccontains $key -and $Values.ContainsKey($key)) { return [string]$Values[$key] }
+        return $m.Value
+    })
+}
+function Get-EloVulnText {
+    param($Bilingual, [ValidateSet('en','de')][string]$Language = 'en', [hashtable]$Values = @{})
+    return (Format-EloVulnText ([string]$Bilingual.$Language) $Values)
+}
+function Get-EloVulnAction {
+    param($Vulnerability, [string]$Type)
+    return @($Vulnerability.actions | Where-Object { $_.type -ceq $Type }) | Select-Object -First 1
+}
+function Get-EloScanRules {
+    # What the scanner needs per active vulnerability: version-table rules (fixed builds per vendor) and
+    # probe-expect rules (a java probe plus the patterns that mean vulnerable / safe).
+    param($Db = (Get-EloVulnDb))
+    $rules = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($v in (Get-EloActiveVulnerabilities $Db)) {
+        if ([string]$v.detection.method -ceq 'version-table') {
+            foreach ($prop in $v.detection.vendors.PSObject.Properties) {
+                $rules.Add(@{ Id = [string]$v.id; Severity = [string]$v.severity; Method = 'version-table'; Vendor = [string]$prop.Name; Parser = [string]$prop.Value.parser
+                    Fixed = @($prop.Value.fixed | ForEach-Object { [string]$_ }); Source = [string]$prop.Value.fixedSource })
+            }
+        } elseif ([string]$v.detection.method -ceq 'probe-expect') {
+            $probe = @($v.detection.probes | Where-Object { $_.id -ceq [string]$v.detection.rule.probe })[0]
+            $timeout = 15; if ($probe.timeoutSec) { $timeout = [int]$probe.timeoutSec }
+            $source = ''; if (@($v.advisories).Count -gt 0) { $source = [string]@($v.advisories)[0].url }
+            $rules.Add(@{ Id = [string]$v.id; Severity = [string]$v.severity; Method = 'probe-expect'; ProbeArgs = @($probe.args | ForEach-Object { [string]$_ }); TimeoutSec = $timeout
+                VulnerablePattern = [string]$v.detection.rule.vulnerablePattern; SafePattern = [string]$v.detection.rule.safePattern; Source = $source })
+        }
+    }
+    return $rules.ToArray()
+}function Get-EloPrimaryVulnerability {
+    param($Db = (Get-EloVulnDb))
+    return (Get-EloActiveVulnerabilities $Db | Select-Object -First 1)
+}
+function Test-EloExpect {
+    # Evaluates every expect pattern of a probe against its output: {id -> matched}.
+    param($Probe, [AllowEmptyString()][string]$Output)
+    $result = [ordered]@{}
+    foreach ($e in @($Probe.expect)) {
+        $re = New-Object Text.RegularExpressions.Regex([string]$e.pattern, [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2))
+        try { $result[[string]$e.id] = $re.IsMatch($Output) } catch { $result[[string]$e.id] = $false }
+    }
+    return $result
+}
+function Invoke-EloVulnProbe {
+    # Runs one catalog probe through $Runner (real: java.exe with the argument list; simulated: canned text).
+    param($Probe, [Parameter(Mandatory=$true)][scriptblock]$Runner)
+    if (-not (Test-EloVulnProbeArgs $Probe.args)) { throw 'probe_args_rejected' }
+    $output = [string](& $Runner @($Probe.args))
+    return @{ Id = [string]$Probe.id; Output = $output; Expect = (Test-EloExpect $Probe $output) }
+}
+function Invoke-EloVulnSimulation {
+    # Replays the entry's simulation probes through the real detection (scan.ps1 must be loaded) and compares the
+    # outcome with simulation.expected. This is how a new catalog entry (also a draft) is tested without a vulnerable
+    # Java: the entry is evaluated as if it were active, on canned probe output, never on the machine.
+    param($Vulnerability, $Db = $null)
+    $sim = $Vulnerability.simulation
+    if ($null -eq $sim -or $null -eq $sim.expected) { return @{ Passed = $false; Reason = 'no_simulation' } }
+    $copy = $Vulnerability | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+    $copy.status = 'active'
+    $rules = @(Get-EloScanRules ([pscustomobject]@{ vulnerabilities = @($copy) }))
+    if ($rules.Count -eq 0) { return @{ Passed = $false; Reason = 'no_rule' } }
+    if ([string]$copy.detection.method -ceq 'probe-expect') {
+        $rule = $rules[0]
+        $prop = $sim.probes.PSObject.Properties[[string]$copy.detection.rule.probe]
+        if ($null -eq $prop) { return @{ Passed = $false; Reason = 'no_probe_output' } }
+        $re = New-Object Text.RegularExpressions.Regex([string]$rule.VulnerablePattern, [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2))
+        $status = 'Inconclusive'
+        if ($re.IsMatch([string]$prop.Value)) { $status = 'PotentiallyVulnerable' }
+        elseif ($rule.SafePattern -and (New-Object Text.RegularExpressions.Regex([string]$rule.SafePattern, [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2))).IsMatch([string]$prop.Value)) { $status = 'KnownFixed' }
+        return @{ Passed = ($status -ceq [string]$sim.expected.status); Status = $status; Vendor = ''; Version = '' }
+    }
+    $c = Get-EloJavaClassification -Evidence ([string]$sim.probes.version) -Rules $rules
+    $ok = ($c.Status -ceq [string]$sim.expected.status -and $c.Vendor -ceq [string]$sim.expected.vendor -and [string]$c.FullVersion -ceq [string]$sim.expected.version)
+    return @{ Passed = $ok; Status = $c.Status; Vendor = $c.Vendor; Version = $c.FullVersion }
+}
+# ---- quarantine: every file the tool is about to modify is copied here first, with a manifest and a hash.
+function Get-EloQuarantineRoot {
+    param([string]$ProgramDataRoot = $env:ProgramData)
+    if ([string]::IsNullOrWhiteSpace($ProgramDataRoot)) { throw 'quarantine_root_unavailable' }
+    return (Join-Path (Join-Path $ProgramDataRoot 'ELO-Patch-Tools') 'quarantine')
+}
+function Get-EloFileSha256 {
+    param([string]$Path)
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
+}
+function Backup-EloFileToQuarantine {
+    # Copies $Path into quarantine\<stamp>-<name>\ (file + manifest.json). Returns the record. Never deletes.
+    param([Parameter(Mandatory=$true)][string]$Path, [Parameter(Mandatory=$true)][string]$Reason, [string]$Root = (Get-EloQuarantineRoot))
+    $full = [IO.Path]::GetFullPath($Path)
+    $info = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+    if ($info.PSIsContainer -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'quarantine_source_not_a_file' }
+    $stamp = [DateTime]::UtcNow.ToString('yyyyMMddHHmmssfff')
+    $leaf = ($info.Name -creplace '[^A-Za-z0-9._\-]', '_')
+    $id = $stamp + '-' + $leaf
+    $dir = Join-Path $Root $id
+    $null = [IO.Directory]::CreateDirectory($dir)
+    $copy = Join-Path $dir $leaf
+    [IO.File]::Copy($info.FullName, $copy, $false)
+    $hash = Get-EloFileSha256 $copy
+    if ($hash -cne (Get-EloFileSha256 $info.FullName)) { throw 'quarantine_copy_mismatch' }
+    $record = [ordered]@{ id = $id; originalPath = $info.FullName; file = $leaf; sha256 = $hash; size = $info.Length; reason = $Reason; createdUtc = [DateTime]::UtcNow.ToString('o') }
+    [IO.File]::WriteAllText((Join-Path $dir 'manifest.json'), ($record | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+    return [pscustomobject]$record
+}
+function Get-EloQuarantineEntries {
+    param([string]$Root = (Get-EloQuarantineRoot))
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return @() }
+    $entries = @()
+    foreach ($dir in @(Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 200)) {
+        $manifest = Join-Path $dir.FullName 'manifest.json'
+        if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { continue }
+        try { $m = [IO.File]::ReadAllText($manifest) | ConvertFrom-Json } catch { continue }
+        if ($m.id -cne $dir.Name -or [string]$m.file -cnotmatch '^[A-Za-z0-9._\-]{1,128}$') { continue }
+        $entries += $m
+    }
+    return @($entries)
+}
+function Restore-EloFileFromQuarantine {
+    # Puts a quarantined copy back at its original path. The file being replaced is quarantined first, so a
+    # restore can itself be undone. The copy's SHA256 is verified before and after.
+    param([Parameter(Mandatory=$true)][string]$Id, [string]$Root = (Get-EloQuarantineRoot))
+    if ($Id -cnotmatch '^[0-9]{17}-[A-Za-z0-9._\-]{1,128}$') { throw 'quarantine_id_invalid' }
+    $dir = Join-Path $Root $Id
+    $manifestPath = Join-Path $dir 'manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'quarantine_entry_missing' }
+    $m = [IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
+    $source = Join-Path $dir ([string]$m.file)
+    if ((Get-EloFileSha256 $source) -cne [string]$m.sha256) { throw 'quarantine_hash_mismatch' }
+    $target = [string]$m.originalPath
+    if ([string]::IsNullOrWhiteSpace($target) -or -not [IO.Path]::IsPathRooted($target)) { throw 'quarantine_target_invalid' }
+    $replaced = $null
+    if (Test-Path -LiteralPath $target -PathType Leaf) { $replaced = Backup-EloFileToQuarantine -Path $target -Reason ('replaced by restore of ' + $Id) -Root $Root }
+    $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))
+    $temp = $target + '.restore-' + [guid]::NewGuid().ToString('N')
+    [IO.File]::Copy($source, $temp, $false)
+    if ((Get-EloFileSha256 $temp) -cne [string]$m.sha256) { Remove-Item -LiteralPath $temp -Force; throw 'quarantine_restore_mismatch' }
+    if (Test-Path -LiteralPath $target -PathType Leaf) { [IO.File]::Delete($target) }
+    [IO.File]::Move($temp, $target)
+    return [pscustomobject]@{ restored = $target; from = $Id; replacedCopy = $(if ($replaced) { $replaced.id } else { $null }) }
+}
+function Install-EloVulnDb {
+    # Installs a reviewed catalog: validate -> quarantine the current installed copy -> atomic replace -> verify.
+    param([Parameter(Mandatory=$true)][string]$Source, [string]$ProgramDataRoot = $env:ProgramData)
+    $null = Read-EloVulnDbFile $Source
+    $targetDir = Join-Path $ProgramDataRoot 'ELO-Patch-Tools'
+    $target = Join-Path $targetDir 'vulndb.json'
+    $null = [IO.Directory]::CreateDirectory($targetDir)
+    $backup = $null
+    if (Test-Path -LiteralPath $target -PathType Leaf) { $backup = Backup-EloFileToQuarantine -Path $target -Reason 'catalog replaced by install' -Root (Get-EloQuarantineRoot $ProgramDataRoot) }
+    $temp = $target + '.new-' + [guid]::NewGuid().ToString('N')
+    [IO.File]::Copy($Source, $temp, $false)
+    try {
+        $null = Read-EloVulnDbFile $temp
+        if (Test-Path -LiteralPath $target -PathType Leaf) { [IO.File]::Delete($target) }
+        [IO.File]::Move($temp, $target)
+    } catch { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force }; throw }
+    if ((Get-EloFileSha256 $target) -cne (Get-EloFileSha256 $Source)) { throw 'vulndb_install_mismatch' }
+    $script:EloVulnCache = $null
+    return [pscustomobject]@{ installed = $target; quarantined = $(if ($backup) { $backup.id } else { $null }) }
+}
+::ELO_PATCH_END:VULNDB_PS
+
+::ELO_PATCH_BEGIN:VULNDB_JSON
+{
+  "schemaVersion": 1,
+  "updated": "2026-11-25",
+  "description": "Vulnerability catalog of ELO Patch Tools. Everything the tool knows about a vulnerability lives here: how to detect it (java.exe argument lists + expect patterns), the problem message, the actions that fix it and the final report text. Add an entry to support a new vulnerability. No passwords or API keys belong in this file.",
+  "sources": [
+    {
+      "id": "elo-community-kbb103",
+      "type": "elo-community",
+      "title": "ELO Community knowledge board KBB103 (vulnerability reports)",
+      "url": "https://community.elo.com/community/plugin/de.elo.ix.plugin.proxy/wf/apps/app/sol.knowledge.apps.KnowledgeBoard/#/?board=KBB103&page=1",
+      "access": "login required; credentials are read from the environment (ELO_COMMUNITY_USER, ELO_COMMUNITY_PASSWORD), never stored here"
+    }
+  ],
+  "vulnerabilities": [
+    {
+      "id": "CVE-2026-114938",
+      "aliases": ["Java4Shell"],
+      "severity": "high",
+      "status": "active",
+      "origin": "built-in",
+      "title": {
+        "en": "CVE-2026-114938 (Java4Shell): flawed JIT BASE64 intrinsics",
+        "de": "CVE-2026-114938 (Java4Shell): fehlerhafte JIT-BASE64-Intrinsics"
+      },
+      "verifiedOn": "2026-11-23",
+      "advisories": [
+        {
+          "id": "temurin-november-2026",
+          "url": "https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/",
+          "title": {
+            "en": "Temurin vendor advisory: parent fetched directly (2026-11-23); exact listed Temurin builds only",
+            "de": "Temurin-Herstellerhinweis: Elternagent rief direkt ab (2026-11-23); nur exakt aufgefuehrte Temurin-Builds"
+          },
+          "reportLabel": "Adoptium Temurin November 2026 CSPU",
+          "provenanceNote": "Official Adoptium vendor advisory directly fetched by parent.",
+          "provenance": "Fetched"
+        },
+        {
+          "id": "oracle-cve-2026-114938",
+          "url": "https://linux.oracle.com/cve/CVE-2026-114938.html",
+          "title": {
+            "en": "Oracle Linux CVE-2026-114938: parent fetched directly (2026-11-23); not ELO compatibility verification",
+            "de": "Oracle Linux CVE-2026-114938: Elternagent rief direkt ab (2026-11-23); keine ELO-Kompatibilitaetspruefung"
+          },
+          "reportLabel": "Oracle CVE-2026-114938",
+          "provenanceNote": "Oracle Linux source directly fetched by parent.",
+          "provenance": "Fetched"
+        },
+        {
+          "id": "openjdk-2026-11-17",
+          "url": "https://openjdk.org/groups/vulnerability/advisories/2026-11-17",
+          "title": {
+            "en": "OpenJDK advisory: parent reviewed user-supplied text; not fetched directly (2026-11-23)",
+            "de": "OpenJDK: Elternagent pruefte vom Benutzer gelieferten Text; nicht direkt abgerufen (2026-11-23)"
+          },
+          "reportLabel": "OpenJDK 2026-11-17",
+          "provenanceNote": "User-supplied OpenJDK text reviewed by parent; not independently fetched.",
+          "provenance": "Supplied"
+        }
+      ],
+      "detection": {
+        "method": "version-table",
+        "probes": [
+          {
+            "id": "version",
+            "args": ["-version"],
+            "timeoutSec": 15,
+            "expect": [
+              { "id": "vendor-temurin", "pattern": "(?i)\\bTemurin\\b", "meaning": "The runtime is Eclipse Temurin" },
+              { "id": "build-token", "pattern": "\\(build\\s+[^\\s,)]+", "meaning": "A build token is present for the version comparison" }
+            ]
+          }
+        ],
+        "vendors": {
+          "Temurin": {
+            "parser": "temurin-build",
+            "fixed": ["17.0.21.1+2", "21.0.13.1+2", "25.0.5.1+2", "27.0.1.1+4"],
+            "fixedSource": "https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/"
+          }
+        },
+        "unknownVendor": "inconclusive"
+      },
+      "problem": {
+        "en": "{n} runtime(s) are before the fixed release: {list}. The JIT BASE64 intrinsics flaw lets this Java produce wrong results; the vendor fixed it in a newer release.",
+        "de": "{n} Runtime(s) liegen vor der behobenen Version: {list}. Der Fehler in den JIT-BASE64-Intrinsics kann falsche Ergebnisse liefern; der Hersteller hat ihn in einer neueren Version behoben."
+      },
+      "solution": {
+        "en": "update Java to the current release of the same branch (step 3, Update Java runtime). The temporary mitigation only reduces the risk until you update.",
+        "de": "Java auf die aktuelle Version desselben Branches aktualisieren (Schritt 3, Java-Runtime aktualisieren). Die vorlaeufige Risikominderung senkt das Risiko nur bis zum Update."
+      },
+      "actions": [
+        {
+          "id": "update-runtime",
+          "type": "runtime-update",
+          "recommended": true,
+          "label": { "en": "Update Java runtime", "de": "Java-Runtime aktualisieren" }
+        },
+        {
+          "id": "mitigate",
+          "type": "jvm-option",
+          "scope": "machine-environment",
+          "variable": "JAVA_TOOL_OPTIONS",
+          "option": "-XX:-UseBASE64Intrinsics",
+          "conflictPattern": "UseBASE64Intrinsics",
+          "label": { "en": "Temporary mitigation", "de": "Vorlaeufige Risikominderung" },
+          "verify": {
+            "args": ["-XX:+PrintFlagsFinal", "-version"],
+            "expect": "(?m)^\\s*bool\\s+UseBASE64Intrinsics\\s*(?::=|=)\\s*(true|false)\\b[^\\r\\n]*$",
+            "mustBe": "false"
+          },
+          "summary": {
+            "en": "Set exactly one {option} in MACHINE {variable}, removing standalone duplicate/conflicting +/- flags (all future inheriting JVMs, not just ELO). Previous value: {old} (registry type: {kind}). New value: [{new}]. Registry type and all other option bytes are preserved. Backup: exact previous value retained in this session. On verification failure restore it automatically; after success use an approved Registry Editor procedure to restore {variable} under HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment with the previous value AND registry type above (delete it if absent). No ELO files are changed. Confirmation authorizes one disposable java -XX:+PrintFlagsFinal -version probe with the proposed options, followed by registry write, readback and a second probe.",
+            "de": "Genau einmal {option} in der systemweiten Variable {variable} setzen; eigenstaendige doppelte/widerspruechliche +/- Optionen entfernen (alle kuenftig erbenden JVMs, nicht nur ELO). Alter Wert: {old} (Registrierungstyp: {kind}). Neuer Wert: [{new}]. Typ und alle anderen Optionszeichen bleiben erhalten. Sicherung: exakter alter Wert in dieser Sitzung. Bei Prueffehler automatische Wiederherstellung; nach Erfolg per freigegebenem Registrierungseditor {variable} unter HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment mit altem Wert UND Typ wiederherstellen (bei zuvor fehlendem Wert loeschen). Keine ELO-Dateien werden geaendert. Bestaetigung erlaubt einen Test mit java -XX:+PrintFlagsFinal -version, danach Registrierungsaenderung, Ruecklesen und zweiten Test."
+          }
+        },
+        {
+          "id": "restore-backup",
+          "type": "restore-backup",
+          "label": { "en": "Restore this backup", "de": "Dieses Backup wiederherstellen" }
+        }
+      ],
+      "messages": {
+        "restoreVulnerable": {
+          "en": "SECURITY: this backup holds {vendor} {version}, which is BEFORE the fix for {id} ({alias}, BASE64 intrinsics). Restoring brings the vulnerability back. After the restore, apply the temporary mitigation ({option}) or update the runtime again.",
+          "de": "SICHERHEIT: Dieses Backup enthaelt {vendor} {version}, also eine Version VOR dem Fix fuer {id} ({alias}, BASE64-Intrinsics). Die Wiederherstellung bringt die Schwachstelle zurueck. Nach der Wiederherstellung die temporaere Risikominderung ({option}) anwenden oder die Runtime erneut aktualisieren."
+        },
+        "restoreFixed": {
+          "en": "Security: {vendor} {version} is a build listed as fixed for {id}. This is a narrow advisory classification, not a whole-system safety claim, and ELO compatibility is not verified.",
+          "de": "Sicherheit: {vendor} {version} ist ein fuer {id} als behoben aufgefuehrter Build. Das ist eine enge Advisory-Einstufung, keine Gesamtaussage zur Systemsicherheit; die ELO-Kompatibilitaet ist nicht geprueft."
+        },
+        "restoreUnknown": {
+          "en": "SECURITY: the vulnerability status of {vendor} {version} for {id} cannot be determined from the available evidence. Treat it as potentially vulnerable and apply the temporary mitigation ({option}) after the restore.",
+          "de": "SICHERHEIT: Der Schwachstellenstatus von {vendor} {version} fuer {id} ist mit den vorhandenen Nachweisen nicht bestimmbar. Als potenziell verwundbar behandeln und nach der Wiederherstellung die temporaere Risikominderung ({option}) anwenden."
+        },
+        "logRestoreVulnerable": "SECURITY: {runtime} was restored to {version}, which is BEFORE the {id} fix. Update Java again or apply the mitigation ({option}).",
+        "logRestoreUnknown": "SECURITY: {runtime} was restored to {version}; its status for {id} is unknown. Treat it as potentially vulnerable.",
+        "logRestoreFixed": "Restored {runtime} to {version} (listed as fixed for {id}).",
+        "logScan": "Scan finished: {count} Java runtime(s) found, {vulnerable} vulnerable ({id})."
+      },
+      "report": {
+        "headline": {
+          "en": "{id} ({alias}): potentially vulnerable runtimes were found",
+          "de": "{id} ({alias}): potenziell verwundbare Runtimes wurden gefunden"
+        },
+        "mitigationDetail": "{option}"
+      },
+      "simulation": {
+        "description": "Makes a runtime look like Temurin 17.0.2+8 (before the fix) so the detection, the alert, the mitigation and the report can be exercised without a vulnerable Java installed.",
+        "probes": {
+          "version": "openjdk version \"17.0.2\" 2022-01-18\nOpenJDK Runtime Environment Temurin-17.0.2+8 (build 17.0.2+8)\nOpenJDK 64-Bit Server VM Temurin-17.0.2+8 (build 17.0.2+8, mixed mode, sharing)\n",
+          "flags": "     bool UseBASE64Intrinsics                      = true                                   {product} {default}\n"
+        },
+        "expected": { "status": "PotentiallyVulnerable", "vendor": "Temurin", "version": "17.0.2+8" }
+      }
+    }
+  ]
+}
+::ELO_PATCH_END:VULNDB_JSON

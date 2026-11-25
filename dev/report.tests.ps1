@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/vulndb.ps1"
 . "$PSScriptRoot/report.ps1"
 function Assert($Condition, [string]$Message) { if (-not $Condition) { throw "FAIL: $Message" } }
 $resources = {
