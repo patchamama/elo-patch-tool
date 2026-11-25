@@ -686,6 +686,15 @@ function Add-EloUpdateReportActions {
         $Session.LastUpdate=@{Runtime=$Preview.Paths.Runtime;Root=$Preview.Root;Backup=$Preview.Paths.Backup;FromVersion=$from;ToVersion=$to;RuntimeIndex=$RuntimeIndex;Services=$Preview.Services}
     }
     switch ($Outcome) {
+        { $_ -in @('Success','SimulatedSuccess') } {
+            # The installed runtime is new evidence: its version is classified by the catalog (fixed / vulnerable / unknown).
+            $vendorName=[string]$Preview.Package.Vendor
+            if ($vendorName -match '(?i)adoptium|temurin') { $vendorName='Temurin' } elseif ($vendorName -match '(?i)azul|zulu') { $vendorName='Azul Zulu' } else { $vendorName='Unknown' }
+            $assessment=Get-EloBackupAssessment $vendorName ([string]$to)
+            $cls='Unknown'; $clsCode='Unknown'
+            if ($assessment.Risk -ceq 'patched') { $cls='Fixed'; $clsCode='AdvisoryFixedVersion' } elseif ($assessment.Risk -ceq 'vulnerable') { $cls='PotentiallyVulnerable'; $clsCode='AdvisoryRangeMatch' }
+            $Session.ReportJvms+=@{Version=[string]$to;Verified=$true;ExecutionVerified=$true;Vendor=$vendorName;VendorVerified=($vendorName -cne 'Unknown');Classification=$cls;ClassificationVerified=($cls -cne 'Unknown');EvidenceCode=$clsCode}
+        }
         { $_ -in @('Success','SimulatedSuccess') } { $Session.ReportActions+=@{Kind='Update';Status='Proven';Verified=$true;RuntimeIndex=$RuntimeIndex;EvidenceCode='InstalledRuntimeValidated';EvidenceVerified=$true;FromVersion=$from;ToVersion=$to} }
         'RolledBack' {
             $Session.ReportActions+=@{Kind='Update';Status='Failed';RuntimeIndex=$RuntimeIndex;EvidenceCode='ValidationFailed';EvidenceVerified=$true}
@@ -1308,6 +1317,15 @@ function New-EloLoopbackListener {
     try { $listener.Start(8); return $listener }
     catch { $listener.Stop(); Stop-EloRequest 503 'loopback_bind_failed' }
 }
+function New-EloPreferredListener {
+    # A stable loopback port keeps the browser origin (http://127.0.0.1:<port>) the same between runs, so data the page
+    # keeps in localStorage (the encrypted saved keys) is found again. If that port is busy, fall back to a free one.
+    param([ValidateRange(0,65535)][int]$Port=0,[ValidateRange(0,65535)][int]$PreferredPort=0)
+    if ($Port -eq 0 -and $PreferredPort -gt 0) {
+        try { return (New-EloLoopbackListener -Port $PreferredPort) } catch { }
+    }
+    return (New-EloLoopbackListener -Port $Port)
+}
 function Invoke-EloSessionLaunch {
     param($Session,[switch]$NoBrowser,[scriptblock]$LaunchHandler,
         [scriptblock]$BrowserLauncher={ param($Uri) Start-Process -FilePath $Uri -ErrorAction Stop | Out-Null })
@@ -1321,10 +1339,10 @@ function Invoke-EloSessionLaunch {
 }
 function Start-EloServer {
     param([Parameter(Mandatory=$true)][string]$UiHtml,[Parameter(Mandatory=$true)][string]$ScanSource,
-        [ValidateRange(0,65535)][int]$Port=0,[switch]$OpenBrowser,[switch]$NoBrowser,[scriptblock]$LaunchHandler)
+        [ValidateRange(0,65535)][int]$Port=0,[switch]$OpenBrowser,[switch]$NoBrowser,[scriptblock]$LaunchHandler,[ValidateRange(0,65535)][int]$PreferredPort=0)
     if ($NoBrowser -and $OpenBrowser) { Stop-EloRequest 422 'conflicting_launch_options' }
     if ($NoBrowser -and -not $LaunchHandler) { Stop-EloRequest 422 'no_browser_requires_private_launch_handler' }
-    $listener=New-EloLoopbackListener -Port $Port
+    $listener=New-EloPreferredListener -Port $Port -PreferredPort $PreferredPort
     $session=$null
     try {
         $Port=$listener.LocalEndpoint.Port

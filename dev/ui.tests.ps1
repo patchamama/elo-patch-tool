@@ -35,7 +35,8 @@ const both = (en,de=en) => ({en,de});
 const row = (overrides={}) => ({id:'installation_1',path:'C:\\ELO data\\<img onerror=alert(1)>',runtimeRoot:'C:\\ELO data\\jre',version:'17.0.1',vendor:'Example vendor <img>',architecture:'x64',status:'vulnerable',eloRationale:both('ELO service points to this JVM','ELO-Dienst verweist auf diese JVM'),classificationEvidence:both('Version and vendor matched advisory rules','Version und Hersteller entsprechen den Hinweisregeln'),...overrides});
 // Fixtures exercise validation, not live advisory verification or applicability.
 const securityFixture = () => ({verifiedOn:'2025-01-21',advisories:[{id:'oracle_fixture',title:both('Official Oracle advisory fixture','Offizieller Oracle-Testhinweis'),url:'https://www.oracle.com/security-alerts/cpujan2025.html'}]});
-function boot(hash = '#token=test-session-token', storage = null) {
+const memoryStore = () => { const map = new Map(); return {map,getItem:k => map.has(k) ? map.get(k) : null,setItem:(k,v) => { map.set(k,String(v)); },removeItem:k => { map.delete(k); }}; };
+function boot(hash = '#token=test-session-token', storage = null, local = memoryStore()) {
  const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(m => [m[1],new Element(m[1])]));
  const translated = [...html.matchAll(/data-i18n="([^"]+)"/g)].map(m => { const el=new Element(); el.dataset.i18n=m[1]; return el; });
  const calls=[],downloads=[],timers=[];
@@ -48,7 +49,7 @@ function boot(hash = '#token=test-session-token', storage = null) {
  static createObjectURL(blob) { downloads.push(blob); return 'blob:local'; }
  static revokeObjectURL() {}
  }
- const context={document,location:{hash,pathname:'/ui',search:''},...(storage ? {sessionStorage:storage} : {}),history,URLSearchParams,Blob,Date,JSON,Number,Set,TextDecoder,URL:BrowserURL,
+ const context={document,location:{hash,pathname:'/ui',search:''},...(storage ? {sessionStorage:storage} : {}),localStorage:local,crypto:require('node:crypto').webcrypto,TextEncoder,btoa,atob,history,URLSearchParams,Blob,Date,JSON,Number,Set,TextDecoder,URL:BrowserURL,
  setInterval(fn) { timers.push(fn); },setTimeout(fn) { fn(); },
  async fetch(path,options) {
  calls.push({path,options});
@@ -66,7 +67,7 @@ function boot(hash = '#token=test-session-token', storage = null) {
  return new Response(JSON.stringify(body));
  }};
  vm.runInNewContext(scripts[0][1],context,{timeout:2000});
- return {el:id => elements.get(id),calls,downloads,history,translated,document,
+ return {local,el:id => elements.get(id),calls,downloads,history,translated,document,
  poll:async () => { await timers[0](); await tick(); },
  status:value => { status=value; },backups:value => { backups=value; },vulns:value => { vulns=value; },community:value => { communityHandler=value; },results:value => { results=value; },security:value => { security=value; },preview:value => { preview=value; },failure:(value,body={error:'operation_failed',warnings:[]}) => { failure=value; errorBody=body; },raw:value => { raw=value; },ack:value => { ack=value; }};
 }
@@ -641,7 +642,55 @@ function boot(hash = '#token=test-session-token', storage = null) {
  assert(flat(spUi.el('behindUpdate')).includes('Ejecuta en una PowerShell de ADMINISTRADOR') && flat(spUi.el('behindUpdate')).includes('Haz una copia del runtime') && !flat(spUi.el('behindUpdate')).includes('Nothing here is deleted'),'the by-hand command comments are in Spanish');
  assert(spUi.el('vulnList').children.length === 1 && spUi.el('vulnList').children[0].children[0].children[1].textContent === 'CVE title','catalog/server texts without a Spanish version fall back to English');
  spUi.preview({previewId:'preview_1',summary:{en:'English summary',de:'Deutsche Zusammenfassung',es:'Resumen en español'},warnings:[both('Check compatibility','Kompatibilität prüfen'),{en:'Only EN',de:'Nur DE',es:'Solo ES'}]});
- spUi.el('language').value = 'en'; spUi.el('language').onchange(); assert.equal(spUi.translated.find(el => el.dataset.i18n === 'step1').textContent,'Scan'); // ---- the temporary mitigation is always available for a scanned runtime
+ spUi.el('language').value = 'en'; spUi.el('language').onchange(); assert.equal(spUi.translated.find(el => el.dataset.i18n === 'step1').textContent,'Scan'); // ---- keys remembered in this browser: AES-GCM ciphertext in localStorage, key derived from a master passphrase
+ for (const id of ['vPass','vSave','vUnlock','vForget','vState']) assert(html.includes('id="'+id+'"'),'vault has '+id);
+ assert(/id="vPass" class="masked" type="text"/.test(html),'the passphrase field is masked text, never filled by a password manager');
+ const vaultStore = memoryStore();
+ const v1 = boot('#token=test-session-token',null,vaultStore); await tick(); v1.community(backend);
+ const press = async (ui,id) => { await ui.el(id).onclick(); await tick(); await tick(); };
+ await openSettings(v1);
+ assert(v1.el('vState').textContent.includes('Nothing is saved on this browser') && v1.el('vUnlock').disabled === true && v1.el('vForget').disabled === true,'nothing saved yet: only Save is available');
+ v1.el('vPass').value = 'short'; await press(v1,'vSave'); assert(v1.el('vState').textContent.includes('at least 8 characters')); assert.equal(vaultStore.map.size,0,'a weak passphrase stores nothing');
+ v1.el('cUser').value = ''; v1.el('cPass').value = ''; v1.el('aiKey').value = ''; v1.el('vPass').value = 'correct horse battery'; await press(v1,'vSave'); assert(v1.el('vState').textContent.includes('Type at least one value'),'nothing to save is reported'); assert.equal(vaultStore.map.size,0);
+ v1.el('cUser').value = 'me@example.org'; v1.el('cPass').value = 'pw-typed-secret'; v1.el('aiKey').value = 'sk-openai-secret'; v1.el('vPass').value = 'correct horse battery'; await press(v1,'vSave');
+ const raw = vaultStore.getItem('eloSecretsVault.v1'); const pack = JSON.parse(raw);
+ assert(v1.el('vState').textContent.includes('Saved encrypted') && v1.el('vPass').value === '','saved, and the passphrase field is cleared');
+ assert(pack.v === 1 && pack.kdf === 'PBKDF2-SHA256' && pack.iter === 600000 && /^[A-Za-z0-9+\/=]+$/.test(pack.salt) && /^[A-Za-z0-9+\/=]+$/.test(pack.iv) && /^[A-Za-z0-9+\/=]+$/.test(pack.data),'the stored record is versioned ciphertext with its own salt and IV');
+ for (const secret of ['me@example.org','pw-typed-secret','sk-openai-secret','correct horse battery']) assert(!raw.includes(secret) && !Buffer.from(pack.data,'base64').toString('latin1').includes(secret),'plaintext never reaches localStorage: '+secret);
+ assert.equal(vaultStore.map.size,1,'only the vault is stored');
+ // another "page load" on the same origin: the data is found again, locked
+ const v2 = boot('#token=test-session-token',null,vaultStore); await tick(); v2.community(backend); await openSettings(v2);
+ assert(v2.el('vState').textContent.includes('Encrypted keys are saved on this browser') && v2.el('vUnlock').disabled === false && v2.el('cUser').value === '' && v2.el('aiKey').value === '','after a restart the saved keys are locked and not filled in');
+ v2.el('vPass').value = 'wrong passphrase!'; await press(v2,'vUnlock');
+ assert(v2.el('vState').textContent.includes('Wrong passphrase') && v2.el('cUser').value === '' && v2.el('aiKey').value === '','a wrong passphrase unlocks nothing');
+ v2.el('vPass').value = 'correct horse battery'; await press(v2,'vUnlock');
+ assert(v2.el('cUser').value === 'me@example.org' && v2.el('cPass').value === 'pw-typed-secret' && v2.el('aiKey').value === 'sk-openai-secret' && v2.el('vPass').value === '','the right passphrase fills the saved values'); assert(v2.el('vState').textContent.includes('Unlocked') && v2.el('vUnlock').disabled === true);
+ // a run clears the secret fields but an unlocked vault refills them, so nothing has to be retyped
+ v2.el('cConsent').checked = true; v2.el('cConsent').onchange(); await v2.el('aiLoad').onclick(); await tick(); await tick();
+ v2.el('cSince').value = '90d'; v2.el('cMax').value = '5'; const callsBefore = calls.length; polls = 0; await v2.el('communityRun').onclick(); await tick(); await tick(); await tick();
+ const vaultRun = calls.slice(callsBefore).find(c => c.path === 'community/run');
+ assert(vaultRun && vaultRun.body.password === 'pw-typed-secret' && vaultRun.body.apiKey === 'sk-openai-secret' && vaultRun.body.user === 'me@example.org','the run uses the unlocked values');
+ assert(v2.el('cPass').value === 'pw-typed-secret' && v2.el('aiKey').value === 'sk-openai-secret','the fields are refilled after the run while the vault is unlocked');
+ // keys are kept per provider
+ v2.el('aiProvider').value = 'anthropic'; v2.el('aiProvider').onchange(); assert.equal(v2.el('aiKey').value,'','another provider does not inherit the key');
+ v2.el('aiKey').value = 'sk-ant-secret'; v2.el('vPass').value = 'correct horse battery'; await press(v2,'vSave');
+ v2.el('aiProvider').value = 'openai'; v2.el('aiProvider').onchange(); assert.equal(v2.el('aiKey').value,'sk-openai-secret','switching back restores the first key'); v2.el('aiProvider').value = 'anthropic'; v2.el('aiProvider').onchange(); assert.equal(v2.el('aiKey').value,'sk-ant-secret');
+ const v3 = boot('#token=test-session-token',null,vaultStore); await tick(); v3.community(backend); await openSettings(v3); v3.el('vPass').value = 'correct horse battery'; await press(v3,'vUnlock');
+ assert.equal(v3.el('cUser').value,'me@example.org','both provider keys and the account survived a restart');
+ // damaged or foreign records are refused without changing anything
+ const damaged = JSON.parse(raw); damaged.data = damaged.data.slice(0,-4)+'AAAA'; vaultStore.setItem('eloSecretsVault.v1',JSON.stringify(damaged));
+ const v4 = boot('#token=test-session-token',null,vaultStore); await tick(); v4.community(backend); await openSettings(v4); v4.el('vPass').value = 'correct horse battery'; await press(v4,'vUnlock');
+ assert(v4.el('vState').textContent.includes('Wrong passphrase or damaged data') && v4.el('cUser').value === '','a tampered record fails authentication');
+ for (const foreign of ['not json','{"v":1,"kdf":"PBKDF2-SHA256","iter":1,"salt":"AA==","iv":"AA==","data":"AA=="}','{"v":2}','[1]']) { vaultStore.setItem('eloSecretsVault.v1',foreign); const v5 = boot('#token=test-session-token',null,vaultStore); await tick(); v5.community(backend); await openSettings(v5); v5.el('vPass').value = 'correct horse battery'; await press(v5,'vUnlock'); assert(v5.el('cUser').value === '' && v5.el('vState').textContent.length > 0,'foreign record refused: '+foreign.slice(0,20)); }
+ // forget
+ vaultStore.setItem('eloSecretsVault.v1',raw); const v6 = boot('#token=test-session-token',null,vaultStore); await tick(); v6.community(backend); await openSettings(v6);
+ await press(v6,'vForget'); assert.equal(vaultStore.map.size,0,'forgetting removes the saved keys'); assert(v6.el('vState').textContent.includes('removed from this browser') && v6.el('vForget').disabled === true);
+ // blocked storage / no WebCrypto
+ const blocked = boot('#token=test-session-token',null,{getItem() { return null; },setItem() { throw new Error('quota'); },removeItem() { throw new Error('blocked'); }}); await tick(); blocked.community(backend); await openSettings(blocked);
+ blocked.el('cUser').value = 'x'; blocked.el('vPass').value = 'correct horse battery'; await press(blocked,'vSave'); assert(blocked.el('vState').textContent.includes('cannot store encrypted keys'),'blocked storage is reported, never silent');
+ // German / Spanish labels
+ changeLocale(v6,'de'); assert.equal(v6.translated.find(el => el.dataset.i18n === 'vaultSave').textContent,'Verschlüsselt speichern'); changeLocale(v6,'es'); assert.equal(v6.translated.find(el => el.dataset.i18n === 'vaultSave').textContent,'Guardar cifrado'); changeLocale(v6,'en');
+ // ---- the temporary mitigation is always available for a scanned runtime
  const mitUi = boot(); await tick();
  mitUi.results([row({status:'inconclusive',vendor:'Azul Zulu',version:'21.0.1+12-LTS'})]); await mitUi.poll();
  assert.equal(mitUi.el('mitigate').disabled,false,'the temporary mitigation stays available for a runtime that is not classified vulnerable');

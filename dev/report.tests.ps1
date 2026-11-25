@@ -239,4 +239,29 @@ $h = ConvertTo-EloTechnicalReportHtml $esReport es
 Assert ($h.Contains('<html lang="es">') -and $h.Contains('Informe técnico') -and $h.Contains('Versiones de JVM detectadas') -and $h.Contains('Potencialmente vulnerable') -and $h.Contains('Siguiente paso recomendado') -and $h.Contains('RAM total')) 'the Spanish report is translated'
 Assert ($h -notmatch 'Technical report|Recommended next step|Detected JVM versions|Unknown / unavailable|Unbekannt') 'no English or German leftovers in the Spanish report'
 Assert ($h.Contains('Opción presente') -and $h.Contains('Los valores del entorno no prueban')) 'option labels and the environment note are Spanish'
+
+# The report says what the update achieved (and only when proven) and how fragile the mitigation is.
+$res2 = { @{ServerName='SRV01';WindowsVersion='10.0';WindowsBuild='20348';TotalRamBytes=17179869184;Disks=@()} }
+$oldJvm = @{Version='17.0.2+8';Verified=$true;ExecutionVerified=$true;Vendor='Temurin';VendorVerified=$true;Classification='PotentiallyVulnerable';ClassificationVerified=$true;EvidenceCode='AdvisoryRangeMatch'}
+$newFixed = @{Version='17.0.21.1+2';Verified=$true;ExecutionVerified=$true;Vendor='Temurin';VendorVerified=$true;Classification='Fixed';ClassificationVerified=$true;EvidenceCode='AdvisoryFixedVersion'}
+$newUnknown = @{Version='21.0.1+12';Verified=$true;ExecutionVerified=$true;Vendor='Azul Zulu';VendorVerified=$true;Classification='Unknown'}
+$upd = { param($to) @(@{Kind='Backup';Status='Proven';Verified=$true;BackupVerified=$true;RuntimeIndex=1;EvidenceCode='BackupManifestMatched';EvidenceVerified=$true;FromVersion='17.0.2+8';BackupVersion='17.0.2+8'},@{Kind='Update';Status='Proven';Verified=$true;RuntimeIndex=1;EvidenceCode='InstalledRuntimeValidated';EvidenceVerified=$true;FromVersion='17.0.2+8';ToVersion=$to}) }
+$fixedReport = New-EloTechnicalReport -ResourceCollector $res2 -JvmEvidence @($oldJvm,$newFixed) -Actions (& $upd '17.0.21.1+2')
+$he = ConvertTo-EloTechnicalReportHtml $fixedReport en
+Assert ($he.Contains('<h2>Result</h2>') -and $he.Contains('Java runtime updated and verified: 17.0.2+8 to 17.0.21.1+2') -and $he.Contains('listed as fixed according to the matched advisory') -and $he.Contains('ELO compatibility is not verified')) 'a verified update with a fixed result states that Java was installed and the version is fixed (with its limits)'
+Assert ($he.Contains('JVM #2: Verified 17.0.21.1+2') -and $he.Contains('Fixed version according to matched advisory')) 'the new runtime is listed as a JVM with its classification'
+$hd = ConvertTo-EloTechnicalReportHtml $fixedReport de; $hs = ConvertTo-EloTechnicalReportHtml $fixedReport es
+Assert ($hd.Contains('Java-Runtime aktualisiert und geprueft: 17.0.2+8 auf 17.0.21.1+2') -and $hd.Contains('als korrigiert aufgefuehrt') -and $hs.Contains('Runtime de Java actualizado y verificado: 17.0.2+8 a 17.0.21.1+2') -and $hs.Contains('figura como corregida')) 'the result statement exists in German and Spanish'
+$unknownReport = New-EloTechnicalReport -ResourceCollector $res2 -JvmEvidence @($oldJvm,$newUnknown) -Actions (& $upd '21.0.1+12')
+$hu = ConvertTo-EloTechnicalReportHtml $unknownReport en
+Assert ($hu.Contains('Java runtime updated and verified') -and -not $hu.Contains('listed as fixed') -and $hu -notmatch 'Unknown / unavailable') 'when the fix status is not known the report says only that the update was verified, without a fix claim or placeholder'
+$mitReport = New-EloTechnicalReport -ResourceCollector $res2 -OptionsCollector { @{Machine='-XX:-UseBASE64Intrinsics';User=$null;Process=$null} } -JvmEvidence @($oldJvm) -Actions @(@{Kind='Mitigation';Status='Proven';Verified=$true;RuntimeIndex=1;EvidenceCode='MachineOptionSet';EvidenceVerified=$true})
+foreach ($pair in @(@('en','Limits of the temporary mitigation','This protection is fragile','removed or overwritten','GetEnvironmentVariable'),@('de','Grenzen der vorlaeufigen Risikominderung','Dieser Schutz ist fragil','entfernt oder ueberschrieben','GetEnvironmentVariable'),@('es','Límites de la mitigación temporal','Esta protección es frágil','se elimina o se sobrescribe','GetEnvironmentVariable'))) {
+    $hm = ConvertTo-EloTechnicalReportHtml $mitReport $pair[0]
+    Assert ($hm.Contains($pair[1]) -and $hm.Contains($pair[2]) -and $hm.Contains($pair[3]) -and $hm.Contains($pair[4])) "the mitigation report warns that the protection is fragile and shows how to check it ($($pair[0]))"
+}
+Assert (-not (ConvertTo-EloTechnicalReportHtml $fixedReport en).Contains('This protection is fragile')) 'the fragility note appears only when a mitigation was applied'
+Assert (-not (ConvertTo-EloTechnicalReportHtml (New-EloTechnicalReport -ResourceCollector $res2 -JvmEvidence @($oldJvm) -Actions @()) en).Contains('<h2>Result</h2>')) 'no result statement without a verified update'
+$ramReport = New-EloTechnicalReport -ResourceCollector { @{ServerName='S';TotalRamBytes=1073741824} } -JvmEvidence @()
+Assert ((ConvertTo-EloTechnicalReportHtml $ramReport en) -notmatch 'GiB \(Unknown') 'a known RAM size is not followed by an "unknown" status'
 Write-Output 'PASS: deterministic bilingual report tests (synthetic adapters only)'

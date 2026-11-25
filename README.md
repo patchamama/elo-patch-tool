@@ -154,7 +154,8 @@ node tools/community/bin/elo-community.js check      # validate + simulate the d
 - lists the models your account offers in a collapsible list box, loaded automatically when a key is already saved (or with **Load available models**);
 - runs the analysis and lists every **article found** with the AI's severity (high / medium / low) and why, a short summary, whether a **script is worthwhile** (and why not, e.g. it needs a vendor hotfix), the solutions the article reports and the draft it produced;
 - lets you **improve one article** by pasting a solution text, notes or links and/or letting the AI **research the internet** (OpenAI / Anthropic), which re-drafts the catalog entry;
-- **Check the drafts** validates them and replays their simulation inside the app.
+- **Check the drafts** validates them and replays their simulation inside the app;
+- **Remember the keys on this browser (encrypted)**: with a master passphrase, the user name, password and API keys are saved in `localStorage` as AES-256-GCM ciphertext (key derived with PBKDF2-SHA256, 600,000 iterations; the passphrase is never stored) and survive restarts until you press *Forget*. The web mode listens on the stable address `127.0.0.1:47831` (a busy port falls back to a free one, which then has its own, empty storage) so the browser finds the data again. Forgetting the passphrase makes the data unrecoverable; use a long one, because anyone who can copy the browser profile can try to guess a weak passphrase offline.
 
 The same commands are available from the terminal (ccess, models, efine).
 
@@ -177,6 +178,7 @@ The web UI, the technical report and the catalog texts are available in **Englis
 - The *Temporary mitigation* button is enabled only for a runtime the catalog classifies as vulnerable; for any other runtime (for example an Azul Zulu build, which the catalog does not evaluate) the page says so and only the update is offered.
 - The static help texts of the UI (manual instructions, action descriptions) still describe the built-in vulnerability; the alert, severity, problem, solution, advisories, mitigation, restore warnings, report sources, CLI security block and scan rules come from the catalog.
 - Raw JSON exports may include local paths; review them before sharing.
+- After a verified update the report states the result (`Java runtime updated and verified: <from> to <to>`, and that the new version is listed as fixed only when the catalog proves it). After a mitigation it states that the protection is **fragile**: it lives only in the machine variable `JAVA_TOOL_OPTIONS` and stops working if that variable is removed or overwritten, and running JVMs and services keep the old environment until restarted; it includes the PowerShell command to check it.
 - The technical report states only what is known: anything unknown or unavailable (classification, evidence, vendor, ELO version, scopes, disks) is left out instead of printed as a placeholder.
 
 ## Requirements

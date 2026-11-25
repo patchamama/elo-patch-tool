@@ -252,7 +252,11 @@ function ConvertTo-EloTechnicalReportHtml {
             Classification='Clasificación de vulnerabilidad';Evidence='Evidencia / método';Association='Asociación con el runtime';PotentiallyVulnerable='Potencialmente vulnerable';NotAffected='No afectado por el aviso coincidente';Fixed='Versión corregida según el aviso coincidente';AdvisoryRangeMatch='Coincide con el rango de versiones afectadas del aviso';AdvisoryExcludesVersion='El aviso excluye la versión observada';AdvisoryFixedVersion='La versión observada coincide con la versión corregida del aviso';EffectiveJvmFlagObserved='Opción de JVM observada; ámbito sin especificar, proceso ELO actual no verificado';InstalledRuntimeValidated='Manifiesto del runtime instalado y prueba de versión verificados';BackupManifestMatched='El contenido de la copia coincide con el manifiesto original';OriginalRuntimeRestored='Runtime original restaurado y verificado';DownloadFailed='La descarga falló';ValidationFailed='Falló la validación de la postcondición';RestoreFailed='La restauración falló; hace falta recuperación manual';OperationCancelled='Operación cancelada';Checked='Fecha de verificación de las fuentes';Fetched='Obtenido por el agente principal';Supplied='Texto aportado por el usuario; el acceso al sitio devolvió HTTP 403; no obtenido de forma independiente';Changes='Los avisos pueden cambiar. El acceso a las fuentes no prueba la aplicabilidad ni el éxito de la corrección.'
             Vendor='Fabricante de JVM verificado';Recommendation='Siguiente paso recomendado';Temporary='Mitigación temporal solo con opción; no instala un runtime de Java y no es una solución permanente. Una opción de máquina no prueba que una JVM recién iniciada o el proceso ELO actual use la opción.';Upgrade='Es preferible instalar una versión de Java más reciente corregida por el fabricante, tras confirmar la compatibilidad con ELO. No se deduce ninguna versión corregida concreta ni una instalación correcta.';VendorUnknown='Fabricante de JVM desconocido; consulta a tu fabricante de JVM y a ELO la versión corregida adecuada y las instrucciones oficiales de descarga e instalación. No se asume que Temurin sea un sustituto del mismo proveedor.';Download='Descargas oficiales de Temurin';Install='Instrucciones oficiales de instalación de Temurin';MachineOptionSet='Opción de máquina establecida';NewlyLaunchedJvmFlagVerified='Opción de una JVM recién iniciada';RunningEloJvmFlagVerified='Opción del proceso ELO en ejecución'}
         foreach ($key in $es.Keys) { $t[$key]=$es[$key] }
-    }    $lines=New-Object 'System.Collections.Generic.List[string]'
+    }    $more=@{en=@{ResultTitle='Result';ResultUpdated='Java runtime updated and verified: {from} to {to}. The backup ZIP and the previous runtime were kept.';ResultFixed=' The new version is listed as fixed according to the matched advisory (a narrow advisory classification: it does not prove that the whole system is safe, and ELO compatibility is not verified).';FragileTitle='Limits of the temporary mitigation';FragileText='This protection is fragile: it exists only as the machine environment variable JAVA_TOOL_OPTIONS. It stops applying if that variable is removed or overwritten (by an administrator, a script, a Windows or installer change), and JVMs and services that were already running keep their old environment until they are restarted. It is a stopgap until the Java runtime is updated.';FragileVerify='To check that it is still in place (PowerShell):'}
+        de=@{ResultTitle='Ergebnis';ResultUpdated='Java-Runtime aktualisiert und geprueft: {from} auf {to}. Backup-ZIP und vorherige Runtime wurden behalten.';ResultFixed=' Die neue Version ist laut zugeordnetem Hinweis als korrigiert aufgefuehrt (eine enge Hinweis-Einstufung: kein Beweis fuer die Sicherheit des gesamten Systems; die ELO-Kompatibilitaet ist nicht geprueft).';FragileTitle='Grenzen der vorlaeufigen Risikominderung';FragileText='Dieser Schutz ist fragil: Er besteht nur als systemweite Umgebungsvariable JAVA_TOOL_OPTIONS. Er wirkt nicht mehr, wenn die Variable entfernt oder ueberschrieben wird (durch einen Administrator, ein Skript, eine Windows- oder Installer-Aenderung); bereits laufende JVMs und Dienste behalten ihre alte Umgebung bis zum Neustart. Es ist eine Zwischenloesung bis zur Aktualisierung der Java-Runtime.';FragileVerify='Pruefen, ob sie noch gesetzt ist (PowerShell):'}
+        es=@{ResultTitle='Resultado';ResultUpdated='Runtime de Java actualizado y verificado: {from} a {to}. Se conservaron el ZIP de la copia y el runtime anterior.';ResultFixed=' La nueva versión figura como corregida según el aviso coincidente (una clasificación estrecha del aviso: no prueba que todo el sistema sea seguro, y la compatibilidad con ELO no está verificada).';FragileTitle='Límites de la mitigación temporal';FragileText='Esta protección es frágil: solo existe como variable de entorno de la máquina JAVA_TOOL_OPTIONS. Deja de aplicarse si esa variable se elimina o se sobrescribe (por un administrador, un script, un cambio de Windows o de un instalador), y las JVM y servicios que ya estaban en ejecución conservan su entorno antiguo hasta reiniciarse. Es una medida provisional hasta actualizar el runtime de Java.';FragileVerify='Para comprobar que sigue aplicada (PowerShell):'}}
+    foreach ($key in $more[$Language].Keys) { $t[$key]=$more[$Language][$key] }
+    $lines=New-Object 'System.Collections.Generic.List[string]'
     $lines.Add('<!doctype html><html lang="'+$Language+'"><head><meta charset="utf-8"><title>'+$t.Title+'</title></head><body><h1>'+$t.Title+'</h1>')
     $lines.Add('<p>'+$t.Notice+'</p>')
     # Only what is known is reported: anything unknown / unavailable is left out instead of printed as a placeholder.
@@ -264,7 +268,8 @@ function ConvertTo-EloTechnicalReportHtml {
     }
     if ($null -ne $r.System.TotalRamBytes) {
         $ram=([double]$r.System.TotalRamBytes / 1GB).ToString('F2',[Globalization.CultureInfo]::InvariantCulture)+' GiB'
-        $facts2.Add('<dt>'+$t.Ram+'</dt><dd>'+$ram+' ('+$t[$r.System.Status]+')</dd>')
+        $ramState=''; if ($r.System.Status -cne 'Unknown') { $ramState=' ('+$t[$r.System.Status]+')' }
+        $facts2.Add('<dt>'+$t.Ram+'</dt><dd>'+$ram+$ramState+'</dd>')
     }
     foreach ($d in $r.System.Disks) {
         $space=([double]$d.TotalBytes/1GB).ToString('F2',[Globalization.CultureInfo]::InvariantCulture)+' GiB / '+([double]$d.FreeBytes/1GB).ToString('F2',[Globalization.CultureInfo]::InvariantCulture)+' GiB'
@@ -314,6 +319,19 @@ function ConvertTo-EloTechnicalReportHtml {
         $actionItems.Add('<li>'+$t[$a.Kind]+': '+$t[$a.Status]+$detail+'</li>')
     }
     if ($actionItems.Count -gt 0) { $lines.Add('<h2>'+$t.Update+' / '+$t.Mitigation+' / '+$t.Backup+' / '+$t.Restore+'</h2><ul>'+($actionItems -join '')+'</ul>') }
+    # What the verified update achieved: stated only when the evidence proves it (never "unknown").
+    $resultItems=New-Object 'System.Collections.Generic.List[string]'
+    foreach ($a in $r.Actions) {
+        if ($a.Kind -eq 'Update' -and $a.Status -eq 'Proven' -and $a.FromVersion -and $a.ToVersion) {
+            $msg=$t.ResultUpdated.Replace('{from}',(ConvertTo-EloReportEscapedText $a.FromVersion)).Replace('{to}',(ConvertTo-EloReportEscapedText $a.ToVersion))
+            if (@($r.Jvms | Where-Object { $_.Version -ceq $a.ToVersion -and $_.Classification -ceq 'Fixed' }).Count -gt 0) { $msg+=$t.ResultFixed }
+            $resultItems.Add('<p>'+$msg+'</p>')
+        }
+    }
+    if ($resultItems.Count -gt 0) { $lines.Add('<h2>'+$t.ResultTitle+'</h2>'+($resultItems -join '')) }
+    if (@($r.Actions | Where-Object { $_.Kind -eq 'Mitigation' -and $_.Status -eq 'Proven' }).Count -gt 0) {
+        $lines.Add('<h2>'+$t.FragileTitle+'</h2><p>'+$t.FragileText+'</p><p>'+$t.FragileVerify+'</p><pre>[Environment]::GetEnvironmentVariable(''JAVA_TOOL_OPTIONS'',''Machine'')</pre>')
+    }
     $optionLabels=@{Present='Flag present';Absent='Flag absent';Conflict='Conflicting enabling flag present'}
     if ($Language -eq 'de') { $optionLabels=@{Present='Flag vorhanden';Absent='Flag nicht vorhanden';Conflict='Konfligierendes aktivierendes Flag vorhanden'} }
     if ($Language -eq 'es') { $optionLabels=@{Present='Opción presente';Absent='Opción ausente';Conflict='Hay una opción contradictoria que la activa'} }

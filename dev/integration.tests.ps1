@@ -162,12 +162,13 @@ try {
     Assert ($r.ExitCode -eq 0 -and (ConvertFrom-Json $r.Output).scan.Cancelled -eq $false) 'actual CLI scanner adapter JSON'
     $script:webCalls=0
     function Start-EloServer {
-        param($UiHtml,$ScanSource,[switch]$NoBrowser)
-        $script:webCalls++
+        param($UiHtml,$ScanSource,[switch]$NoBrowser,[int]$PreferredPort)
+        $script:webCalls++; $script:preferredPort=$PreferredPort
         Assert ($UiHtml -match '<meta charset="utf-8">' -and $ScanSource -match 'function Invoke-EloJavaScan') 'packaged web resources'
     }
     $r=Invoke-EloPackagedTool -Arguments @()
     Assert ($r.ExitCode -eq 0 -and $script:webCalls -eq 1) 'default routes to web'
+    Assert ($script:preferredPort -eq 47831) 'the packaged web mode asks for the stable port so saved (encrypted) keys are found again'
     $r=Invoke-EloPackagedTool -Arguments @('--scan')
     Assert ($r.ExitCode -eq 2 -and $script:webCalls -eq 1) 'web rejects unsupported options rather than silently scanning'
     # Actual CLI bridge must not serialize its private session/preview capabilities.

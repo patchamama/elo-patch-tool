@@ -277,6 +277,7 @@ Assert ($up.summary.en.Length -le 4096 -and $up.summary.de.Length -le 4096 -and 
 Assert ((UpdateApply $up.previewId).ok -and $m.State.Installed -eq 'new') 'confirmed update installs the new runtime'
 Assert (($m.State.Events -join ',') -ceq 'backup,download,stage,preserve,replace') 'backup precedes download and replacement'
 Assert (@($s.ReportActions | Where-Object { $_.Kind -ceq 'Update' -and $_.Status -ceq 'Proven' }).Count -eq 1 -and @($s.ReportActions | Where-Object { $_.Kind -ceq 'Backup' -and $_.BackupVerified }).Count -eq 1) 'update and verified backup are recorded for the report'
+Assert ($s.ReportJvms[-1].Version -ceq '17.0.21.1+2' -and $s.ReportJvms[-1].Classification -ceq 'Fixed' -and $s.ReportJvms[-1].Verified) 'a successful Temurin update adds the new runtime to the report as verified and fixed by the catalog'
 $s.Adapters.Resources={ @{ServerName='TEST-SERVER';WindowsVersion='10.0';WindowsBuild='20348';TotalRamBytes=8GB;Disks=@(@{Name='C:';TotalBytes=100GB;FreeBytes=40GB})} }
 $s.Adapters.EloVersion={ param($Roots) if ($Roots -contains 'C:\ELO') { '25.00.010.476816' } else { $null } }
 $report=Get-EloSessionReportHtml $s en
@@ -310,6 +311,7 @@ Assert ($e.Status -eq 409 -and $e.Body.error -ceq 'update_preview_refused' -and 
 $m=Reset-UpdateSession 'zulu'; $up=UpdatePreview
 Assert ($up.summary.en.Contains('Azul Zulu JDK 21') -and $up.summary.en.Contains('21.0.1+12') -and $up.summary.en.Contains('21.0.13.1+2') -and $up.summary.de.Contains('Azul Zulu')) 'Zulu preview names vendor, branch, installed and latest version'
 Assert ((UpdateApply $up.previewId).ok -and @($s.ReportActions | Where-Object { $_.Kind -ceq 'Update' -and $_.ToVersion -ceq '21.0.13.1+2' -and $_.FromVersion -ceq '21.0.1+12' }).Count -eq 1) 'Zulu update recorded with exact versions'
+Assert ($s.ReportJvms[-1].Version -ceq '21.0.13.1+2' -and $s.ReportJvms[-1].Classification -ceq 'Unknown' -and $s.ReportJvms[-1].Vendor -ceq 'Azul Zulu') 'a Zulu update is recorded as verified with an unknown (omitted) fix status: the catalog has no Zulu data'
 # Already newest: nothing offered.
 $m=Reset-UpdateSession 'current'
 $e=Get-ErrorCode { UpdatePreview }
@@ -600,6 +602,18 @@ $repEs = Get-EloSessionReportHtml $evidenceSession es
 Assert ($repEs.Contains('<html lang="es">') -and $repEs.Contains('Estado del escaneo de la sesion: Completado')) 'the session report can be produced in Spanish'
 $e = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/report '{"language":"fr"}') }
 Assert ($e.Status -eq 400) 'other languages are still rejected'
+
+# A stable preferred port keeps the browser origin (and its encrypted saved keys) between runs; a busy port falls back.
+$probe = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Parse('127.0.0.1'),0); $probe.Start(); $freePort = $probe.LocalEndpoint.Port; $probe.Stop()
+$pref = New-EloPreferredListener -PreferredPort $freePort
+try { Assert ($pref.LocalEndpoint.Port -eq $freePort) 'a free preferred port is used, so the origin is the same on every run' } finally { $pref.Stop() }
+$busy = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Parse('127.0.0.1'),0); $busy.Start(); $busyPort = $busy.LocalEndpoint.Port
+try {
+    $fallback = New-EloPreferredListener -PreferredPort $busyPort
+    try { Assert ($fallback.LocalEndpoint.Port -ne $busyPort -and $fallback.LocalEndpoint.Port -gt 0 -and $fallback.LocalEndpoint.Address.ToString() -ceq '127.0.0.1') 'a busy preferred port falls back to another free loopback port' } finally { $fallback.Stop() }
+} finally { $busy.Stop() }
+$explicit = New-EloPreferredListener -Port 0 -PreferredPort 0
+try { Assert ($explicit.LocalEndpoint.Port -gt 0) 'without a preferred port a free port is chosen as before' } finally { $explicit.Stop() }
 # ---- ELO Community helper: status, model list, setup/run jobs. Fake processes only; no network, no node.
 $cmRoot = Join-Path ([IO.Path]::GetTempPath()) ('elo-cm-test-' + [guid]::NewGuid().ToString('N'))
 $savedPd = $env:ProgramData
