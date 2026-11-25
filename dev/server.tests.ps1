@@ -363,13 +363,14 @@ try {
     $s.Adapters.BackupRoots={ @($bkRoot) }.GetNewClosure(); $s.BackupsCache=$null
     $list=@(Get-EloBackupList $s)
     Assert ($list.Count -eq 2) 'only well-named, valid backups below level 2 are listed; system folders and bad names are skipped'
-    Assert ($list[0].created -ceq '2026-01-01 12:00' -and $list[0].version -ceq '17.0.2+8' -and $list[0].runtime -ceq (Join-Path $bkDir 'java') -and $list[1].version -ceq '21.0.1') 'newest first, version read from the ZIP, runtime derived from the file name'
+    Assert ($list[0].risk -ceq 'vulnerable' -and $list[0].vendor -ceq 'Temurin' -and $list[1].risk -ceq 'unknown' -and $list[0].created -ceq '2026-01-01 12:00' -and $list[0].version -ceq '17.0.2+8' -and $list[0].runtime -ceq (Join-Path $bkDir 'java') -and $list[1].version -ceq '21.0.1') 'newest first, version read from the ZIP, runtime derived from the file name'
     $s.BackupsCache=$null; $payload=Invoke-EloApi $s (Request GET '/api/results')
     Assert (@($payload.backups).Count -eq 2 -and -not ($payload | ConvertTo-Json -Depth 6).Contains('"Root"')) 'the results payload carries the backups (no internal fields)'
     $id=@($payload.backups)[0].id
     $s.Adapters.Identity={ param($Path) @{Vendor='Eclipse Adoptium';Branch='17';Architecture='x64';ImageType='jdk';Version='17.0.2+8'} }
     $rp=Invoke-EloApi $s (Request POST /api/preview ('{"actionId":"restore-backup","resultId":"'+$id+'"}'))
     Assert ($rp.summary.en.Contains('17.0.2+8') -and $rp.summary.en.Contains((Join-Path $bkDir 'java.backup-20260101120000.zip')) -and $m.State.Restores.Count -eq 0) 'restore preview from an earlier-session backup is read-only'
+    Assert ((@($rp.warnings | ForEach-Object { $_.en }) -join ' ').Contains('BEFORE the fix for CVE-2026-114938') -and (@($rp.warnings | ForEach-Object { $_.de }) -join ' ').Contains('VOR dem Fix') -and (@($rp.warnings | ForEach-Object { $_.en }) -join ' ').Contains('ELO Tomcat')) 'restore preview names the security problem of the backup and the Tomcat stop'
     $r=Invoke-EloApi $s (Request POST /api/action ('{"actionId":"restore-backup","resultId":"'+$id+'","previewId":"'+$rp.previewId+'"}'))
     Assert ($r.ok -and $m.State.Restores.Count -eq 1 -and $m.State.Restores[0].Backup -ceq (Join-Path $bkDir 'java.backup-20260101120000.zip') -and $m.State.Restores[0].Runtime -ceq (Join-Path $bkDir 'java')) 'restore of a discovered backup goes through the backend adapter'
     Reject { Invoke-EloApi $s (Request POST /api/preview '{"actionId":"restore-backup","resultId":"0000000000000000000000000000000000000000000000000000000000000000"}') } 409

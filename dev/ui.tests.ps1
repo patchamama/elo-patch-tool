@@ -466,13 +466,16 @@ function boot(hash = '#token=test-session-token') {
  }
  outcomes.failure(500,{error:'update_manual_recovery_required',warnings:[both('ZIP restore needed','ZIP noetig')]}); await outcomes.el('update').click();
  assert(outcomes.el('recoveryNotice').textContent.includes('CRITICAL')); assert.equal(outcomes.el('apply').disabled,true); assert.equal(outcomes.el('nav2').disabled,true); // ---- existing backups are shown first and restorable by server-side id.
- const bk=(over={}) => ({id:'bk_1',path:'C:\\ELO\\java.backup-20260101120000.zip',runtime:'C:\\ELO\\java',version:'17.0.2+8',created:'2026-01-01 12:00',size:205911747,...over});
+ const bk=(over={}) => ({id:'bk_1',path:'C:\\ELO\\java.backup-20260101120000.zip',runtime:'C:\\ELO\\java',version:'17.0.2+8',vendor:'Temurin',risk:'vulnerable',created:'2026-01-01 12:00',size:205911747,...over});
  const backupsUi=boot(); await tick();
  assert.equal(backupsUi.el('backupsBox').attrs.hidden,'', 'no backups, no box');
  backupsUi.backups([bk(),bk({id:'bk_2',version:'21.0.1'})]); await backupsUi.poll();
  assert.equal(backupsUi.el('backupsBox').attrs.hidden,undefined,'existing backups are shown on the first step'); assert.equal(backupsUi.el('backups').children.length,2);
  const bcard=backupsUi.el('backups').children[0];
- assert(bcard.children[0].textContent.includes('C:\\ELO\\java — 17.0.2+8') && bcard.children[2].textContent.includes('2026-01-01 12:00 UTC · 196 MB'));
+ assert(bcard.children[0].textContent.includes('C:\\ELO\\java — 17.0.2+8') && bcard.children[3].textContent.includes('2026-01-01 12:00 UTC · 196 MB'));
+ assert(bcard.children[1].dataset.status === 'vulnerable' && bcard.children[1].textContent.includes('CVE-2026-114938') && bcard.children[4].textContent.includes('ELO Tomcat'));
+ assert.equal(backupsUi.el('backups').children[1].children[1].dataset.status,'vulnerable');
+ backupsUi.backups([bk({risk:'unknown',vendor:'Azul Zulu'}),bk({id:'bk_2',risk:'patched'})]); await backupsUi.poll(); assert.equal(backupsUi.el('backups').children[0].children[1].dataset.status,'inconclusive'); assert.equal(backupsUi.el('backups').children[1].children[1].dataset.status,'patched'); backupsUi.backups([bk(),bk({id:'bk_2',version:'21.0.1'})]); await backupsUi.poll();
  await bcard.onclick();
  assert.deepEqual(JSON.parse(backupsUi.calls.at(-1).options.body),{actionId:'restore-backup',resultId:'bk_1'}); assert.equal(visibleSteps(backupsUi),'4');
  assert.equal(backupsUi.el('previewKind').textContent,'Restore from backup');
