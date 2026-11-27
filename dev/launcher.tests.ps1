@@ -182,6 +182,14 @@ exit $response.ExitCode
         Assert ($r.Code -eq $code -and $r.Text -match 'replaced' -and $r.Text -notmatch 'HIJACKED') ('Packaged launcher ran content of the replaced file: exit ' + $r.Code + ' ' + $r.Text.Substring(0, [Math]::Min(200, $r.Text.Length)))
         $passed++
     }
+    # An unbalanced quote swallows the one-line tail; cmd must stop there instead of running the lines below.
+    $packagedPlain = $packagedReplace.Replace($replacing + '; [pscustomobject]', '[pscustomobject]')
+    Assert ($packagedPlain -cne $packagedReplace) 'the plain packaged fixture must not replace the file'
+    foreach ($text in @($synthetic, $packagedPlain)) {
+        $r = Invoke-Fixture $text '--manual-path "C:\open'
+        Assert ($r.Text -notmatch '(?i)syntax|unexpected|HIJACKED|is not recognized' -and $r.Code -ne 255) ('Unbalanced quote ran following lines: exit ' + $r.Code + ' ' + $r.Text.Substring(0, [Math]::Min(200, $r.Text.Length)))
+        $passed++
+    }
     Write-Host "PASS: $passed launcher checks"
 } finally {
     $env:TEMP = $oldTemp

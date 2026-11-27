@@ -61,8 +61,35 @@ try {
     Assert ($state.Source -ceq 'packaged' -and $state.Reason -ceq 'release_older_than_tool') 'a release older than the running tool is not used'
     $state = Use-Catalog (New-FakeGitHub 'v1.5.0' ($packagedText -replace '"updated": "[0-9-]+"', '"updated": "2000-01-01"') 'x')
     Assert ($state.Source -ceq 'packaged' -and $state.Reason -ceq 'catalog_older_than_packaged') 'an older catalog is not used'
-    $state = Use-Catalog (New-FakeGitHub 'v1.5.0' ($newerText -replace 'CVE-2026-114938', 'CVE-2099-000001') 'x')
-    Assert ($state.Source -ceq 'packaged' -and $state.Reason -ceq 'catalog_drops_vulnerability') 'a catalog may not drop a packaged vulnerability'
+    # A downloaded catalog can only ADD entries: packaged detection and actions stay exactly as packaged.
+    . "$PSScriptRoot\scan.ps1"
+    function New-Catalog([scriptblock]$Edit) { $db = $newerText | ConvertFrom-Json; & $Edit $db; $db | ConvertTo-Json -Depth 30 }
+    function Get-Verdict($Build) { (Get-EloJavaClassification -Evidence "OpenJDK Runtime Environment Temurin-$Build (build $Build)" -Rules (Get-EloScanRules (Get-EloVulnDb))).Status }
+    $hostile = @{
+        'a vulnerable build listed as fixed' = { param($d) $d.vulnerabilities[0].detection.vendors.Temurin.fixed = @('17.0.2+8') }
+        'vendors replaced' = { param($d) $d.vulnerabilities[0].detection.vendors = [pscustomobject]@{ Nobody = $d.vulnerabilities[0].detection.vendors.Temurin } }
+        'a retired entry' = { param($d) $d.vulnerabilities[0].status = 'retired' }
+        'a renamed entry' = { param($d) $d.vulnerabilities[0].id = 'CVE-2099-000001' }
+    }
+    foreach ($name in $hostile.Keys) {
+        $state = Use-Catalog (New-FakeGitHub 'v1.5.0' (New-Catalog $hostile[$name]) 'x')
+        $kept = @((Get-EloVulnDb).vulnerabilities | Where-Object { $_.id -ceq 'CVE-2026-114938' })
+        Assert ($kept.Count -eq 1 -and $kept[0].status -ceq 'active' -and (Get-Verdict '17.0.2+8') -ceq 'PotentiallyVulnerable') "packaged detection survives $name"
+    }
+    function New-AddedEntry($ProbeArgs) {
+        New-Catalog { param($d)
+            $extra = $d.vulnerabilities[0] | ConvertTo-Json -Depth 30 | ConvertFrom-Json
+            $extra.id = 'CVE-2099-000002'; $extra.detection.probes[0].args = $ProbeArgs
+            $d.vulnerabilities = @($d.vulnerabilities[0], $extra) }.GetNewClosure()
+    }
+    $state = Use-Catalog (New-FakeGitHub 'v1.5.0' (New-AddedEntry @('-version')) 'x')
+    $added = @((Get-EloVulnDb).vulnerabilities | Where-Object { $_.id -ceq 'CVE-2099-000002' })
+    Assert ($state.Source -ceq 'downloaded' -and $added.Count -eq 1) 'a new vulnerability is added'
+    Assert (@($added[0].actions | Where-Object { $_.type -ceq 'jvm-option' }).Count -eq 0 -and @((Get-EloVulnDb).vulnerabilities[0].actions | Where-Object { $_.type -ceq 'jvm-option' }).Count -eq 1) 'a downloaded entry can never write a machine option'
+    foreach ($unsafe in @(@('-XX:OnOutOfMemoryError=logoff.exe', '-Xmx2m', '-version'), @('-XX:OnError=calc', '-version'), @('-agentlib:x', '-version'), @('-Dfoo=bar', '-version'))) {
+        $state = Use-Catalog (New-FakeGitHub 'v1.5.0' (New-AddedEntry $unsafe) 'x')
+        Assert ($state.Source -ceq 'packaged' -and $state.Reason -ceq 'catalog_unsafe_probe') "a downloaded probe may not pass $($unsafe[0]) to java"
+    }
     $state = Use-Catalog (New-FakeGitHub 'v1.5.0' '{"schemaVersion":1}' 'x')
     Assert ($state.Source -ceq 'packaged') 'an invalid catalog falls back to the packaged one'
     $state = Use-Catalog (New-FakeGitHub 'v1.5.0' $newerText 'x' @{ 'vulndb.json' = $newerText + ' ' })

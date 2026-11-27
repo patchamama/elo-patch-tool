@@ -18,6 +18,7 @@ rem Also clean up when policy prevents the bootstrap from starting.
 rem Everything after PowerShell is ONE line: cmd loads it before running it and never reads this file
 rem again, so the tool can safely replace this .bat (self-update) while it runs.
 powershell.exe -NoProfile -File "%ELO_PATCH_SESSION%\launcher.ps1" %* & call set "ELO_PATCH_EXIT=%%errorlevel%%" & (if exist "%ELO_PATCH_SESSION%\launcher.ps1" if not exist "%ELO_PATCH_SESSION%\keep-temp" powershell.exe -NoProfile -NonInteractive -Command "try { [IO.Directory]::Delete($env:ELO_PATCH_SESSION,$true) } catch { [Console]::Error.WriteLine('Session cleanup failed.'); exit 1 }") & call exit /b %%ELO_PATCH_EXIT%%
+exit /b 2
 
 ::ELO_PATCH_BEGIN:BOOTSTRAP_PS
 $ErrorActionPreference = 'Stop'
@@ -1194,9 +1195,12 @@ function Get-EloEnvironmentMitigation {
     return $state
 }
 function Get-EloOnlineView {
+    # The page rejects the whole results payload on an unexpected value: free-form catalog fields are blanked.
     param($Online)
+    $updated=[string]$Online.Catalog.Updated; if ($updated -cnotmatch '^[0-9]{4}-[0-9]{2}-[0-9]{2}$') { $updated='' }
+    $reason=[string]$Online.Catalog.Reason; if ($reason -cnotmatch '^[a-z_]{0,64}$') { $reason='' }
     return @{checked=[bool]$Online.Checked;current=[string]$Online.Current;latest=[string]$Online.Latest;available=[bool]$Online.Available;installed=[string]$Online.Installed
-        catalog=@{source=[string]$Online.Catalog.Source;updated=[string]$Online.Catalog.Updated;reason=[string]$Online.Catalog.Reason}}
+        catalog=@{source=[string]$Online.Catalog.Source;updated=$updated;reason=$reason}}
 }
 function Invoke-EloSelfUpdate {
     # Only the version the page offered, once, and never while a scan or a recovery is pending.
@@ -5820,10 +5824,31 @@ function Get-EloReleaseAsset {
     if ($actual -ine $expected.Groups[1].Value) { throw 'checksum_mismatch' }
     return , $bytes
 }
+function Merge-EloOnlineCatalog {
+    # A downloaded catalog can only ADD vulnerabilities. Every packaged entry stays exactly as packaged, so
+    # a release can never change or switch off built-in detection. An added entry may only run java with the
+    # read-only options below and can never write a machine option.
+    param($Packaged, $Remote)
+    $allowed = @('-version', '-XX:+PrintFlagsFinal', '-XX:+UnlockDiagnosticVMOptions', '-XshowSettings:properties', '-XshowSettings:vm')
+    $known = @($Packaged.vulnerabilities | ForEach-Object { [string]$_.id })
+    $added = @($Remote.vulnerabilities | Where-Object { $known -notcontains [string]$_.id })
+    foreach ($entry in $added) {
+        $probes = @($entry.detection.probes)
+        foreach ($probe in $probes) {
+            if (@($probe.args | Where-Object { $allowed -cnotcontains [string]$_ }).Count -gt 0 -or @($probe.args) -cnotcontains '-version') { throw 'catalog_unsafe_probe' }
+        }
+        $entry.actions = @($entry.actions | Where-Object { [string]$_.type -cne 'jvm-option' })
+    }
+    $merged = $Packaged | ConvertTo-Json -Depth 40 | ConvertFrom-Json
+    $merged.updated = [string]$Remote.updated
+    $merged.vulnerabilities = @(@($merged.vulnerabilities) + $added)
+    if (@(Test-EloVulnDb $merged).Count -gt 0) { throw 'catalog_invalid_after_merge' }
+    return $merged
+}
 function Use-EloOnlineCatalog {
-    # With no installed catalog, the catalog of the latest release is used for this session (memory only).
-    # It must come from a release at least as new as the tool, be at least as recent as the packaged one,
-    # pass the same validation and keep every packaged vulnerability.
+    # With no installed catalog, the new entries of the latest release's catalog are added for this session
+    # (memory only). It must come from a release at least as new as the tool, be at least as recent as the
+    # packaged one and pass the same validation; see Merge-EloOnlineCatalog for what it may change.
     param($Release, [string]$CurrentVersion, [scriptblock]$Fetch, [string]$ProgramDataRoot = $env:ProgramData)
     $packaged = Read-EloVulnDbFile (Join-Path $PSScriptRoot 'vulndb.json')
     $installed = Get-EloVulnDbPath $ProgramDataRoot
@@ -5839,8 +5864,7 @@ function Use-EloOnlineCatalog {
         [IO.File]::WriteAllBytes($temp, $bytes)
         $db = Read-EloVulnDbFile $temp
         if ([string]$db.updated -cnotmatch '^\d{4}-\d{2}-\d{2}$' -or [string]::CompareOrdinal([string]$db.updated, [string]$packaged.updated) -lt 0) { throw 'catalog_older_than_packaged' }
-        $ids = @(Get-EloActiveVulnerabilities $db | ForEach-Object { [string]$_.id })
-        if (@(Get-EloActiveVulnerabilities $packaged | Where-Object { $ids -cnotcontains [string]$_.id }).Count -gt 0) { throw 'catalog_drops_vulnerability' }
+        $db = Merge-EloOnlineCatalog -Packaged $packaged -Remote $db
         $script:EloVulnCache = $db
         $result = @{ Source = 'downloaded'; Updated = [string]$db.updated; Reason = '' }
     } catch {

@@ -184,9 +184,12 @@ function Get-EloEnvironmentMitigation {
     return $state
 }
 function Get-EloOnlineView {
+    # The page rejects the whole results payload on an unexpected value: free-form catalog fields are blanked.
     param($Online)
+    $updated=[string]$Online.Catalog.Updated; if ($updated -cnotmatch '^[0-9]{4}-[0-9]{2}-[0-9]{2}$') { $updated='' }
+    $reason=[string]$Online.Catalog.Reason; if ($reason -cnotmatch '^[a-z_]{0,64}$') { $reason='' }
     return @{checked=[bool]$Online.Checked;current=[string]$Online.Current;latest=[string]$Online.Latest;available=[bool]$Online.Available;installed=[string]$Online.Installed
-        catalog=@{source=[string]$Online.Catalog.Source;updated=[string]$Online.Catalog.Updated;reason=[string]$Online.Catalog.Reason}}
+        catalog=@{source=[string]$Online.Catalog.Source;updated=$updated;reason=$reason}}
 }
 function Invoke-EloSelfUpdate {
     # Only the version the page offered, once, and never while a scan or a recovery is pending.

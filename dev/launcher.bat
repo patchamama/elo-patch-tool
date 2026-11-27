@@ -16,6 +16,7 @@ rem Bootstrap normally cleans up. Also handle policy rejection before it can sta
 rem Everything after PowerShell is ONE line: cmd loads it before running it and never reads this file
 rem again, so the tool can safely replace this .bat (self-update) while it runs.
 powershell.exe -NoProfile -File "%ELO_PATCH_SESSION%\launcher.ps1" %* & call set "ELO_PATCH_EXIT=%%errorlevel%%" & (if exist "%ELO_PATCH_SESSION%\launcher.ps1" if not exist "%ELO_PATCH_SESSION%\keep-temp" powershell.exe -NoProfile -NonInteractive -Command "try { [IO.Directory]::Delete($env:ELO_PATCH_SESSION,$true) } catch { [Console]::Error.WriteLine('Session cleanup failed: '+$_.Exception.Message); exit 1 }") & call exit /b %%ELO_PATCH_EXIT%%
+exit /b 2
 
 ::ELO_PATCH_BEGIN:BOOTSTRAP_PS
 # This block is extracted as launcher.ps1, never executed from the BAT text directly.
