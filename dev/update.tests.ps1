@@ -464,5 +464,23 @@ $want=@{'ELO-Basis'=@(9090,9093)}
 Assert-UpdateTest (@(Test-Health { param($now,$n) @{Status='Running';Ports=$(if ($now -ge 60) { @(9090,9093,50000) } else { @() })} } $want).Count -eq 0) 'services that come back with their ports are healthy'
 Assert-UpdateTest ((@(Test-Health { param($now,$n) @{Status='Running';Ports=@(9090)} } $want) -join ',') -ceq 'ELO-Basis') 'a port that never comes back is unhealthy'
 Assert-UpdateTest ((@(Test-Health { param($now,$n) @{Status=$(if ($now -ge 10) { 'Stopped' } else { 'Running' });Ports=@()} } @{'ELO-Basis'=@()}) -join ',') -ceq 'ELO-Basis') 'a service that dies during the settle time is unhealthy'
+# A shared folder is never treated as the ELO folder.
+$shared=@((New-Svc 'MSSQLSERVER' 'Running' 20 '"C:\Program Files\Microsoft SQL Server\sqlservr.exe"'),(New-Svc 'ELO-Basis' 'Running' 21 'C:\Program Files\ELO\servers\b.exe'),(New-Svc 'Other' 'Running' 22 'C:\Users\eloadmin\app.exe'))
+foreach ($folder in @('C:\Program Files','C:\Users\eloadmin','C:\Windows')) {
+    Assert-UpdateTest ((@(Select-EloStackServices $shared $folder | ForEach-Object { $_.Name }) -join ',') -ceq 'ELO-Basis') "only ELO-named services for the shared folder $folder"
+}
+foreach ($folder in @('D:\ELO','D:\ELOprofessional','D:\ELO-SRV01')) {
+    $installed=@((New-Svc 'Renamed Tomcat' 'Running' 23 ($folder+'\servers\x.exe')))
+    Assert-UpdateTest (@(Select-EloStackServices $installed $folder).Count -eq 1) "services below the ELO folder $folder are selected"
+}
+# The services stopped by an update are recorded next to its backup, so a restore can start the crashed ones.
+$recordBackup=Join-Path $restoreBase 'java.backup-20260101000009.zip'
+Write-EloServiceRecord $recordBackup @{'ELO-Basis'=@(9090,9093);'ELO-iSearch'=@()}
+$record=Read-EloServiceRecord $recordBackup
+Assert-UpdateTest ($record.Count -eq 2 -and (@($record['ELO-Basis']) -join ',') -ceq '9090,9093' -and @($record['ELO-iSearch']).Count -eq 0) 'the service record round-trips names and ports'
+Assert-UpdateTest ((Read-EloServiceRecord (Join-Path $restoreBase 'none.zip')).Count -eq 0) 'a backup without a record has no recorded services'
+$installed=@((New-Svc 'ELO-Basis' 'Stopped' 0 'F:\ELO\b.exe'),(New-Svc 'ELO-iSearch' 'Running' 5 'F:\ELO\i.exe'),(New-Svc 'MSSQLSERVER' 'Stopped' 0 'C:\sql\s.exe'))
+$tamper=@{'ELO-Basis'=@(9090);'MSSQLSERVER'=@();'ELO-Removed'=@()}
+Assert-UpdateTest ((@(Select-EloRecordedServices $tamper $installed 'F:\ELO' | ForEach-Object { $_.Name }) -join ',') -ceq 'ELO-Basis') 'only installed ELO services are taken from a record, also when stopped'
 Write-Output 'PASS: ELO service selection, ordering, Stop Pending and health logic'
 Write-Output 'ALL UPDATE TESTS PASSED (synthetic filesystem and mocks; no production safety claim)'

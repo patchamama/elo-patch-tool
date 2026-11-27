@@ -369,6 +369,18 @@ try {
     $rp=RestorePreview; $done=RestoreApply $rp.previewId
     Assert ($done.ok -and $done.warning -ceq 'services_not_restarted' -and $done.warnings[0].en.Contains('ELO-Basis')) 'a restore that cannot restart ELO says so'
 } finally { Remove-Item -LiteralPath $fakeBackup -Force -ErrorAction SilentlyContinue }
+# Restoring after ELO crashed on the new Java: the recorded services are started although none is active.
+$m=Reset-UpdateSession 'ok'; $up=UpdatePreview; $null=UpdateApply $up.previewId
+$fakeBackup=Join-Path ([IO.Path]::GetTempPath()) ('elo-fake-backup-'+[guid]::NewGuid().ToString('N')+'.zip'); [IO.File]::WriteAllText($fakeBackup,'x')
+try {
+    $s.LastUpdate.Backup=$fakeBackup
+    $s.Adapters.Identity={ param($Path) @{Vendor='Eclipse Adoptium';Branch='17';Architecture='x64';ImageType='jdk';Version='17.0.2+8'} }
+    $s.Adapters.RuntimeUsers={ param($Path) @{Services=@();Processes=@()} }
+    $s.Adapters.RecordedServices={ param($Backup,$Runtime) @(@{Name='ELO-Basis';State='Stopped'}) }
+    $rp=RestorePreview
+    $null=RestoreApply $rp.previewId
+    Assert ($rp.warnings[0].en.Contains('ELO-Basis') -and $m.State.Restores[0].Stop -eq $true) 'a restore starts the services the update had stopped'
+} finally { Remove-Item -LiteralPath $fakeBackup -Force -ErrorAction SilentlyContinue; $s.Adapters.RecordedServices={ param($Backup,$Runtime) @() } }
 # Existing backups (also from earlier sessions) are listed first and can be restored by server-side id.
 $bkRoot=Join-Path ([IO.Path]::GetTempPath()) ('elo-bk-test-'+[guid]::NewGuid().ToString('N'))
 try {

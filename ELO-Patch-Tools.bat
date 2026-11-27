@@ -1020,10 +1020,11 @@ function New-EloServerSession {
             EloVersion={ param($Roots) Get-EloInstalledIndexserverVersion $Roots }
             ResolveRelease={ param($Identity) Resolve-EloLatestRelease -Vendor $Identity.Vendor -Branch $Identity.Branch -Architecture $Identity.Architecture -ImageType $Identity.ImageType }
             RuntimeUsers={ param($Path) Get-EloAffectedServices $Path }
+            RecordedServices={ param($Backup,$Runtime) Get-EloRecordedServices $Backup $Runtime }
             RestoreBackup={ param($Root,$Runtime,$Backup,$StopServices,$Stamp)
                 $services=New-EloWindowsUpdateAdapters -ApprovedRoot $Root -Runtime $Runtime -AllowServiceStop:([bool]$StopServices)
                 $quiesce=$null; $resume=$null
-                if ($StopServices) { $quiesce={ & $services.Quiesce @{Runtime=$Runtime} }.GetNewClosure(); $resume={ & $services.Resume @{Runtime=$Runtime} $null }.GetNewClosure() }
+                if ($StopServices) { $quiesce={ & $services.Quiesce @{Runtime=$Runtime;Backup=$Backup} }.GetNewClosure(); $resume={ & $services.Resume @{Runtime=$Runtime} $null }.GetNewClosure() }
                 Invoke-EloBackupRestore -Root $Root -Runtime $Runtime -Backup $Backup -Quiesce $quiesce -Resume $resume -Stamp $Stamp
             }
             Admin={ Test-EloAdministrator }; ReadOptions={ Get-EloMachineOptions }
@@ -1603,7 +1604,11 @@ function Get-EloServiceOutcome {
 }
 function Format-EloServiceList {
     param($Services)
-    return ((@($Services | ForEach-Object { [string]$_.Name } | Select-Object -First 12)) -join ', ')
+    # Every service that will be stopped is named; a very long list says how many more there are.
+    $names=@($Services | ForEach-Object { [string]$_.Name })
+    $list=(@($names | Select-Object -First 30)) -join ', '
+    if ($names.Count -gt 30) { $list+=' (+'+($names.Count-30)+')' }
+    return $list
 }
 function New-EloRuntimeUpdatePreview {
     param($Session,[string]$ResultId)
@@ -1725,7 +1730,11 @@ function New-EloRestorePreview {
     $Session.Preview=$null
     if (-not (& $Session.Adapters.Admin)) { Stop-EloRequest 403 'administrator_required' }
     $source=Get-EloRestoreSource $Session $ResultId
-    $services=@(); if (Test-Path -LiteralPath $source.Runtime) { $services=Get-EloUpdateUsers $Session $source.Runtime }
+    $services=@(); if (Test-Path -LiteralPath $source.Runtime) { $services=@(Get-EloUpdateUsers $Session $source.Runtime) }
+    # Services the update had stopped are started again even when they are not active now.
+    try { $recorded=@(& $Session.Adapters.RecordedServices $source.Backup $source.Runtime) } catch { $recorded=@() }
+    $activeNames=@($services | ForEach-Object { [string]$_.Name })
+    $services=@(@($services)+@($recorded | Where-Object { $_ -and $activeNames -notcontains [string]$_.Name }))
     $now=& $Session.Adapters.Clock
     $preview=@{Id=(New-EloSecret);ResultId=$ResultId;ActionId='restore-backup';Runtime=$source.Runtime;Root=$source.Root;Backup=$source.Backup;Services=$services
         Stamp=$now.ToString('yyyyMMddHHmmss');FromVersion=$source.FromVersion;ToVersion=$source.ToVersion;Vendor=[string]$source.Vendor;Risk=[string]$source.Risk;JavaPath=$source.JavaPath;Index=$source.Index;Expires=$now.AddMinutes(2)}
@@ -2781,7 +2790,7 @@ const messages = {
  step1Title:'Find Java runtimes',step1Text:'A read-only scan looks for Java in X:\\java\\bin and X:\\<folder>\\java\\bin (for example ELO\\java\\bin) on every drive (C: to Z:). Nothing is changed.',
  step2Title:'Choose a runtime',step2Text:'Select the Java runtime you want to work on.',step3Title:'Choose an action',step4Title:'Review and confirm',step5Title:'Report and next steps',
  continue:'Continue',back:'Back',startOver:'Scan again',advanced:'Advanced: search another folder',evidence:'Technical evidence',
- noIssue:'No security problem was detected in the {n} Java runtime(s) found.',noIssueUnknown:'No security problem was detected. However, {n} runtime(s) could not be evaluated against the vulnerability catalog, so this does not prove they are safe.',noIssueUpdate:'You can still update the Java used by ELO in step 3.',serviceAlertTitle:'ELO did not come back cleanly',loadCheck:'The services and their ports were checked. Also sign in to ELO to confirm that it works; if it does not, restore the previous version.',
+ noIssue:'No security problem was detected in the {n} Java runtime(s) found.',noIssueUnknown:'No security problem was detected. However, {n} runtime(s) could not be evaluated against the vulnerability catalog, so this does not prove they are safe.',noIssueUpdate:'You can still update the Java used by ELO in step 3.',serviceAlertTitle:'ELO did not come back cleanly',loadCheck:'Sign in to ELO to confirm that it works; if it does not, restore the previous version. The automatic check only covers the state and ports of the services listed before confirming.',
  scanningNow:'Scanning drives',foundN:'Java runtimes found: {n}.',foundNone:'No Java runtime found. Open “Advanced” to search another folder, then scan again.',
  updateDesc:'Installs the newest release of the same Java branch and vendor, even without a detected vulnerability. Verified backup, Java self-test, stop and restart of all ELO services, load check and rollback.',
  mitigateDesc:'Adds -XX:-UseBASE64Intrinsics to the machine environment. Quick and temporary; it is not a Java update.',
@@ -2843,7 +2852,7 @@ restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: this versi
  step1Title:'Java-Runtimes finden',step1Text:'Ein schreibgeschützter Scan sucht Java in X:\\java\\bin und X:\\<Ordner>\\java\\bin (zum Beispiel ELO\\java\\bin) auf allen Laufwerken (C: bis Z:). Es wird nichts geändert.',
  step2Title:'Runtime auswählen',step2Text:'Wählen Sie die Java-Runtime, die Sie bearbeiten möchten.',step3Title:'Aktion wählen',step4Title:'Prüfen und bestätigen',step5Title:'Bericht und nächste Schritte',
  continue:'Weiter',back:'Zurück',startOver:'Erneut scannen',advanced:'Erweitert: anderen Ordner durchsuchen',evidence:'Technische Nachweise',
- noIssue:'In den {n} gefundenen Java-Runtimes wurde kein Sicherheitsproblem erkannt.',noIssueUnknown:'Es wurde kein Sicherheitsproblem erkannt. Allerdings konnten {n} Runtime(s) nicht anhand des Schwachstellenkatalogs bewertet werden; das beweist nicht, dass sie sicher sind.',noIssueUpdate:'Das von ELO verwendete Java kann in Schritt 3 trotzdem aktualisiert werden.',serviceAlertTitle:'ELO wurde nicht korrekt wieder gestartet',loadCheck:'Dienste und Ports wurden geprüft. Melden Sie sich zusätzlich bei ELO an; funktioniert es nicht, stellen Sie die vorherige Version wieder her.',
+ noIssue:'In den {n} gefundenen Java-Runtimes wurde kein Sicherheitsproblem erkannt.',noIssueUnknown:'Es wurde kein Sicherheitsproblem erkannt. Allerdings konnten {n} Runtime(s) nicht anhand des Schwachstellenkatalogs bewertet werden; das beweist nicht, dass sie sicher sind.',noIssueUpdate:'Das von ELO verwendete Java kann in Schritt 3 trotzdem aktualisiert werden.',serviceAlertTitle:'ELO wurde nicht korrekt wieder gestartet',loadCheck:'Melden Sie sich bei ELO an; funktioniert es nicht, stellen Sie die vorherige Version wieder her. Die automatische Prüfung umfasst nur Status und Ports der vor der Bestätigung aufgeführten Dienste.',
  scanningNow:'Laufwerke werden durchsucht',foundN:'Gefundene Java-Runtimes: {n}.',foundNone:'Keine Java-Runtime gefunden. Öffnen Sie „Erweitert“, um einen anderen Ordner zu durchsuchen, und scannen Sie erneut.',
  updateDesc:'Installiert die neueste Version desselben Java-Branches und Herstellers, auch ohne erkannte Schwachstelle. Geprüftes Backup, Java-Selbsttest, Stopp und Neustart aller ELO-Dienste, Ladeprüfung und Wiederherstellung.',
  mitigateDesc:'Ergänzt -XX:-UseBASE64Intrinsics in der Systemumgebung. Schnell und vorübergehend; kein Java-Update.',
@@ -2905,7 +2914,7 @@ restoreShort:'Dieses Backup wiederherstellen',backupRisk_vulnerable:'Verwundbar:
  step1Title:'Buscar runtimes de Java',step1Text:'Un escaneo de solo lectura busca Java en X:\\java\\bin y X:\\<carpeta>\\java\\bin (por ejemplo ELO\\java\\bin) en cada unidad (C: a Z:). No se cambia nada.',
  step2Title:'Elegir un runtime',step2Text:'Selecciona el runtime de Java con el que quieres trabajar.',step3Title:'Elegir una acción',step4Title:'Revisar y confirmar',step5Title:'Informe y siguientes pasos',
  continue:'Continuar',back:'Atrás',startOver:'Escanear de nuevo',advanced:'Avanzado: buscar en otra carpeta',evidence:'Evidencia técnica',
- noIssue:'No se ha detectado ningún problema de seguridad en los {n} runtimes de Java encontrados.',noIssueUnknown:'No se ha detectado ningún problema de seguridad. Sin embargo, {n} runtime(s) no se pudieron evaluar con el catálogo de vulnerabilidades, así que esto no demuestra que sean seguros.',noIssueUpdate:'Igualmente puedes actualizar el Java que usa ELO en el paso 3.',serviceAlertTitle:'ELO no volvió a levantar correctamente',loadCheck:'Se comprobaron los servicios y sus puertos. Además, inicia sesión en ELO para confirmar que funciona; si no, restaura la versión anterior.',
+ noIssue:'No se ha detectado ningún problema de seguridad en los {n} runtimes de Java encontrados.',noIssueUnknown:'No se ha detectado ningún problema de seguridad. Sin embargo, {n} runtime(s) no se pudieron evaluar con el catálogo de vulnerabilidades, así que esto no demuestra que sean seguros.',noIssueUpdate:'Igualmente puedes actualizar el Java que usa ELO en el paso 3.',serviceAlertTitle:'ELO no volvió a levantar correctamente',loadCheck:'Inicia sesión en ELO para confirmar que funciona; si no, restaura la versión anterior. La comprobación automática solo cubre el estado y los puertos de los servicios listados antes de confirmar.',
  scanningNow:'Escaneando unidades',foundN:'Runtimes de Java encontrados: {n}.',foundNone:'No se encontró ningún runtime de Java. Abre «Avanzado» para buscar en otra carpeta y vuelve a escanear.',
  updateDesc:'Instala la última versión de la misma rama y fabricante de Java, aunque no se haya detectado una vulnerabilidad. Copia verificada, prueba de Java, parada y arranque de todos los servicios de ELO, comprobación de carga y reversión.',
  mitigateDesc:'Añade -XX:-UseBASE64Intrinsics al entorno de la máquina. Rápido y temporal; no es una actualización de Java.',
@@ -4948,11 +4957,13 @@ function Get-EloActiveServiceMap {
     return @($Services | Where-Object { [int]$_.ProcessId -gt 0 -and [string]$_.State -cne 'Stopped' })
 }
 function Select-EloStackServices {
-    # The active ELO services: named ELO*, or installed below the ELO folder that holds the
-    # runtime. A drive root is never used as that folder.
+    # The active ELO services: named ELO*, or installed below the folder that holds the runtime,
+    # but only when that folder is itself an ELO folder: a drive root or a shared folder such as
+    # Program Files would select unrelated services.
     param($Services,[string]$EloRoot)
     $prefix=''
-    if ($EloRoot -and $EloRoot.TrimEnd('\') -cnotmatch '^[A-Za-z]:$') { $prefix=$EloRoot.TrimEnd('\')+'\' }
+    $folder=([string]$EloRoot).TrimEnd('\')
+    if (($folder -split '\\')[-1] -match '^ELO($|[-_ .0-9]|professional|enterprise|office)') { $prefix=$folder+'\' }
     return @(Get-EloActiveServiceMap $Services | Where-Object {
         $image=([string]$_.PathName).TrimStart('"')
         ([string]$_.Name -match '^ELO([-_ ]|$)') -or ($prefix -and $image.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase))
@@ -4965,6 +4976,42 @@ function Get-EloServiceOrder {
     $basis=@($unique | Where-Object { $_ -match '(?i)^ELO[-_ ]Basis' }); $others=@($unique | Where-Object { $_ -notmatch '(?i)^ELO[-_ ]Basis' })
     if ($Start) { return @($basis+$others) }
     return @($others+$basis)
+}
+function Write-EloServiceRecord {
+    # <backup>.services.json: the services that were active before an update, with their listening ports.
+    param([string]$Backup,[hashtable]$Services)
+    $items=@($Services.Keys | Sort-Object | ForEach-Object { @{name=[string]$_;ports=@($Services[$_] | Where-Object { $null -ne $_ } | ForEach-Object { [int]$_ })} })
+    [IO.File]::WriteAllText($Backup+'.services.json',(ConvertTo-Json @{services=$items} -Depth 4 -Compress),(New-Object Text.UTF8Encoding($false)))
+}
+function Read-EloServiceRecord {
+    # Name -> ports. A missing or unreadable record means nothing is known.
+    param([string]$Backup)
+    $record=@{}
+    try {
+        $file=New-Object IO.FileInfo($Backup+'.services.json')
+        if (-not $file.Exists -or $file.Length -gt 64KB) { return $record }
+        $data=ConvertFrom-Json ([IO.File]::ReadAllText($file.FullName))
+        foreach ($item in @($data.services)) {
+            if ([string]$item.name) { $record[[string]$item.name]=@($item.ports | Where-Object { $null -ne $_ } | ForEach-Object { [int]$_ }) }
+        }
+    } catch { return @{} }
+    return $record
+}
+function Select-EloRecordedServices {
+    # The record is a file on disk: only installed ELO services are taken from it, active or not.
+    param([hashtable]$Record,$Services,[string]$EloRoot)
+    $candidates=@($Services | Where-Object { $Record.ContainsKey([string]$_.Name) } | ForEach-Object { [pscustomobject]@{Name=[string]$_.Name;DisplayName=[string]$_.DisplayName;State=[string]$_.State;PathName=[string]$_.PathName;ProcessId=1;Original=$_} })
+    # Selection is state independent here, so every candidate is presented as active.
+    $probe=@($candidates | ForEach-Object { [pscustomobject]@{Name=$_.Name;PathName=$_.PathName;State='Running';ProcessId=1} })
+    $names=@(Select-EloStackServices $probe $EloRoot | ForEach-Object { [string]$_.Name })
+    return @($candidates | Where-Object { $names -contains $_.Name } | ForEach-Object { $_.Original })
+}
+function Get-EloRecordedServices {
+    param([string]$Backup,[string]$Runtime)
+    $record=Read-EloServiceRecord $Backup
+    if ($record.Count -eq 0) { return @() }
+    $all=@(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop)
+    return @(Select-EloRecordedServices $record $all ([IO.Path]::GetDirectoryName($Runtime.TrimEnd('\'))) | ForEach-Object { @{Name=[string]$_.Name;DisplayName=[string]$_.DisplayName;State=[string]$_.State;Ports=@($record[[string]$_.Name])} })
 }
 function Get-EloAffectedServices {
     # What a runtime change has to stop: whatever has the runtime loaded plus every active ELO service.
@@ -5299,6 +5346,18 @@ function New-EloWindowsUpdateAdapters {
             if ($users.Processes.Count -gt 0) { throw 'runtime_in_use_by_process' }
             # Listening ports are recorded before anything stops: they are the load check afterwards.
             foreach ($user in $users.Services) { $state.Ports[[string]$user.Name]=@((Get-EloServiceSample $user.Name).Ports) }
+            if ($Paths.Old) {
+                # Update: remembered next to the backup, so a restore (also in a later session) can start them.
+                $active=@{}; foreach ($user in $users.Services) { $active[[string]$user.Name]=$state.Ports[[string]$user.Name] }
+                if ($active.Count -gt 0) { Write-EloServiceRecord $Paths.Backup $active }
+            } elseif ($Paths.Backup) {
+                # Restore: services that crashed on the newer Java are not active any more.
+                foreach ($recorded in @(Get-EloRecordedServices $Paths.Backup $Paths.Runtime)) {
+                    $name=[string]$recorded.Name
+                    $state.Ports[$name]=@(@($state.Ports[$name])+@($recorded.Ports) | Where-Object { $null -ne $_ } | Sort-Object -Unique)
+                    if (-not $state.Stopped.Contains($name)) { $state.Stopped.Add($name) }
+                }
+            }
             $control=@{
                 Status={ param($n) [string](Get-Service -Name $n -ErrorAction Stop).Status }
                 Stop={ param($n) Stop-Service -Name $n -Force -NoWait -ErrorAction Stop }

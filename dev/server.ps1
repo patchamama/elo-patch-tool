@@ -75,10 +75,11 @@ function New-EloServerSession {
             EloVersion={ param($Roots) Get-EloInstalledIndexserverVersion $Roots }
             ResolveRelease={ param($Identity) Resolve-EloLatestRelease -Vendor $Identity.Vendor -Branch $Identity.Branch -Architecture $Identity.Architecture -ImageType $Identity.ImageType }
             RuntimeUsers={ param($Path) Get-EloAffectedServices $Path }
+            RecordedServices={ param($Backup,$Runtime) Get-EloRecordedServices $Backup $Runtime }
             RestoreBackup={ param($Root,$Runtime,$Backup,$StopServices,$Stamp)
                 $services=New-EloWindowsUpdateAdapters -ApprovedRoot $Root -Runtime $Runtime -AllowServiceStop:([bool]$StopServices)
                 $quiesce=$null; $resume=$null
-                if ($StopServices) { $quiesce={ & $services.Quiesce @{Runtime=$Runtime} }.GetNewClosure(); $resume={ & $services.Resume @{Runtime=$Runtime} $null }.GetNewClosure() }
+                if ($StopServices) { $quiesce={ & $services.Quiesce @{Runtime=$Runtime;Backup=$Backup} }.GetNewClosure(); $resume={ & $services.Resume @{Runtime=$Runtime} $null }.GetNewClosure() }
                 Invoke-EloBackupRestore -Root $Root -Runtime $Runtime -Backup $Backup -Quiesce $quiesce -Resume $resume -Stamp $Stamp
             }
             Admin={ Test-EloAdministrator }; ReadOptions={ Get-EloMachineOptions }
@@ -658,7 +659,11 @@ function Get-EloServiceOutcome {
 }
 function Format-EloServiceList {
     param($Services)
-    return ((@($Services | ForEach-Object { [string]$_.Name } | Select-Object -First 12)) -join ', ')
+    # Every service that will be stopped is named; a very long list says how many more there are.
+    $names=@($Services | ForEach-Object { [string]$_.Name })
+    $list=(@($names | Select-Object -First 30)) -join ', '
+    if ($names.Count -gt 30) { $list+=' (+'+($names.Count-30)+')' }
+    return $list
 }
 function New-EloRuntimeUpdatePreview {
     param($Session,[string]$ResultId)
@@ -780,7 +785,11 @@ function New-EloRestorePreview {
     $Session.Preview=$null
     if (-not (& $Session.Adapters.Admin)) { Stop-EloRequest 403 'administrator_required' }
     $source=Get-EloRestoreSource $Session $ResultId
-    $services=@(); if (Test-Path -LiteralPath $source.Runtime) { $services=Get-EloUpdateUsers $Session $source.Runtime }
+    $services=@(); if (Test-Path -LiteralPath $source.Runtime) { $services=@(Get-EloUpdateUsers $Session $source.Runtime) }
+    # Services the update had stopped are started again even when they are not active now.
+    try { $recorded=@(& $Session.Adapters.RecordedServices $source.Backup $source.Runtime) } catch { $recorded=@() }
+    $activeNames=@($services | ForEach-Object { [string]$_.Name })
+    $services=@(@($services)+@($recorded | Where-Object { $_ -and $activeNames -notcontains [string]$_.Name }))
     $now=& $Session.Adapters.Clock
     $preview=@{Id=(New-EloSecret);ResultId=$ResultId;ActionId='restore-backup';Runtime=$source.Runtime;Root=$source.Root;Backup=$source.Backup;Services=$services
         Stamp=$now.ToString('yyyyMMddHHmmss');FromVersion=$source.FromVersion;ToVersion=$source.ToVersion;Vendor=[string]$source.Vendor;Risk=[string]$source.Risk;JavaPath=$source.JavaPath;Index=$source.Index;Expires=$now.AddMinutes(2)}

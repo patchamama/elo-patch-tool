@@ -671,11 +671,13 @@ function Get-EloActiveServiceMap {
     return @($Services | Where-Object { [int]$_.ProcessId -gt 0 -and [string]$_.State -cne 'Stopped' })
 }
 function Select-EloStackServices {
-    # The active ELO services: named ELO*, or installed below the ELO folder that holds the
-    # runtime. A drive root is never used as that folder.
+    # The active ELO services: named ELO*, or installed below the folder that holds the runtime,
+    # but only when that folder is itself an ELO folder: a drive root or a shared folder such as
+    # Program Files would select unrelated services.
     param($Services,[string]$EloRoot)
     $prefix=''
-    if ($EloRoot -and $EloRoot.TrimEnd('\') -cnotmatch '^[A-Za-z]:$') { $prefix=$EloRoot.TrimEnd('\')+'\' }
+    $folder=([string]$EloRoot).TrimEnd('\')
+    if (($folder -split '\\')[-1] -match '^ELO($|[-_ .0-9]|professional|enterprise|office)') { $prefix=$folder+'\' }
     return @(Get-EloActiveServiceMap $Services | Where-Object {
         $image=([string]$_.PathName).TrimStart('"')
         ([string]$_.Name -match '^ELO([-_ ]|$)') -or ($prefix -and $image.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase))
@@ -688,6 +690,42 @@ function Get-EloServiceOrder {
     $basis=@($unique | Where-Object { $_ -match '(?i)^ELO[-_ ]Basis' }); $others=@($unique | Where-Object { $_ -notmatch '(?i)^ELO[-_ ]Basis' })
     if ($Start) { return @($basis+$others) }
     return @($others+$basis)
+}
+function Write-EloServiceRecord {
+    # <backup>.services.json: the services that were active before an update, with their listening ports.
+    param([string]$Backup,[hashtable]$Services)
+    $items=@($Services.Keys | Sort-Object | ForEach-Object { @{name=[string]$_;ports=@($Services[$_] | Where-Object { $null -ne $_ } | ForEach-Object { [int]$_ })} })
+    [IO.File]::WriteAllText($Backup+'.services.json',(ConvertTo-Json @{services=$items} -Depth 4 -Compress),(New-Object Text.UTF8Encoding($false)))
+}
+function Read-EloServiceRecord {
+    # Name -> ports. A missing or unreadable record means nothing is known.
+    param([string]$Backup)
+    $record=@{}
+    try {
+        $file=New-Object IO.FileInfo($Backup+'.services.json')
+        if (-not $file.Exists -or $file.Length -gt 64KB) { return $record }
+        $data=ConvertFrom-Json ([IO.File]::ReadAllText($file.FullName))
+        foreach ($item in @($data.services)) {
+            if ([string]$item.name) { $record[[string]$item.name]=@($item.ports | Where-Object { $null -ne $_ } | ForEach-Object { [int]$_ }) }
+        }
+    } catch { return @{} }
+    return $record
+}
+function Select-EloRecordedServices {
+    # The record is a file on disk: only installed ELO services are taken from it, active or not.
+    param([hashtable]$Record,$Services,[string]$EloRoot)
+    $candidates=@($Services | Where-Object { $Record.ContainsKey([string]$_.Name) } | ForEach-Object { [pscustomobject]@{Name=[string]$_.Name;DisplayName=[string]$_.DisplayName;State=[string]$_.State;PathName=[string]$_.PathName;ProcessId=1;Original=$_} })
+    # Selection is state independent here, so every candidate is presented as active.
+    $probe=@($candidates | ForEach-Object { [pscustomobject]@{Name=$_.Name;PathName=$_.PathName;State='Running';ProcessId=1} })
+    $names=@(Select-EloStackServices $probe $EloRoot | ForEach-Object { [string]$_.Name })
+    return @($candidates | Where-Object { $names -contains $_.Name } | ForEach-Object { $_.Original })
+}
+function Get-EloRecordedServices {
+    param([string]$Backup,[string]$Runtime)
+    $record=Read-EloServiceRecord $Backup
+    if ($record.Count -eq 0) { return @() }
+    $all=@(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop)
+    return @(Select-EloRecordedServices $record $all ([IO.Path]::GetDirectoryName($Runtime.TrimEnd('\'))) | ForEach-Object { @{Name=[string]$_.Name;DisplayName=[string]$_.DisplayName;State=[string]$_.State;Ports=@($record[[string]$_.Name])} })
 }
 function Get-EloAffectedServices {
     # What a runtime change has to stop: whatever has the runtime loaded plus every active ELO service.
@@ -1022,6 +1060,18 @@ function New-EloWindowsUpdateAdapters {
             if ($users.Processes.Count -gt 0) { throw 'runtime_in_use_by_process' }
             # Listening ports are recorded before anything stops: they are the load check afterwards.
             foreach ($user in $users.Services) { $state.Ports[[string]$user.Name]=@((Get-EloServiceSample $user.Name).Ports) }
+            if ($Paths.Old) {
+                # Update: remembered next to the backup, so a restore (also in a later session) can start them.
+                $active=@{}; foreach ($user in $users.Services) { $active[[string]$user.Name]=$state.Ports[[string]$user.Name] }
+                if ($active.Count -gt 0) { Write-EloServiceRecord $Paths.Backup $active }
+            } elseif ($Paths.Backup) {
+                # Restore: services that crashed on the newer Java are not active any more.
+                foreach ($recorded in @(Get-EloRecordedServices $Paths.Backup $Paths.Runtime)) {
+                    $name=[string]$recorded.Name
+                    $state.Ports[$name]=@(@($state.Ports[$name])+@($recorded.Ports) | Where-Object { $null -ne $_ } | Sort-Object -Unique)
+                    if (-not $state.Stopped.Contains($name)) { $state.Stopped.Add($name) }
+                }
+            }
             $control=@{
                 Status={ param($n) [string](Get-Service -Name $n -ErrorAction Stop).Status }
                 Stop={ param($n) Stop-Service -Name $n -Force -NoWait -ErrorAction Stop }
