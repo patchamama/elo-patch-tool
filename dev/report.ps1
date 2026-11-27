@@ -290,7 +290,7 @@ function New-EloTechnicalReport {
         if ($state -eq 'Proven' -and (Test-EloReportProof $jvm.ExecutionVerified)) { $execution='Proven' }
         $classification='Unknown'; $evidence='Unknown'
         $classCodes=@{PotentiallyVulnerable='AdvisoryRangeMatch';NotAffected='AdvisoryExcludesVersion';Fixed='AdvisoryFixedVersion'}
-        if ($jvm.Vendor -cne 'Azul Zulu' -and $state -eq 'Proven' -and (Test-EloReportProof $jvm.ClassificationVerified) -and $jvm.Classification -is [string] -and $classCodes.ContainsKey($jvm.Classification) -and $jvm.EvidenceCode -ceq $classCodes[$jvm.Classification]) {
+        if (($jvm.Vendor -cne 'Azul Zulu' -or $jvm.Classification -ceq 'PotentiallyVulnerable') -and $state -eq 'Proven' -and (Test-EloReportProof $jvm.ClassificationVerified) -and $jvm.Classification -is [string] -and $classCodes.ContainsKey($jvm.Classification) -and $jvm.EvidenceCode -ceq $classCodes[$jvm.Classification]) {
             $classification=$jvm.Classification; $evidence=$jvm.EvidenceCode
         }
         $vendor='Unknown'

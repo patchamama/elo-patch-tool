@@ -76,14 +76,14 @@ $zuluScan=Invoke-EloJavaScan -DriveRoots @() -ManualPath 'C:\fixture' -IsReparse
 } -ProbeJava {
     [pscustomobject]@{Succeeded=$true;Cancelled=$false;Evidence='OpenJDK Runtime Environment Zulu21.30+15-CA (build 21.0.1+12-LTS)';Error=$null;ExitCode=0}
 }
-Assert ($zuluScan.Results[0].Vendor -ceq 'Azul Zulu' -and $zuluScan.Results[0].Status -ceq 'Inconclusive') 'packaged scanner identifies Zulu without advisory classification'
+Assert ($zuluScan.Results[0].Vendor -ceq 'Azul Zulu' -and $zuluScan.Results[0].Status -ceq 'PotentiallyVulnerable') 'packaged scanner flags an old Zulu build'
 $cliZulu=Invoke-EloCli -Arguments @('--cli','--scan','--json') -Scanner { param($ManualPath) $zuluScan }
 $cliZuluJson=ConvertFrom-Json $cliZulu.Output
-Assert ($cliZulu.ExitCode -eq 0 -and $cliZuluJson.scan.Results[0].Vendor -ceq 'Azul Zulu' -and $cliZuluJson.scan.Results[0].Status -ceq 'Inconclusive') 'CLI JSON preserves Zulu and inconclusive result'
+Assert ($cliZulu.ExitCode -eq 0 -and $cliZuluJson.scan.Results[0].Vendor -ceq 'Azul Zulu' -and $cliZuluJson.scan.Results[0].Status -ceq 'PotentiallyVulnerable') 'CLI JSON preserves Zulu and its result'
 $zuluSession=New-EloServerSession -Port 49151 -UiHtml 'fixture' -ScanSource 'fixture'
 $zuluSession.Adapters.Resources={ @{ServerName='TEST';WindowsVersion='10.0';WindowsBuild='20348';TotalRamBytes=8GB;Disks=@(@{Name='C:';TotalBytes=100GB;FreeBytes=40GB})} }
 ConvertTo-EloUiResults $zuluSession $zuluScan
-Assert ($zuluSession.Results[0].vendor -ceq 'Azul Zulu' -and $zuluSession.Results[0].status -ceq 'inconclusive') 'web results preserve Zulu and inconclusive status'
+Assert ($zuluSession.Results[0].vendor -ceq 'Azul Zulu' -and $zuluSession.Results[0].status -ceq 'vulnerable' -and @($zuluSession.Results[0].findings | Where-Object { $_.status -ceq 'vulnerable' }).Count -eq 1 -and $zuluSession.ReportJvms[0].Classification -ceq 'PotentiallyVulnerable') 'web results show an old Zulu as vulnerable'
 foreach ($lang in @('en','de')) {
     $zuluHtml=Get-EloSessionReportHtml $zuluSession $lang
     Assert ($zuluHtml.Contains('Azul Zulu') -and $zuluHtml.Contains('21.0.1+12-LTS') -and -not $zuluHtml.Contains('https://adoptium.net/installation/')) 'technical report preserves Zulu without Temurin replacement guidance'

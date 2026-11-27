@@ -51,7 +51,8 @@ Assert ($j.scan.Results[0].Evidence -ceq 'Temurin evidence') 'raw evidence retai
 Assert ($j.security.verifiedOn -ceq '2026-11-23' -and $j.security.sourceDate -eq '2026-11') 'verification and source dates explicit'
 Assert ($j.security.warning -match 'Unknown JVM vendors/builds remain inconclusive') 'unknown vendors remain uncertain'
 Assert ($j.security.advisories[0].provenance -match 'directly fetched' -and $j.security.advisories[1].url -ceq 'https://linux.oracle.com/cve/CVE-2026-114938.html') 'direct fetch provenance'
-Assert ($j.security.advisories[2].provenance -match 'User-supplied.*not independently fetched') 'OpenJDK supplied text provenance'
+Assert ($j.security.advisories[2].url -cmatch '^https://www\.azul\.com/') 'Azul advisory listed with the fetched sources'
+Assert ($j.security.advisories[3].provenance -match 'User-supplied.*not independently fetched') 'OpenJDK supplied text provenance'
 Assert ($j.keepTemp -and $j.readOnly) 'headless read-only flags'
 foreach ($bad in @(@('--command','whoami'), @('--credential','secret'), @('--manual-path'), @('--scan','--scan'), @('--manual-path','--json'), @('--manual-path','\\host\share'), @('--manual-path','C:\x;whoami'))) {
     $before = $script:scanCalls

@@ -167,6 +167,8 @@ Assert ((ConvertTo-EloTechnicalReportHtml $zuluReport 'en').Contains('https://do
 Assert ($zuluReport.Jvms[0].Version -ceq '21.0.1+12-LTS') 'Zulu version survives report sanitization'
 $zuluClaim = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='21.0.13.1+2';Verified=$true;Vendor='Azul Zulu';VendorVerified=$true;Classification='Fixed';ClassificationVerified=$true;EvidenceCode='AdvisoryFixedVersion'})
 Assert ($zuluClaim.Jvms[0].Classification -ceq 'Unknown') 'No unsupported Zulu fixed classification accepted'
+$zuluOld = New-EloTechnicalReport -ResourceCollector $resources -JvmEvidence @(@{Version='21.0.1+12-LTS';Verified=$true;Vendor='Azul Zulu';VendorVerified=$true;Classification='PotentiallyVulnerable';ClassificationVerified=$true;EvidenceCode='AdvisoryRangeMatch'})
+Assert ($zuluOld.Jvms[0].Classification -ceq 'PotentiallyVulnerable') 'the report keeps a vulnerable Zulu classification'
 foreach ($lang in @('en','de')) {
     $zuluHtml=ConvertTo-EloTechnicalReportHtml $zuluReport $lang
     Assert ($zuluHtml.Contains('Azul Zulu') -and $zuluHtml -notmatch 'https://adoptium.net/temurin/releases|https://adoptium.net/installation/') 'Zulu guidance does not suggest Temurin as same provider'

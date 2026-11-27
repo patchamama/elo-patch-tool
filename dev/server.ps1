@@ -204,7 +204,7 @@ function ConvertTo-EloUiResults {
         if ($item.Status -ceq 'PotentiallyVulnerable') { $status='vulnerable' }
         # Narrow exact-build allowlist from parent-verified Temurin evidence.
         # No extrapolation to later versions, other vendors or ELO compatibility.
-        $rules=@(); if ($Session.Adapters.ScanRules) { $rules=@(& $Session.Adapters.ScanRules | Where-Object { $_.Vendor -ceq 'Temurin' }) }
+        $rules=@(); if ($Session.Adapters.ScanRules) { $allRules=& $Session.Adapters.ScanRules; $rules=@($allRules | Where-Object { $_.Vendor -ceq 'Temurin' }) }
         $fixed=@($rules | ForEach-Object { $_.Fixed } | ForEach-Object { [string]$_ })
         $sources=@($rules | ForEach-Object { [string]$_.Source })
         if ($item.Status -ceq 'KnownFixed' -and $item.Vendor -ceq 'Temurin' -and $fixed -ccontains $item.FullVersion -and
@@ -536,6 +536,16 @@ function Get-EloBackupAssessment {
     param([string]$Vendor,[string]$Version)
     $primary=Get-EloPrimaryVulnerability
     $result=@{Risk='unknown';Vulnerability=$primary}
+    if ($Vendor -ceq 'Azul Zulu') {
+        try {
+            $text=$Version; if ($text -cnotmatch '\+') { $text+='+0' }
+            foreach ($rule in @(Get-EloScanRules | Where-Object { $_.Vendor -ceq 'Azul Zulu' })) {
+                $verdict=Get-EloZuluClassification -Evidence "OpenJDK Runtime Environment Zulu (build $text)" -Rule $rule
+                if ($verdict.Status -ceq 'PotentiallyVulnerable') { $result.Risk='vulnerable'; $result.Vulnerability=@(Get-EloActiveVulnerabilities | Where-Object { $_.id -ceq $rule.Id })[0]; break }
+            }
+        } catch { }
+        return $result
+    }
     if ($Vendor -cne 'Temurin') { return $result }
     try {
         $v=ConvertTo-EloJavaVersion $Version

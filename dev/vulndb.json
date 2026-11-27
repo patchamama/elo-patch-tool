@@ -62,6 +62,18 @@
           "reportLabel": "OpenJDK 2026-11-17",
           "provenanceNote": "User-supplied OpenJDK text reviewed by parent; not independently fetched.",
           "provenance": "Supplied"
+        },
+        {
+          "id": "azul-java4shell",
+          "url": "https://www.azul.com/articles/java4shell-remediation-how-to-find-mitigate-and-patch-cve-2026-114938/",
+          "title": {
+            "en": "Azul advisory (fetched 2026-11-27): OpenJDK-based builds from 17.0.6 onward are affected unless patched; no Zulu fixed build numbers",
+            "de": "Azul-Hinweis (abgerufen am 2026-11-27): OpenJDK-basierte Builds ab 17.0.6 sind ohne Patch betroffen; keine korrigierten Zulu-Buildnummern",
+            "es": "Aviso de Azul (obtenido el 2026-11-27): los builds basados en OpenJDK desde 17.0.6 están afectados si no tienen el parche; sin números de build corregidos de Zulu"
+          },
+          "reportLabel": "Azul Java4Shell advisory",
+          "provenanceNote": "Official Azul article fetched on 2026-11-27.",
+          "provenance": "Fetched"
         }
       ],
       "detection": {
@@ -97,6 +109,17 @@
               "27.0.1.1+4"
             ],
             "fixedSource": "https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/"
+          },
+          "Azul Zulu": {
+            "parser": "zulu-release",
+            "affectedFrom": "17.0.6+0",
+            "fixed": [
+              "17.0.21.1+2",
+              "21.0.13.1+2",
+              "25.0.5.1+2",
+              "27.0.1.1+4"
+            ],
+            "fixedSource": "https://www.azul.com/articles/java4shell-remediation-how-to-find-mitigate-and-patch-cve-2026-114938/"
           }
         },
         "unknownVendor": "inconclusive"

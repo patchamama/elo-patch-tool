@@ -161,11 +161,16 @@ function Get-EloJavaClassification {
     # rule, the overall Status is the worst one (PotentiallyVulnerable > Inconclusive > KnownFixed).
     param([AllowEmptyString()][string]$Evidence, $Rules = $null)
     if ($null -eq $Rules -and (Get-Command Get-EloScanRules -CommandType Function -ErrorAction SilentlyContinue)) { $Rules = Get-EloScanRules }
-    $usable = @($Rules | Where-Object { $_ -and [string]$_.Parser -ceq 'temurin-build' -and [string]$_.Vendor -ceq 'Temurin' })
+    # Each vulnerability is judged by the rule of the detected vendor; other vendors fall back to the Temurin rule, which leaves them inconclusive.
+    $isZulu = ((Get-EloJavaClassificationForRule -Evidence $Evidence).Vendor -ceq 'Azul Zulu')
+    $zuluRules = @($Rules | Where-Object { $isZulu -and $_ -and [string]$_.Parser -ceq 'zulu-release' -and [string]$_.Vendor -ceq 'Azul Zulu' })
+    $zuluIds = @($zuluRules | ForEach-Object { [string]$_.Id })
+    $usable = @($zuluRules) + @($Rules | Where-Object { $_ -and [string]$_.Parser -ceq 'temurin-build' -and [string]$_.Vendor -ceq 'Temurin' -and $zuluIds -cnotcontains [string]$_.Id })
     if ($usable.Count -eq 0) { $usable = @(@{ Id = ''; Severity = ''; Fixed = @(); Source = '' }) }
     $findings = @(); $first = $null
     foreach ($rule in $usable) {
-        $item = Get-EloJavaClassificationForRule -Evidence $Evidence -Fixed @($rule.Fixed) -Source ([string]$rule.Source)
+        if ([string]$rule.Parser -ceq 'zulu-release') { $item = Get-EloZuluClassification -Evidence $Evidence -Rule $rule }
+        else { $item = Get-EloJavaClassificationForRule -Evidence $Evidence -Fixed @($rule.Fixed) -Source ([string]$rule.Source) }
         if ($null -eq $first) { $first = $item }
         if ($rule.Id) { $findings += [pscustomobject]@{ Id = [string]$rule.Id; Severity = [string]$rule.Severity; Status = $item.Status; Source = $item.Source; Reason = $item.Reason } }
         $rank = @{ PotentiallyVulnerable = 3; Inconclusive = 2; KnownFixed = 1 }
@@ -173,6 +178,24 @@ function Get-EloJavaClassification {
     }
     $first | Add-Member -NotePropertyName Findings -NotePropertyValue $findings -Force
     return $first
+}
+function Get-EloZuluClassification {
+    # Azul publishes the affected range, not Zulu fixed build numbers: a release older than the fixed
+    # release of its line is potentially vulnerable; everything else stays inconclusive, never fixed.
+    param([string]$Evidence, $Rule)
+    $item = Get-EloJavaClassificationForRule -Evidence $Evidence -Source ([string]$Rule.Source)
+    if ($item.Vendor -cne 'Azul Zulu' -or [string]$item.Build -cnotmatch '^([1-9][0-9]{0,2}(?:\.(?:0|[1-9][0-9]{0,8})){0,3})\+[0-9]{1,9}(?:-LTS)?$') { return $item }
+    $release = $Matches[1]
+    $headers = @([regex]::Matches($Evidence, '(?im)^\s*(?:openjdk|java) version "([^"]+)"') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    if ($headers.Count -gt 1 -or ($headers.Count -eq 1 -and $headers[0] -cne $release)) { return $item }
+    # Major, interim and update numbers only: Zulu numbers later patch levels differently.
+    $triple = { param($text) $parts = @((([string]$text) -split '\+')[0] -split '\.') + @('0', '0'); New-Object Version([int]$parts[0], [int]$parts[1], [int]$parts[2]) }
+    $mine = & $triple $release
+    $milestone = @(@($Rule.Fixed) | Where-Object { (& $triple $_).Major -eq $mine.Major })
+    if ($milestone.Count -ne 1 -or ($Rule.AffectedFrom -and $mine -lt (& $triple $Rule.AffectedFrom)) -or $mine -ge (& $triple $milestone[0])) { return $item }
+    $item.Status = 'PotentiallyVulnerable'
+    $item.Reason = "Azul Zulu $release is older than the fixed release $($milestone[0]) of its line and within the affected range. Potential vulnerability only, not confirmed exploitability."
+    return $item
 }
 function Get-EloJavaClassificationForRule {
     param([AllowEmptyString()][string]$Evidence, [string[]]$Fixed = @(), [string]$Source = '')
@@ -1149,7 +1172,7 @@ function ConvertTo-EloUiResults {
         if ($item.Status -ceq 'PotentiallyVulnerable') { $status='vulnerable' }
         # Narrow exact-build allowlist from parent-verified Temurin evidence.
         # No extrapolation to later versions, other vendors or ELO compatibility.
-        $rules=@(); if ($Session.Adapters.ScanRules) { $rules=@(& $Session.Adapters.ScanRules | Where-Object { $_.Vendor -ceq 'Temurin' }) }
+        $rules=@(); if ($Session.Adapters.ScanRules) { $allRules=& $Session.Adapters.ScanRules; $rules=@($allRules | Where-Object { $_.Vendor -ceq 'Temurin' }) }
         $fixed=@($rules | ForEach-Object { $_.Fixed } | ForEach-Object { [string]$_ })
         $sources=@($rules | ForEach-Object { [string]$_.Source })
         if ($item.Status -ceq 'KnownFixed' -and $item.Vendor -ceq 'Temurin' -and $fixed -ccontains $item.FullVersion -and
@@ -1481,6 +1504,16 @@ function Get-EloBackupAssessment {
     param([string]$Vendor,[string]$Version)
     $primary=Get-EloPrimaryVulnerability
     $result=@{Risk='unknown';Vulnerability=$primary}
+    if ($Vendor -ceq 'Azul Zulu') {
+        try {
+            $text=$Version; if ($text -cnotmatch '\+') { $text+='+0' }
+            foreach ($rule in @(Get-EloScanRules | Where-Object { $_.Vendor -ceq 'Azul Zulu' })) {
+                $verdict=Get-EloZuluClassification -Evidence "OpenJDK Runtime Environment Zulu (build $text)" -Rule $rule
+                if ($verdict.Status -ceq 'PotentiallyVulnerable') { $result.Risk='vulnerable'; $result.Vulnerability=@(Get-EloActiveVulnerabilities | Where-Object { $_.id -ceq $rule.Id })[0]; break }
+            }
+        } catch { }
+        return $result
+    }
     if ($Vendor -cne 'Temurin') { return $result }
     try {
         $v=ConvertTo-EloJavaVersion $Version
@@ -4053,7 +4086,7 @@ function New-EloTechnicalReport {
         if ($state -eq 'Proven' -and (Test-EloReportProof $jvm.ExecutionVerified)) { $execution='Proven' }
         $classification='Unknown'; $evidence='Unknown'
         $classCodes=@{PotentiallyVulnerable='AdvisoryRangeMatch';NotAffected='AdvisoryExcludesVersion';Fixed='AdvisoryFixedVersion'}
-        if ($jvm.Vendor -cne 'Azul Zulu' -and $state -eq 'Proven' -and (Test-EloReportProof $jvm.ClassificationVerified) -and $jvm.Classification -is [string] -and $classCodes.ContainsKey($jvm.Classification) -and $jvm.EvidenceCode -ceq $classCodes[$jvm.Classification]) {
+        if (($jvm.Vendor -cne 'Azul Zulu' -or $jvm.Classification -ceq 'PotentiallyVulnerable') -and $state -eq 'Proven' -and (Test-EloReportProof $jvm.ClassificationVerified) -and $jvm.Classification -is [string] -and $classCodes.ContainsKey($jvm.Classification) -and $jvm.EvidenceCode -ceq $classCodes[$jvm.Classification]) {
             $classification=$jvm.Classification; $evidence=$jvm.EvidenceCode
         }
         $vendor='Unknown'
@@ -5655,7 +5688,8 @@ function Test-EloVulnDb {
                 else {
                     foreach ($prop in $vendors.PSObject.Properties) {
                         if ($prop.Name -cnotmatch '^[A-Za-z0-9 ]{1,32}$') { $errors.Add("${where}: vendor name invalid"); continue }
-                        if (@('temurin-build') -cnotcontains [string]$prop.Value.parser) { $errors.Add("${where}: vendor '$($prop.Name)' parser is not supported") }
+                        if (@('temurin-build','zulu-release') -cnotcontains [string]$prop.Value.parser) { $errors.Add("${where}: vendor '$($prop.Name)' parser is not supported") }
+                        if ($null -ne $prop.Value.affectedFrom -and [string]$prop.Value.affectedFrom -cnotmatch '^[0-9]{1,3}(\.[0-9]{1,9}){0,3}\+[0-9]{1,9}$') { $errors.Add("${where}: vendor '$($prop.Name)' affectedFrom is not a Java build") }
                         $fixed = @($prop.Value.fixed)
                         if ($fixed.Count -lt 1 -or $fixed.Count -gt 64) { $errors.Add("${where}: vendor '$($prop.Name)' needs 1 to 64 fixed builds") }
                         foreach ($f in $fixed) { if ([string]$f -cnotmatch '^[0-9]{1,3}(\.[0-9]{1,9}){0,3}\+[0-9]{1,9}$') { $errors.Add("${where}: fixed build '$f' is not a Java build such as 17.0.21.1+2") } }
@@ -5754,7 +5788,7 @@ function Get-EloScanRules {
         if ([string]$v.detection.method -ceq 'version-table') {
             foreach ($prop in $v.detection.vendors.PSObject.Properties) {
                 $rules.Add(@{ Id = [string]$v.id; Severity = [string]$v.severity; Method = 'version-table'; Vendor = [string]$prop.Name; Parser = [string]$prop.Value.parser
-                    Fixed = @($prop.Value.fixed | ForEach-Object { [string]$_ }); Source = [string]$prop.Value.fixedSource })
+                    Fixed = @($prop.Value.fixed | ForEach-Object { [string]$_ }); AffectedFrom = [string]$prop.Value.affectedFrom; Source = [string]$prop.Value.fixedSource })
             }
         } elseif ([string]$v.detection.method -ceq 'probe-expect') {
             $probe = @($v.detection.probes | Where-Object { $_.id -ceq [string]$v.detection.rule.probe })[0]
@@ -5963,6 +5997,18 @@ function Install-EloVulnDb {
           "reportLabel": "OpenJDK 2026-11-17",
           "provenanceNote": "User-supplied OpenJDK text reviewed by parent; not independently fetched.",
           "provenance": "Supplied"
+        },
+        {
+          "id": "azul-java4shell",
+          "url": "https://www.azul.com/articles/java4shell-remediation-how-to-find-mitigate-and-patch-cve-2026-114938/",
+          "title": {
+            "en": "Azul advisory (fetched 2026-11-27): OpenJDK-based builds from 17.0.6 onward are affected unless patched; no Zulu fixed build numbers",
+            "de": "Azul-Hinweis (abgerufen am 2026-11-27): OpenJDK-basierte Builds ab 17.0.6 sind ohne Patch betroffen; keine korrigierten Zulu-Buildnummern",
+            "es": "Aviso de Azul (obtenido el 2026-11-27): los builds basados en OpenJDK desde 17.0.6 están afectados si no tienen el parche; sin números de build corregidos de Zulu"
+          },
+          "reportLabel": "Azul Java4Shell advisory",
+          "provenanceNote": "Official Azul article fetched on 2026-11-27.",
+          "provenance": "Fetched"
         }
       ],
       "detection": {
@@ -5998,6 +6044,17 @@ function Install-EloVulnDb {
               "27.0.1.1+4"
             ],
             "fixedSource": "https://adoptium.net/news/2026/11/temurin-november-2026-cspu-java4shell/"
+          },
+          "Azul Zulu": {
+            "parser": "zulu-release",
+            "affectedFrom": "17.0.6+0",
+            "fixed": [
+              "17.0.21.1+2",
+              "21.0.13.1+2",
+              "25.0.5.1+2",
+              "27.0.1.1+4"
+            ],
+            "fixedSource": "https://www.azul.com/articles/java4shell-remediation-how-to-find-mitigate-and-patch-cve-2026-114938/"
           }
         },
         "unknownVendor": "inconclusive"

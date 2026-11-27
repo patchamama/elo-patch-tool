@@ -21,7 +21,7 @@ Assert ($text -notmatch '(?i)"(password|apiKey|api_key|secret|token)"\s*:') 'the
 $active = @(Get-EloActiveVulnerabilities $db)
 Assert ($active.Count -ge 1 -and $active[0].id -ceq 'CVE-2026-114938' -and $active[0].severity -ceq 'high') 'the built-in vulnerability is active with its severity'
 $rules = @(Get-EloScanRules $db)
-Assert ($rules.Count -eq 1 -and $rules[0].Vendor -ceq 'Temurin' -and $rules[0].Fixed.Count -eq 4 -and $rules[0].Fixed -ccontains '17.0.21.1+2' -and $rules[0].Source -cmatch '^https://adoptium\.net/') 'scan rules come from the catalog'
+Assert ($rules.Count -eq 2 -and $rules[1].Vendor -ceq 'Azul Zulu' -and $rules[1].AffectedFrom -ceq '17.0.6+0' -and $rules[0].Vendor -ceq 'Temurin' -and $rules[0].Fixed.Count -eq 4 -and $rules[0].Fixed -ccontains '17.0.21.1+2' -and $rules[0].Source -cmatch '^https://adoptium\.net/') 'scan rules come from the catalog'
 $mit = Get-EloVulnAction $active[0] 'jvm-option'
 Assert ($mit.option -ceq '-XX:-UseBASE64Intrinsics' -and $mit.variable -ceq 'JAVA_TOOL_OPTIONS' -and $mit.verify.mustBe -ceq 'false') 'the mitigation action is defined in the catalog'
 Assert ((Get-EloVulnAction $active[0] 'runtime-update').recommended -eq $true -and (Get-EloVulnAction $active[0] 'restore-backup')) 'update and restore actions are defined'

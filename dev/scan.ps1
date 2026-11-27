@@ -6,11 +6,16 @@ function Get-EloJavaClassification {
     # rule, the overall Status is the worst one (PotentiallyVulnerable > Inconclusive > KnownFixed).
     param([AllowEmptyString()][string]$Evidence, $Rules = $null)
     if ($null -eq $Rules -and (Get-Command Get-EloScanRules -CommandType Function -ErrorAction SilentlyContinue)) { $Rules = Get-EloScanRules }
-    $usable = @($Rules | Where-Object { $_ -and [string]$_.Parser -ceq 'temurin-build' -and [string]$_.Vendor -ceq 'Temurin' })
+    # Each vulnerability is judged by the rule of the detected vendor; other vendors fall back to the Temurin rule, which leaves them inconclusive.
+    $isZulu = ((Get-EloJavaClassificationForRule -Evidence $Evidence).Vendor -ceq 'Azul Zulu')
+    $zuluRules = @($Rules | Where-Object { $isZulu -and $_ -and [string]$_.Parser -ceq 'zulu-release' -and [string]$_.Vendor -ceq 'Azul Zulu' })
+    $zuluIds = @($zuluRules | ForEach-Object { [string]$_.Id })
+    $usable = @($zuluRules) + @($Rules | Where-Object { $_ -and [string]$_.Parser -ceq 'temurin-build' -and [string]$_.Vendor -ceq 'Temurin' -and $zuluIds -cnotcontains [string]$_.Id })
     if ($usable.Count -eq 0) { $usable = @(@{ Id = ''; Severity = ''; Fixed = @(); Source = '' }) }
     $findings = @(); $first = $null
     foreach ($rule in $usable) {
-        $item = Get-EloJavaClassificationForRule -Evidence $Evidence -Fixed @($rule.Fixed) -Source ([string]$rule.Source)
+        if ([string]$rule.Parser -ceq 'zulu-release') { $item = Get-EloZuluClassification -Evidence $Evidence -Rule $rule }
+        else { $item = Get-EloJavaClassificationForRule -Evidence $Evidence -Fixed @($rule.Fixed) -Source ([string]$rule.Source) }
         if ($null -eq $first) { $first = $item }
         if ($rule.Id) { $findings += [pscustomobject]@{ Id = [string]$rule.Id; Severity = [string]$rule.Severity; Status = $item.Status; Source = $item.Source; Reason = $item.Reason } }
         $rank = @{ PotentiallyVulnerable = 3; Inconclusive = 2; KnownFixed = 1 }
@@ -18,6 +23,24 @@ function Get-EloJavaClassification {
     }
     $first | Add-Member -NotePropertyName Findings -NotePropertyValue $findings -Force
     return $first
+}
+function Get-EloZuluClassification {
+    # Azul publishes the affected range, not Zulu fixed build numbers: a release older than the fixed
+    # release of its line is potentially vulnerable; everything else stays inconclusive, never fixed.
+    param([string]$Evidence, $Rule)
+    $item = Get-EloJavaClassificationForRule -Evidence $Evidence -Source ([string]$Rule.Source)
+    if ($item.Vendor -cne 'Azul Zulu' -or [string]$item.Build -cnotmatch '^([1-9][0-9]{0,2}(?:\.(?:0|[1-9][0-9]{0,8})){0,3})\+[0-9]{1,9}(?:-LTS)?$') { return $item }
+    $release = $Matches[1]
+    $headers = @([regex]::Matches($Evidence, '(?im)^\s*(?:openjdk|java) version "([^"]+)"') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    if ($headers.Count -gt 1 -or ($headers.Count -eq 1 -and $headers[0] -cne $release)) { return $item }
+    # Major, interim and update numbers only: Zulu numbers later patch levels differently.
+    $triple = { param($text) $parts = @((([string]$text) -split '\+')[0] -split '\.') + @('0', '0'); New-Object Version([int]$parts[0], [int]$parts[1], [int]$parts[2]) }
+    $mine = & $triple $release
+    $milestone = @(@($Rule.Fixed) | Where-Object { (& $triple $_).Major -eq $mine.Major })
+    if ($milestone.Count -ne 1 -or ($Rule.AffectedFrom -and $mine -lt (& $triple $Rule.AffectedFrom)) -or $mine -ge (& $triple $milestone[0])) { return $item }
+    $item.Status = 'PotentiallyVulnerable'
+    $item.Reason = "Azul Zulu $release is older than the fixed release $($milestone[0]) of its line and within the affected range. Potential vulnerability only, not confirmed exploitability."
+    return $item
 }
 function Get-EloJavaClassificationForRule {
     param([AllowEmptyString()][string]$Evidence, [string[]]$Fixed = @(), [string]$Source = '')

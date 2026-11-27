@@ -88,7 +88,8 @@ function Test-EloVulnDb {
                 else {
                     foreach ($prop in $vendors.PSObject.Properties) {
                         if ($prop.Name -cnotmatch '^[A-Za-z0-9 ]{1,32}$') { $errors.Add("${where}: vendor name invalid"); continue }
-                        if (@('temurin-build') -cnotcontains [string]$prop.Value.parser) { $errors.Add("${where}: vendor '$($prop.Name)' parser is not supported") }
+                        if (@('temurin-build','zulu-release') -cnotcontains [string]$prop.Value.parser) { $errors.Add("${where}: vendor '$($prop.Name)' parser is not supported") }
+                        if ($null -ne $prop.Value.affectedFrom -and [string]$prop.Value.affectedFrom -cnotmatch '^[0-9]{1,3}(\.[0-9]{1,9}){0,3}\+[0-9]{1,9}$') { $errors.Add("${where}: vendor '$($prop.Name)' affectedFrom is not a Java build") }
                         $fixed = @($prop.Value.fixed)
                         if ($fixed.Count -lt 1 -or $fixed.Count -gt 64) { $errors.Add("${where}: vendor '$($prop.Name)' needs 1 to 64 fixed builds") }
                         foreach ($f in $fixed) { if ([string]$f -cnotmatch '^[0-9]{1,3}(\.[0-9]{1,9}){0,3}\+[0-9]{1,9}$') { $errors.Add("${where}: fixed build '$f' is not a Java build such as 17.0.21.1+2") } }
@@ -187,7 +188,7 @@ function Get-EloScanRules {
         if ([string]$v.detection.method -ceq 'version-table') {
             foreach ($prop in $v.detection.vendors.PSObject.Properties) {
                 $rules.Add(@{ Id = [string]$v.id; Severity = [string]$v.severity; Method = 'version-table'; Vendor = [string]$prop.Name; Parser = [string]$prop.Value.parser
-                    Fixed = @($prop.Value.fixed | ForEach-Object { [string]$_ }); Source = [string]$prop.Value.fixedSource })
+                    Fixed = @($prop.Value.fixed | ForEach-Object { [string]$_ }); AffectedFrom = [string]$prop.Value.affectedFrom; Source = [string]$prop.Value.fixedSource })
             }
         } elseif ([string]$v.detection.method -ceq 'probe-expect') {
             $probe = @($v.detection.probes | Where-Object { $_.id -ceq [string]$v.detection.rule.probe })[0]

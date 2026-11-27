@@ -59,10 +59,10 @@ $zuluScan=Invoke-EloJavaScan -DriveRoots @() -ManualPath 'C:\fixture' -IsReparse
 }
 $zuluCli=Invoke-EloCli -Arguments @('--cli','--scan','--json') -Scanner { param($ManualPath) $zuluScan }
 $zuluCliJson=ConvertFrom-Json $zuluCli.Output
-Assert ($zuluCli.ExitCode -eq 0 -and $zuluCliJson.scan.Results[0].Vendor -ceq 'Azul Zulu' -and $zuluCliJson.scan.Results[0].Status -ceq 'Inconclusive') 'CLI JSON retains Zulu and inconclusive status'
+Assert ($zuluCli.ExitCode -eq 0 -and $zuluCliJson.scan.Results[0].Vendor -ceq 'Azul Zulu' -and $zuluCliJson.scan.Results[0].Status -ceq 'PotentiallyVulnerable') 'CLI JSON retains Zulu and its status'
 ConvertTo-EloUiResults $evidenceSession $zuluScan
-Assert ($evidenceSession.Results[0].vendor -ceq 'Azul Zulu' -and $evidenceSession.Results[0].status -ceq 'inconclusive') 'Zulu shown without fixed classification in UI'
-Assert ($evidenceSession.ReportJvms[-1].VendorVerified -and $evidenceSession.ReportJvms[-1].Vendor -ceq 'Azul Zulu' -and $evidenceSession.ReportJvms[-1].Classification -ceq 'Unknown') 'Zulu identity verified separately from classification'
+Assert ($evidenceSession.Results[0].vendor -ceq 'Azul Zulu' -and $evidenceSession.Results[0].status -ceq 'vulnerable') 'an old Zulu is shown as vulnerable in the UI'
+Assert ($evidenceSession.ReportJvms[-1].VendorVerified -and $evidenceSession.ReportJvms[-1].Vendor -ceq 'Azul Zulu' -and $evidenceSession.ReportJvms[-1].Classification -ceq 'PotentiallyVulnerable') 'the report keeps a verified vulnerable Zulu'
 foreach ($language in @('en','de')) { Assert ((Get-EloSessionReportHtml $evidenceSession $language).Contains('Azul Zulu')) 'Zulu identity included in technical report' }
 $zuluScan.Results[0].ExitCode=1
 ConvertTo-EloUiResults $evidenceSession $zuluScan
@@ -394,14 +394,14 @@ try {
         } finally { $zip.Dispose(); $fs.Dispose() }
     }
     New-FakeBackupZip (Join-Path $bkDir 'java.backup-20260101120000.zip') "IMPLEMENTOR=`"Eclipse Adoptium`"`nJAVA_RUNTIME_VERSION=`"17.0.2+8`"`n"
-    New-FakeBackupZip (Join-Path $bkDir 'java.backup-20250101120000.zip') "IMPLEMENTOR=`"Azul Systems, Inc.`"`nJAVA_VERSION=`"21.0.1`"`n"
+    New-FakeBackupZip (Join-Path $bkDir 'java.backup-20250101120000.zip') "IMPLEMENTOR=`"Azul Systems, Inc.`"`nJAVA_VERSION=`"21.0.13`"`n"
     New-FakeBackupZip (Join-Path (Join-Path $bkRoot 'Windows') 'java.backup-20260202020202.zip') 'JAVA_VERSION="1.0"'
     [IO.File]::WriteAllText((Join-Path $bkDir 'notes.backup-bad.zip'),('x'*2000)); [IO.File]::WriteAllText((Join-Path $bkDir 'java.backup-20269999999999.zip'),('x'*2000))
     $m=Reset-UpdateSession 'ok'
     $s.Adapters.BackupRoots={ @($bkRoot) }.GetNewClosure(); $s.BackupsCache=$null
     $list=@(Get-EloBackupList $s)
     Assert ($list.Count -eq 2) 'only well-named, valid backups below level 2 are listed; system folders and bad names are skipped'
-    Assert ($list[0].risk -ceq 'vulnerable' -and $list[0].vendor -ceq 'Temurin' -and $list[1].risk -ceq 'unknown' -and $list[0].created -ceq '2026-01-01 12:00' -and $list[0].version -ceq '17.0.2+8' -and $list[0].runtime -ceq (Join-Path $bkDir 'java') -and $list[1].version -ceq '21.0.1') 'newest first, version read from the ZIP, runtime derived from the file name'
+    Assert ($list[0].risk -ceq 'vulnerable' -and $list[0].vendor -ceq 'Temurin' -and $list[1].risk -ceq 'unknown' -and $list[0].created -ceq '2026-01-01 12:00' -and $list[0].version -ceq '17.0.2+8' -and $list[0].runtime -ceq (Join-Path $bkDir 'java') -and $list[1].version -ceq '21.0.13') 'newest first, version read from the ZIP, runtime derived from the file name'
     $s.BackupsCache=$null; $payload=Invoke-EloApi $s (Request GET '/api/results')
     Assert (@($payload.backups).Count -eq 2 -and -not ($payload | ConvertTo-Json -Depth 6).Contains('"Root"')) 'the results payload carries the backups (no internal fields)'
     # The catalog information for the UI is a flat array (never nested) with severity, problem, solution and action ids.
@@ -423,7 +423,8 @@ try {
     Assert (-not (($script:LogLines -join "`n").Contains($s.Token))) 'the backend log never contains the session token'
     $idleState=$s.State; $s.State='idle'; $s.Results=@(); $s.Targets=@{}
     $id2=@($again)[1].id
-    $s.Adapters.Identity={ param($Path) @{Vendor='Azul Zulu';Branch='21';Architecture='x64';ImageType='jdk';Version='21.0.1'} }
+    $s.Adapters.Identity={ param($Path) @{Vendor='Azul Zulu';Branch='21';Architecture='x64';ImageType='jdk';Version='21.0.13'} }
+    Assert ((Get-EloBackupRisk 'Azul Zulu' '21.0.1') -ceq 'vulnerable' -and (Get-EloBackupRisk 'Azul Zulu' '17.0.20+8') -ceq 'vulnerable' -and (Get-EloBackupRisk 'Azul Zulu' '17.0.5') -ceq 'unknown' -and (Get-EloBackupRisk 'Azul Zulu' '21.0.13+11') -ceq 'unknown') 'an old Zulu backup is vulnerable; a Zulu backup is never reported as patched'
     $rp2=Invoke-EloApi $s (Request POST /api/preview ('{"actionId":"restore-backup","resultId":"'+$id2+'"}'))
     Assert ((@($rp2.warnings | ForEach-Object { $_.en }) -join ' ').Contains('cannot be determined') -and (@($rp2.warnings | ForEach-Object { $_.en }) -join ' ').Contains('Tomcat')) 'unknown-status backup warns about security and about stopping the ELO services'
     $r2=Invoke-EloApi $s (Request POST /api/action ('{"actionId":"restore-backup","resultId":"'+$id2+'","previewId":"'+$rp2.previewId+'"}'))
@@ -456,7 +457,7 @@ ConvertTo-EloUiResults $s ([pscustomobject]@{Results=@($fixture)})
 Assert ($s.Results.Count -eq 1 -and $s.Results[0].status -ceq 'patched') 'exact parent-verified Temurin build maps to patched'
 Assert ($s.Results[0].path -ceq $fixture.Location) 'result path identifies actual java.exe'
 $security=(Invoke-EloApi $s (Request -Path /api/results)).security
-Assert ($security.verifiedOn -ceq '2026-11-23' -and $security.advisories.Count -eq 3) 'parent-verified advisory date and complete metadata'
+Assert ($security.verifiedOn -ceq '2026-11-23' -and $security.advisories.Count -eq 4) 'parent-verified advisory date and complete metadata'
 $openjdk=@($security.advisories | Where-Object { $_.id -ceq 'openjdk-2026-11-17' })[0]
 Assert ($openjdk.title.en.Contains('user-supplied text') -and $openjdk.title.en.Contains('not fetched')) 'OpenJDK provenance is not presented as a direct fetch'
 Assert ($security.advisories[1].url -ceq 'https://linux.oracle.com/cve/CVE-2026-114938.html' -and $security.advisories[1].title.en.Contains('parent fetched directly')) 'Oracle direct-fetch provenance and exact URL'
@@ -512,7 +513,7 @@ try {
     while ($s.Worker -and $clock.Elapsed.TotalSeconds -lt 10) { Update-EloScanWorker $s; Start-Sleep -Milliseconds 10 }
     Assert ($s.State -ceq 'completed') 'normal scan completes'
     $snapshot=Invoke-EloApi $s (Request -Path /api/results)
-    Assert ($snapshot.results.Count -eq 0 -and $snapshot.security.verifiedOn -ceq '2026-11-23' -and $snapshot.security.advisories.Count -eq 3) 'advisory metadata also accompanies empty results'
+    Assert ($snapshot.results.Count -eq 0 -and $snapshot.security.verifiedOn -ceq '2026-11-23' -and $snapshot.security.advisories.Count -eq 4) 'advisory metadata also accompanies empty results'
 } finally { if ($s.Worker) { $s.Worker.PowerShell.Stop(); $s.Worker.PowerShell.Dispose(); $s.Worker=$null } }
 # Incomplete/access-denied scans must not disappear into a generic completed state.
 $s.ScanSource=@'

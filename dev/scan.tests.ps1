@@ -9,13 +9,18 @@ function Assert-Equal($Actual, $Expected, [string]$Label) {
 }
 $zulu = Get-EloJavaClassification -Evidence 'OpenJDK Runtime Environment Zulu21.30+15-CA (build 21.0.1+12-LTS)'
 Assert-Equal $zulu.Vendor 'Azul Zulu' 'Recognize Zulu runtime identity'
-Assert-Equal $zulu.Status 'Inconclusive' 'Zulu is not classified by Temurin advisory'
+Assert-Equal $zulu.Status 'PotentiallyVulnerable' 'An old Zulu 21 build is vulnerable'
 Assert-Equal $zulu.Build '21.0.1+12-LTS' 'Zulu build preserved'
-foreach ($build in @('21.0.13.1+2', '21.0.12+7')) {
-    $result = Get-EloJavaClassification -Evidence "OpenJDK Runtime Environment Zulu21.30+15-CA (build $build)"
-    Assert-Equal $result.Vendor 'Azul Zulu' 'Zulu identity independent of build'
-    Assert-Equal $result.Status 'Inconclusive' 'Temurin milestones do not apply to Zulu'
+Assert-Equal @($zulu.Findings).Count 1 'One finding per vulnerability, from the rule of the detected vendor'
+function Get-ZuluStatus($Build) { (Get-EloJavaClassification -Evidence "OpenJDK Runtime Environment Zulu-CA (build $Build)").Status }
+foreach ($build in @('17.0.6+10-LTS', '17.0.20+8-LTS', '21+35-LTS', '21.0.12+7', '25.0.4+5', '27+36')) {
+    Assert-Equal (Get-ZuluStatus $build) 'PotentiallyVulnerable' "Zulu $build is older than the fixed release of its line"
 }
+# No Zulu fixed builds are published in the sources: never "fixed". Older than 17.0.6, 8 and 11 are not claimed either way.
+foreach ($build in @('17.0.21+10', '21.0.13.1+2', '21.0.13+11', '25.0.5+1', '27.0.1+4', '17.0.5+8', '17+35', '11.0.20+8', '1.8.0_432-b06', '21.0.1-ea+7', '26.0.1+1')) {
+    Assert-Equal (Get-ZuluStatus $build) 'Inconclusive' "Zulu $build cannot be decided from the sources"
+}
+Assert-Equal (Get-EloJavaClassification -Evidence "openjdk version `"21.0.13`"`nOpenJDK Runtime Environment Zulu-CA (build 21.0.1+12-LTS)").Status 'Inconclusive' 'Conflicting Zulu versions are not classified'
 foreach ($evidence in @(
     "OpenJDK Runtime Environment Zulu21.30+15-CA (build 21.0.1+12-LTS)`nTemurin (build 21.0.1+12-LTS)",
     "OpenJDK Runtime Environment Temurin-21.0.13.1+2 (build 21.0.13.1+2)`nZulu21.30 notice",
