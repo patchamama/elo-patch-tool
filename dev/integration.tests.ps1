@@ -1,5 +1,6 @@
 # Windows PowerShell 5.1 integration checks. No live discovery, Java, registry or browser.
 $ErrorActionPreference = 'Stop'
+$env:ELO_PATCH_NO_UPDATE_CHECK = '1' # no suite contacts GitHub
 $repo = Split-Path -Parent $PSScriptRoot
 $bat = Join-Path $repo 'ELO-Patch-Tools.bat'
 $checks = 0

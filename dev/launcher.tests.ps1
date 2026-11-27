@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+$env:ELO_PATCH_NO_UPDATE_CHECK = '1' # no suite contacts GitHub
 Set-StrictMode -Version 2
 $launcher = Join-Path $PSScriptRoot 'launcher.bat'
 $work = Join-Path $PSScriptRoot ('launcher.test-work\run-' + [guid]::NewGuid().ToString('N'))
@@ -165,6 +166,22 @@ exit $response.ExitCode
     Assert ([string]::IsNullOrWhiteSpace($r.Text)) ('Headless CLI emitted a prompt: ' + $r.Text)
     Assert (-not (Test-Path -LiteralPath $r.Result.Session)) 'Headless CLI leaked session'
     $passed++
+    # The tool may replace its own .bat while it runs (self-update). cmd reads batch files while executing
+    # them, so nothing may be read from the file after PowerShell returns: the new content must never run.
+    $junk = "'@echo off`r`n' + ('echo HIJACKED& exit /b 99`r`n' * 20000)"
+    $replacing = "[IO.File]::WriteAllText(`$env:ELO_PATCH_SOURCE, $junk, [Text.Encoding]::ASCII)"
+    $selfReplace = [regex]::Replace($source, $backendPattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $replacing + "`r`nexit 7`r`n" })
+    $r = Invoke-Fixture $selfReplace
+    Assert ($r.Code -eq 7 -and $r.Text -notmatch 'HIJACKED') ('Template launcher ran content of the replaced file: exit ' + $r.Code)
+    $passed++
+    $packaged = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) 'ELO-Patch-Tools.bat'), [Text.Encoding]::UTF8)
+    $fake = "param([switch]`$LoadOnly)`r`nfunction Invoke-EloPackagedTool { param([string[]]`$Arguments) $replacing; [pscustomobject]@{ ExitCode=7; Output='replaced' } }`r`n"
+    $packagedReplace = [regex]::Replace($packaged, $backendPattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $fake })
+    foreach ($code in @(7, 0)) {
+        $r = Invoke-Fixture ($packagedReplace.Replace('ExitCode=7', "ExitCode=$code"))
+        Assert ($r.Code -eq $code -and $r.Text -match 'replaced' -and $r.Text -notmatch 'HIJACKED') ('Packaged launcher ran content of the replaced file: exit ' + $r.Code + ' ' + $r.Text.Substring(0, [Math]::Min(200, $r.Text.Length)))
+        $passed++
+    }
     Write-Host "PASS: $passed launcher checks"
 } finally {
     $env:TEMP = $oldTemp

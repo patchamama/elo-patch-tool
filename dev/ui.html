@@ -271,6 +271,7 @@ pre.cmd .c-str{color:#fca5a5}
 <li><button class="step" id="nav5" type="button" data-state="todo" disabled><span class="dot"><svg class="i"><use href="#i-file"/></svg></span><span class="lbl" data-i18n="step5"></span></button></li>
 </ol></nav>
 <div id="busy" class="busy" role="status" aria-live="polite" hidden><span class="spin"></span><span data-i18n="working"></span></div>
+<div id="updateBox" class="notice" role="status" hidden><p id="updateText"></p><div id="updateActions"><label class="confirm"><input id="updateConfirm" type="checkbox"><span data-i18n="updateConfirmText"></span></label><button id="updateTool" class="btn primary" type="button" disabled><svg class="i"><use href="#i-download"/></svg><span data-i18n="updateToolButton"></span></button></div></div>
 <pre id="error" class="banner" role="alert"></pre>
 <pre id="recoveryNotice" class="banner" role="alert"></pre>
 
@@ -328,6 +329,7 @@ pre.cmd .c-str{color:#fca5a5}
 <p id="scanOk" class="notice" role="status" hidden></p>
 <p id="envNote" class="notice" role="status" hidden></p>
 <p id="resultNotice" class="muted" role="status"></p>
+<p id="catalogNote" class="muted" role="status" hidden></p>
 <details><summary><svg class="i"><use href="#i-list"/></svg><span data-i18n="advanced"></span></summary><div class="body">
 <label class="field"><span data-i18n="searchPath"></span><input id="searchPath" type="text" maxlength="1024" autocomplete="off" spellcheck="false" aria-describedby="searchHelp"></label>
 <p id="searchHelp" class="muted" data-i18n="searchHelp"></p>
@@ -421,6 +423,7 @@ const messages = {
  continue:'Continue',back:'Back',startOver:'Scan again',advanced:'Advanced: search another folder',evidence:'Technical evidence',
  noIssue:'No security problem was detected in the {n} Java runtime(s) found.',noIssueUnknown:'No security problem was detected. However, {n} runtime(s) could not be evaluated against the vulnerability catalog, so this does not prove they are safe.',noIssueUpdate:'You can still update the Java used by ELO in step 3.',serviceAlertTitle:'ELO did not come back cleanly',loadCheck:'Sign in to ELO to confirm that it works; if it does not, restore the previous version. The automatic check only covers the state and ports of the services listed before confirming.',
  envMitigation:'Mitigation present in the environment ({scopes}), not verified in ELO. Running processes and services may not use it; vulnerable runtimes stay marked until Java is updated.',envMachine:'Machine',envUser:'User',
+ updateAvailable:'Version {latest} of this tool is available (running {current}).',updateInstalled:'Version {latest} is installed. Close the tool window and start ELO-Patch-Tools.bat again. The previous file was kept next to it.',updateConfirmText:'I want to download that version from GitHub and replace this tool. Its SHA256 is checked and the current file is kept.',updateToolButton:'Update tool',toolUpdateError:'The tool was not updated.',catalog_downloaded:'Vulnerability catalog downloaded from the latest GitHub release',catalog_installed:'Vulnerability catalog installed on this server',catalog_packaged:'Vulnerability catalog included in this tool',catalogUpdated:'updated {date}',catalogOffline:'GitHub could not be reached.',catalogDisabled:'The online check is disabled.',catalogRejected:'The downloaded catalog was not used.',
  scanningNow:'Scanning drives',foundN:'Java runtimes found: {n}.',foundNone:'No Java runtime found. Open “Advanced” to search another folder, then scan again.',
  updateDesc:'Installs the newest release of the same Java branch and vendor, even without a detected vulnerability. Verified backup, Java self-test, stop and restart of all ELO services, load check and rollback.',
  mitigateDesc:'Adds -XX:-UseBASE64Intrinsics to the machine environment. Quick and temporary; it is not a Java update.',
@@ -484,6 +487,7 @@ restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: this versi
  continue:'Weiter',back:'Zurück',startOver:'Erneut scannen',advanced:'Erweitert: anderen Ordner durchsuchen',evidence:'Technische Nachweise',
  noIssue:'In den {n} gefundenen Java-Runtimes wurde kein Sicherheitsproblem erkannt.',noIssueUnknown:'Es wurde kein Sicherheitsproblem erkannt. Allerdings konnten {n} Runtime(s) nicht anhand des Schwachstellenkatalogs bewertet werden; das beweist nicht, dass sie sicher sind.',noIssueUpdate:'Das von ELO verwendete Java kann in Schritt 3 trotzdem aktualisiert werden.',serviceAlertTitle:'ELO wurde nicht korrekt wieder gestartet',loadCheck:'Melden Sie sich bei ELO an; funktioniert es nicht, stellen Sie die vorherige Version wieder her. Die automatische Prüfung umfasst nur Status und Ports der vor der Bestätigung aufgeführten Dienste.',
  envMitigation:'Risikominderung in der Umgebung vorhanden ({scopes}), in ELO nicht geprüft. Laufende Prozesse und Dienste verwenden sie möglicherweise nicht; verwundbare Runtimes bleiben markiert, bis Java aktualisiert ist.',envMachine:'System',envUser:'Benutzer',
+ updateAvailable:'Version {latest} dieses Werkzeugs ist verfügbar (aktiv: {current}).',updateInstalled:'Version {latest} ist installiert. Schließen Sie das Fenster des Werkzeugs und starten Sie ELO-Patch-Tools.bat erneut. Die vorherige Datei wurde daneben aufbewahrt.',updateConfirmText:'Ich möchte diese Version von GitHub herunterladen und das Werkzeug ersetzen. Die SHA256 wird geprüft und die aktuelle Datei behalten.',updateToolButton:'Werkzeug aktualisieren',toolUpdateError:'Das Werkzeug wurde nicht aktualisiert.',catalog_downloaded:'Schwachstellenkatalog aus dem neuesten GitHub-Release geladen',catalog_installed:'Auf diesem Server installierter Schwachstellenkatalog',catalog_packaged:'In diesem Werkzeug enthaltener Schwachstellenkatalog',catalogUpdated:'Stand {date}',catalogOffline:'GitHub war nicht erreichbar.',catalogDisabled:'Die Online-Prüfung ist deaktiviert.',catalogRejected:'Der heruntergeladene Katalog wurde nicht verwendet.',
  scanningNow:'Laufwerke werden durchsucht',foundN:'Gefundene Java-Runtimes: {n}.',foundNone:'Keine Java-Runtime gefunden. Öffnen Sie „Erweitert“, um einen anderen Ordner zu durchsuchen, und scannen Sie erneut.',
  updateDesc:'Installiert die neueste Version desselben Java-Branches und Herstellers, auch ohne erkannte Schwachstelle. Geprüftes Backup, Java-Selbsttest, Stopp und Neustart aller ELO-Dienste, Ladeprüfung und Wiederherstellung.',
  mitigateDesc:'Ergänzt -XX:-UseBASE64Intrinsics in der Systemumgebung. Schnell und vorübergehend; kein Java-Update.',
@@ -547,6 +551,7 @@ restoreShort:'Dieses Backup wiederherstellen',backupRisk_vulnerable:'Verwundbar:
  continue:'Continuar',back:'Atrás',startOver:'Escanear de nuevo',advanced:'Avanzado: buscar en otra carpeta',evidence:'Evidencia técnica',
  noIssue:'No se ha detectado ningún problema de seguridad en los {n} runtimes de Java encontrados.',noIssueUnknown:'No se ha detectado ningún problema de seguridad. Sin embargo, {n} runtime(s) no se pudieron evaluar con el catálogo de vulnerabilidades, así que esto no demuestra que sean seguros.',noIssueUpdate:'Igualmente puedes actualizar el Java que usa ELO en el paso 3.',serviceAlertTitle:'ELO no volvió a levantar correctamente',loadCheck:'Inicia sesión en ELO para confirmar que funciona; si no, restaura la versión anterior. La comprobación automática solo cubre el estado y los puertos de los servicios listados antes de confirmar.',
  envMitigation:'Mitigación presente en el entorno ({scopes}), sin verificar en ELO. Los procesos y servicios en ejecución pueden no usarla; los runtimes vulnerables siguen marcados hasta actualizar Java.',envMachine:'Máquina',envUser:'Usuario',
+ updateAvailable:'Está disponible la versión {latest} de esta herramienta (en ejecución: {current}).',updateInstalled:'La versión {latest} está instalada. Cierra la ventana de la herramienta y vuelve a iniciar ELO-Patch-Tools.bat. El archivo anterior se conservó a su lado.',updateConfirmText:'Quiero descargar esa versión de GitHub y reemplazar esta herramienta. Se comprueba su SHA256 y se conserva el archivo actual.',updateToolButton:'Actualizar la herramienta',toolUpdateError:'La herramienta no se actualizó.',catalog_downloaded:'Catálogo de vulnerabilidades descargado del último release de GitHub',catalog_installed:'Catálogo de vulnerabilidades instalado en este servidor',catalog_packaged:'Catálogo de vulnerabilidades incluido en esta herramienta',catalogUpdated:'actualizado el {date}',catalogOffline:'No se pudo conectar con GitHub.',catalogDisabled:'La comprobación en línea está desactivada.',catalogRejected:'El catálogo descargado no se usó.',
  scanningNow:'Escaneando unidades',foundN:'Runtimes de Java encontrados: {n}.',foundNone:'No se encontró ningún runtime de Java. Abre «Avanzado» para buscar en otra carpeta y vuelve a escanear.',
  updateDesc:'Instala la última versión de la misma rama y fabricante de Java, aunque no se haya detectado una vulnerabilidad. Copia verificada, prueba de Java, parada y arranque de todos los servicios de ELO, comprobación de carga y reversión.',
  mitigateDesc:'Añade -XX:-UseBASE64Intrinsics al entorno de la máquina. Rápido y temporal; no es una actualización de Java.',
@@ -614,7 +619,7 @@ try {
 } catch (_) { /* storage unavailable: the link must be reopened after a refresh */ }
 const forgetToken = () => { try { sessionStorage.removeItem('eloSessionToken'); } catch (_) { } };
 let language = 'en', state = 'idle', rows = [], preview = null, pending = false, polling = false, lastError = '';
-let envState = null, vulns = [], backups = [], backupsKey = '', progress = null, checked = null, lastSuccessfulRefresh = null, security = {verifiedOn:null,advisories:[]};
+let onlineState = null, envState = null, vulns = [], backups = [], backupsKey = '', progress = null, checked = null, lastSuccessfulRefresh = null, security = {verifiedOn:null,advisories:[]};
 let lastWarnings = [], errorFromPoll = false, recoveryRequired = false, recoveryWarnings = [];
 let step = 1, awaitingScan = false, scanStartedAt = null, finalKind = '', canRestore = false, cardsKey = '', serviceWarning = null;
 const events = [], states = ['idle','scanning','cancelling','completed','cancelled','error'];
@@ -661,7 +666,7 @@ const errorMessages = Object.fromEntries(Object.entries({
  boundaryRejected:['loopback_only','host_rejected','origin_rejected','cross_site','origin_required'],
  expired:['preview_expired_or_mismatched','stale_preview'],
  updateRefused:['update_preview_refused'],updateRejected:['update_rejected_no_change'],updateRolledBack:['update_failed_rolled_back'],updateManualRecovery:['update_manual_recovery_required'],
- updateNotNeeded:['update_not_needed'],noBackup:['no_backup_for_target'],restoreFailed:['restore_failed_no_change'],
+ toolUpdateError:['tool_update_failed','tool_update_unavailable'], updateNotNeeded:['update_not_needed'],noBackup:['no_backup_for_target'],restoreFailed:['restore_failed_no_change'],
  rollbackFailed:['rollback_failed_manual_recovery_required'],manualRecovery:['manual_recovery_required_close_session'],
  rolledBack:['verification_failed_rolled_back'],probeFailed:['probe_failed_no_change'],
  updateUnavailable:['update_unavailable_provenance_compatibility_backup_replacement_rollback_not_verified'],
@@ -913,6 +918,24 @@ function renderEnvironment() {
  const scopes = [['machine','envMachine'],['user','envUser']].filter(([key]) => envState && envState[key] === 'Present').map(([,label]) => t(label));
  const message = scopes.length ? t('envMitigation').replace('{scopes}',() => scopes.join(', ')) : '';
  ['envNote','envNote2'].forEach(id => { $(id).textContent = message; toggle(id,!message); });
+}
+// The release check and the catalog in use; the tool is only replaced after an explicit confirmation.
+const validVersion = value => typeof value === 'string' && /^(?:[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4})?$/.test(value);
+const validOnline = value => keys(value,['checked','current','latest','available','installed','catalog']) && typeof value.checked === 'boolean' && typeof value.available === 'boolean' && ['current','latest','installed'].every(key => validVersion(value[key])) &&
+ keys(value.catalog,['source','updated','reason']) && ['downloaded','installed','packaged'].includes(value.catalog.source) && typeof value.catalog.updated === 'string' && /^(?:[0-9]{4}-[0-9]{2}-[0-9]{2})?$/.test(value.catalog.updated) && typeof value.catalog.reason === 'string' && /^[a-z_]{0,64}$/.test(value.catalog.reason);
+function renderOnline() {
+ const online = onlineState, installed = !!(online && online.installed), offered = !!(online && online.available && !installed);
+ const values = text => text.replace('{latest}',() => online.installed || online.latest).replace('{current}',() => online.current);
+ $('updateText').textContent = installed ? values(t('updateInstalled')) : offered ? values(t('updateAvailable')) : '';
+ toggle('updateBox',!installed && !offered); toggle('updateActions',!offered);
+ $('updateTool').disabled = !offered || pending || running() || recoveryRequired || !$('updateConfirm').checked;
+ let note = '';
+ if (online) {
+ const reason = online.catalog.reason;
+ note = t('catalog_'+online.catalog.source)+(online.catalog.updated ? ' ('+t('catalogUpdated').replace('{date}',() => online.catalog.updated)+')' : '')+'.';
+ if (reason) note += ' '+t(reason === 'github_unreachable' ? 'catalogOffline' : reason === 'online_check_disabled' ? 'catalogDisabled' : 'catalogRejected');
+ }
+ $('catalogNote').textContent = note; toggle('catalogNote',!note);
 }
 function renderAdvice(row) {
  renderScanAlert(); renderEnvironment();
@@ -1256,7 +1279,7 @@ $('aiProvider').onchange = () => { $('aiModel').replaceChildren(); cModels = [];
  rows.forEach(item => { const tr = document.createElement('tr'); cells(item).forEach(value => { const td = document.createElement('td'); td.textContent = value; tr.append(td); }); $('jvmRows').append(tr); });
  const labels = ['path','runtimeRoot','version','vendor','architecture','classification','eloRationale','classificationEvidence'];
  $('details').textContent = row ? cells(row).map((value,index) => t(labels[index])+': '+value).join('\n') : '';
- renderCards(); renderBackups(); renderAdvice(row); renderBehind(row); renderCommunity();
+ renderOnline(); renderCards(); renderBackups(); renderAdvice(row); renderBehind(row); renderCommunity();
  $('verifiedOn').textContent = security.verifiedOn ? t('verifiedDate')+': '+security.verifiedOn : t('noAdvisories');
  $('advisories').replaceChildren();
  security.advisories.forEach(item => {
@@ -1307,11 +1330,11 @@ async function refresh() {
  const status = await api('status');
  if (!keys(status,['state'],['progress','checked']) || !states.includes(status.state) || (status.progress !== undefined && (!Number.isFinite(status.progress) || status.progress < 0 || status.progress > 100)) || (status.checked !== undefined && (!Number.isSafeInteger(status.checked) || status.checked < 0))) throw 'invalid';
  const result = await api('results');
- if (!keys(result,['results','security'],['backups','vulnerabilities','environment']) || (result.environment !== undefined && (!keys(result.environment,['machine','user']) || !Object.values(result.environment).every(value => ['Present','Absent','Conflict','Unknown'].includes(value)))) || (result.vulnerabilities !== undefined && (!Array.isArray(result.vulnerabilities) || result.vulnerabilities.length > 32 || result.vulnerabilities.some(item => !validVuln(item)))) || (result.backups !== undefined && (!Array.isArray(result.backups) || result.backups.length > 50 || result.backups.some(item => !validBackup(item)) || new Set(result.backups.map(item => item.id)).size !== result.backups.length)) || !Array.isArray(result.results) || result.results.length > 250 || result.results.some(row => !validRow(row)) || new Set(result.results.map(row => row.id)).size !== result.results.length || !validSecurity(result.security)) throw 'invalid';
+ if (!keys(result,['results','security'],['backups','vulnerabilities','environment','online']) || (result.online !== undefined && !validOnline(result.online)) || (result.environment !== undefined && (!keys(result.environment,['machine','user']) || !Object.values(result.environment).every(value => ['Present','Absent','Conflict','Unknown'].includes(value)))) || (result.vulnerabilities !== undefined && (!Array.isArray(result.vulnerabilities) || result.vulnerabilities.length > 32 || result.vulnerabilities.some(item => !validVuln(item)))) || (result.backups !== undefined && (!Array.isArray(result.backups) || result.backups.length > 50 || result.backups.some(item => !validBackup(item)) || new Set(result.backups.map(item => item.id)).size !== result.backups.length)) || !Array.isArray(result.results) || result.results.length > 250 || result.results.some(row => !validRow(row)) || new Set(result.results.map(row => row.id)).size !== result.results.length || !validSecurity(result.security)) throw 'invalid';
  const nextRows = result.results;
  if (state !== status.state || JSON.stringify(rows) !== JSON.stringify(nextRows) || JSON.stringify(security) !== JSON.stringify(result.security)) clearPreview();
  if (status.state === 'scanning' && scanStartedAt === null) scanStartedAt = Date.now();
- state = status.state; rows = nextRows; security = result.security; backups = result.backups || []; vulns = result.vulnerabilities || []; envState = result.environment || null;
+ state = status.state; rows = nextRows; security = result.security; backups = result.backups || []; vulns = result.vulnerabilities || []; envState = result.environment || null; onlineState = result.online || null;
  if (state !== 'scanning' && state !== 'cancelling') scanStartedAt = null;
  // A finished scan moves the wizard on by itself; anything else releases the wait.
  if (awaitingScan && state === 'completed') { awaitingScan = false; if (rows.length) step = 2; }
@@ -1352,6 +1375,12 @@ async function getPreview(actionId, explicitId) {
  });
 }
 $('mitigate').onclick = () => getPreview('mitigate');
+$('updateConfirm').onchange = render;
+$('updateTool').onclick = () => {
+ if (!onlineState || !onlineState.available || !$('updateConfirm').checked) return;
+ const version = onlineState.latest;
+ return perform(async () => { await acknowledge('self-update',{version}); $('updateConfirm').checked = false; onlineState = {...onlineState,installed:version}; });
+};
 $('update').onclick = () => getPreview('update-runtime');
 $('restore').onclick = () => getPreview('restore-backup');
 $('apply').onclick = () => {

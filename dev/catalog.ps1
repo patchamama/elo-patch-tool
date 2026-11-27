@@ -160,3 +160,164 @@ function Resolve-EloLatestRelease {
     }
     return Assert-EloReleaseRecord $raw
 }
+
+# ---- Online: the latest release of this tool on GitHub, its shared catalog and the self-update. Only
+# GitHub HTTPS hosts are contacted, redirects are followed by hand, every asset is checked against the
+# release's SHA256SUMS.txt, and no information about the server is sent. The checksum detects a damaged
+# or altered download; it cannot protect against a compromised repository account.
+$script:EloToolRepository = 'patchamama/elo-patch-tool'
+$script:EloGitHubHosts = @('api.github.com', 'github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com')
+
+function Assert-EloGitHubAddress {
+    param([string]$Address)
+    $uri = $null
+    if (-not [Uri]::TryCreate($Address, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -cne 'https' -or -not $uri.IsDefaultPort -or $uri.UserInfo -or
+        $uri.HostNameType -ne [UriHostNameType]::Dns -or $script:EloGitHubHosts -cnotcontains $uri.DnsSafeHost.ToLowerInvariant()) { throw 'unverified_https_host' }
+    return $uri
+}
+function Invoke-EloGitHubFetch {
+    # Real network adapter: bytes of one GitHub resource, size-bounded, short time-outs.
+    param([string]$Url, [int]$MaxBytes = 1MB, [int]$TimeoutMilliseconds = 6000)
+    $previous = [Net.ServicePointManager]::SecurityProtocol
+    [Net.ServicePointManager]::SecurityProtocol = $previous -bor [Net.SecurityProtocolType]::Tls12
+    try {
+        $uri = Assert-EloGitHubAddress $Url
+        for ($hop = 0; $hop -le 5; $hop++) {
+            $request = [Net.HttpWebRequest]::Create($uri)
+            $request.AllowAutoRedirect = $false; $request.UseDefaultCredentials = $false
+            $request.UserAgent = 'elo-patch-tool'
+            $request.Timeout = $TimeoutMilliseconds; $request.ReadWriteTimeout = $TimeoutMilliseconds
+            $response = $null
+            try {
+                $response = $request.GetResponse()
+                $status = [int]$response.StatusCode
+                if (@(301, 302, 303, 307, 308) -contains $status) {
+                    $next = $null
+                    if (-not [Uri]::TryCreate($uri, [string]$response.Headers['Location'], [ref]$next)) { throw 'download_failed' }
+                    $uri = Assert-EloGitHubAddress $next.AbsoluteUri
+                    continue
+                }
+                if ($status -ne 200) { throw 'download_failed' }
+                $stream = $response.GetResponseStream(); $memory = New-Object IO.MemoryStream
+                $buffer = New-Object byte[] 65536; $watch = [Diagnostics.Stopwatch]::StartNew()
+                while (($count = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    if ($memory.Length + $count -gt $MaxBytes -or $watch.Elapsed.TotalSeconds -gt 120) { throw 'download_limit' }
+                    $memory.Write($buffer, 0, $count)
+                }
+                return , $memory.ToArray()
+            } finally { if ($response) { $response.Dispose() } }
+        }
+        throw 'download_failed'
+    } finally { [Net.ServicePointManager]::SecurityProtocol = $previous }
+}
+function Get-EloToolVersion {
+    # The version shown in the packaged page is the single version of the running tool.
+    param([string]$Html)
+    if ($Html -cmatch 'id="appVersion" class="version">v([0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4})<') { return $Matches[1] }
+    return ''
+}
+function Test-EloNewerVersion {
+    param([string]$Candidate, [string]$Current)
+    try { return ([version]$Candidate) -gt ([version]$Current) } catch { return $false }
+}
+function Get-EloLatestToolRelease {
+    param([scriptblock]$Fetch = { param($Url, $MaxBytes) Invoke-EloGitHubFetch $Url $MaxBytes })
+    $bytes = & $Fetch ('https://api.github.com/repos/' + $script:EloToolRepository + '/releases/latest') 1MB
+    try { $data = [Text.Encoding]::UTF8.GetString([byte[]]$bytes) | ConvertFrom-Json } catch { throw 'release_unreadable' }
+    if ($data.draft -or $data.prerelease -or [string]$data.tag_name -cnotmatch '^v([0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4})$') { throw 'release_unreadable' }
+    $version = $Matches[1]
+    $prefix = 'https://github.com/' + $script:EloToolRepository + '/releases/download/v' + $version + '/'
+    $assets = @{}
+    foreach ($asset in @($data.assets)) {
+        $name = [string]$asset.name
+        # Only the exact download path of this release is accepted, never an address from elsewhere.
+        if (@('ELO-Patch-Tools.bat', 'vulndb.json', 'SHA256SUMS.txt') -ccontains $name -and [string]$asset.browser_download_url -ceq ($prefix + $name)) { $assets[$name] = $prefix + $name }
+    }
+    return @{ Version = $version; Assets = $assets }
+}
+function Get-EloReleaseAsset {
+    param($Release, [string]$Name, [scriptblock]$Fetch, [int]$MaxBytes = 1MB)
+    if (-not $Release.Assets.ContainsKey($Name) -or -not $Release.Assets.ContainsKey('SHA256SUMS.txt')) { throw 'release_asset_missing' }
+    $sums = [Text.Encoding]::UTF8.GetString([byte[]](& $Fetch $Release.Assets['SHA256SUMS.txt'] 64KB))
+    $expected = [regex]::Match($sums, '(?m)^([a-fA-F0-9]{64})[ \t]+\*?' + [regex]::Escape($Name) + '[ \t]*\r?$')
+    if (-not $expected.Success) { throw 'checksum_missing' }
+    $bytes = [byte[]](& $Fetch $Release.Assets[$Name] $MaxBytes)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $actual = ([BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '') } finally { $sha.Dispose() }
+    if ($actual -ine $expected.Groups[1].Value) { throw 'checksum_mismatch' }
+    return , $bytes
+}
+function Use-EloOnlineCatalog {
+    # With no installed catalog, the catalog of the latest release is used for this session (memory only).
+    # It must come from a release at least as new as the tool, be at least as recent as the packaged one,
+    # pass the same validation and keep every packaged vulnerability.
+    param($Release, [string]$CurrentVersion, [scriptblock]$Fetch, [string]$ProgramDataRoot = $env:ProgramData)
+    $packaged = Read-EloVulnDbFile (Join-Path $PSScriptRoot 'vulndb.json')
+    $installed = Get-EloVulnDbPath $ProgramDataRoot
+    if ($installed -cne (Join-Path $PSScriptRoot 'vulndb.json')) {
+        try { $db = Read-EloVulnDbFile $installed; return @{ Source = 'installed'; Updated = [string]$db.updated; Reason = '' } } catch { }
+    }
+    $result = @{ Source = 'packaged'; Updated = [string]$packaged.updated; Reason = '' }
+    $temp = $null
+    try {
+        if (Test-EloNewerVersion $CurrentVersion $Release.Version) { throw 'release_older_than_tool' }
+        $bytes = Get-EloReleaseAsset -Release $Release -Name 'vulndb.json' -Fetch $Fetch
+        $temp = Join-Path ([IO.Path]::GetTempPath()) ('elo-catalog-' + [guid]::NewGuid().ToString('N') + '.json')
+        [IO.File]::WriteAllBytes($temp, $bytes)
+        $db = Read-EloVulnDbFile $temp
+        if ([string]$db.updated -cnotmatch '^\d{4}-\d{2}-\d{2}$' -or [string]::CompareOrdinal([string]$db.updated, [string]$packaged.updated) -lt 0) { throw 'catalog_older_than_packaged' }
+        $ids = @(Get-EloActiveVulnerabilities $db | ForEach-Object { [string]$_.id })
+        if (@(Get-EloActiveVulnerabilities $packaged | Where-Object { $ids -cnotcontains [string]$_.id }).Count -gt 0) { throw 'catalog_drops_vulnerability' }
+        $script:EloVulnCache = $db
+        $result = @{ Source = 'downloaded'; Updated = [string]$db.updated; Reason = '' }
+    } catch {
+        $code = [string]$_.Exception.Message
+        if ($code -cmatch '^([a-z_]{1,64})') { $result.Reason = $Matches[1] } else { $result.Reason = 'download_failed' }
+    } finally { if ($temp -and (Test-Path -LiteralPath $temp)) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } }
+    return $result
+}
+function Get-EloOnlineState {
+    # One check per run. It never throws: offline or broken answers leave the packaged catalog in use.
+    param([string]$CurrentVersion, [scriptblock]$Fetch = { param($Url, $MaxBytes) Invoke-EloGitHubFetch $Url $MaxBytes },
+        [string]$ProgramDataRoot = $env:ProgramData, [switch]$Disabled)
+    $state = @{ Checked = $false; Current = $CurrentVersion; Latest = ''; Available = $false; Catalog = @{ Source = 'packaged'; Updated = ''; Reason = '' } }
+    try {
+        $current = Read-EloVulnDbFile (Get-EloVulnDbPath $ProgramDataRoot)
+        $state.Catalog.Updated = [string]$current.updated
+        if ((Get-EloVulnDbPath $ProgramDataRoot) -cne (Join-Path $PSScriptRoot 'vulndb.json')) { $state.Catalog.Source = 'installed' }
+    } catch { }
+    if ($Disabled) { $state.Catalog.Reason = 'online_check_disabled'; return $state }
+    try { $release = Get-EloLatestToolRelease -Fetch $Fetch } catch { $state.Catalog.Reason = 'github_unreachable'; return $state }
+    $state.Checked = $true; $state.Latest = $release.Version
+    $state.Available = (Test-EloNewerVersion $release.Version $CurrentVersion)
+    try { $state.Catalog = Use-EloOnlineCatalog -Release $release -CurrentVersion $CurrentVersion -Fetch $Fetch -ProgramDataRoot $ProgramDataRoot } catch { $state.Catalog.Reason = 'download_failed' }
+    return $state
+}
+function Format-EloCatalogNotice {
+    param($State)
+    $text = 'Vulnerability catalog: ' + $State.Catalog.Source + ' (updated ' + $State.Catalog.Updated + ')'
+    if ($State.Catalog.Reason) { $text += ' [' + $State.Catalog.Reason + ']' }
+    return $text
+}
+function Install-EloToolUpdate {
+    # Replaces the .bat with the verified one of the confirmed release; the previous file is kept next to it.
+    # The running session keeps using its extracted files: the new version runs after a restart.
+    param([string]$BatPath, [string]$CurrentVersion, [string]$ExpectedVersion,
+        [scriptblock]$Fetch = { param($Url, $MaxBytes) Invoke-EloGitHubFetch $Url $MaxBytes }, [scriptblock]$Clock = { [datetime]::UtcNow })
+    if (-not $BatPath -or $BatPath -notmatch '(?i)\.bat$' -or -not (Test-Path -LiteralPath $BatPath -PathType Leaf)) { throw 'tool_path_unavailable' }
+    if ((Get-Item -LiteralPath $BatPath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'tool_path_unavailable' }
+    $release = Get-EloLatestToolRelease -Fetch $Fetch
+    if ($release.Version -cne $ExpectedVersion) { throw 'release_changed' }
+    if (-not (Test-EloNewerVersion $release.Version $CurrentVersion)) { throw 'tool_update_not_needed' }
+    $bytes = Get-EloReleaseAsset -Release $release -Name 'ELO-Patch-Tools.bat' -Fetch $Fetch -MaxBytes 8MB
+    $text = [Text.Encoding]::UTF8.GetString($bytes)
+    if (-not $text.StartsWith('@echo off') -or (Get-EloToolVersion $text) -cne $release.Version) { throw 'downloaded_tool_invalid' }
+    $backup = $BatPath + '.backup-' + (& $Clock).ToString('yyyyMMddHHmmss')
+    if (Test-Path -LiteralPath $backup) { throw 'tool_backup_exists' }
+    $temp = $BatPath + '.new-' + [guid]::NewGuid().ToString('N')
+    try {
+        [IO.File]::WriteAllBytes($temp, $bytes)
+        [IO.File]::Replace($temp, $BatPath, $backup)
+    } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } }
+    return @{ Version = $release.Version; Backup = $backup; Path = $BatPath }
+}

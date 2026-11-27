@@ -40,7 +40,7 @@ function boot(hash = '#token=test-session-token', storage = null, local = memory
  const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(m => [m[1],new Element(m[1])]));
  const translated = [...html.matchAll(/data-i18n="([^"]+)"/g)].map(m => { const el=new Element(); el.dataset.i18n=m[1]; return el; });
  const calls=[],downloads=[],timers=[];
- let status={state:'completed',progress:100,checked:4}, results=[row()], security=securityFixture(), backups=null, vulns=null, environment=null, communityHandler=null;
+ let status={state:'completed',progress:100,checked:4}, results=[row()], security=securityFixture(), backups=null, vulns=null, environment=null, online=null, communityHandler=null;
  let preview={previewId:'preview_1',summary:both('Backup then change <script>unsafe()</script>','Sichern, dann ändern'),warnings:[both('Check compatibility','Kompatibilität prüfen')]};
  let failure=null, errorBody={error:'operation_failed',warnings:[]}, raw=null, ack={ok:true};
  const history={replaceState(...args) { history.args=args; }};
@@ -63,13 +63,13 @@ function boot(hash = '#token=test-session-token', storage = null, local = memory
  assert.deepEqual(Object.keys(JSON.parse(options.body)),['language'],'no client-provided evidence');
  return new Response(JSON.stringify({html:'<!doctype html><html lang="'+language+'"><body>safe report</body></html>',pdf:btoa('%PDF-1.4 safe'),fileName:'elo-technical-SRV01-'+language}));
  }
- const body=path.endsWith('/status') ? status : path.endsWith('/results') ? {results,security,...(backups === null ? {} : {backups}),...(vulns === null ? {} : {vulnerabilities:vulns}),...(environment === null ? {} : {environment})} : path.endsWith('/preview') ? preview : ack;
+ const body=path.endsWith('/status') ? status : path.endsWith('/results') ? {results,security,...(backups === null ? {} : {backups}),...(vulns === null ? {} : {vulnerabilities:vulns}),...(environment === null ? {} : {environment}),...(online === null ? {} : {online})} : path.endsWith('/preview') ? preview : ack;
  return new Response(JSON.stringify(body));
  }};
  vm.runInNewContext(scripts[0][1],context,{timeout:2000});
  return {local,el:id => elements.get(id),calls,downloads,history,translated,document,
  poll:async () => { await timers[0](); await tick(); },
- status:value => { status=value; },backups:value => { backups=value; },vulns:value => { vulns=value; },community:value => { communityHandler=value; },results:value => { results=value; },environment:value => { environment=value; },security:value => { security=value; },preview:value => { preview=value; },failure:(value,body={error:'operation_failed',warnings:[]}) => { failure=value; errorBody=body; },raw:value => { raw=value; },ack:value => { ack=value; }};
+ status:value => { status=value; },backups:value => { backups=value; },vulns:value => { vulns=value; },community:value => { communityHandler=value; },results:value => { results=value; },environment:value => { environment=value; },online:value => { online=value; },security:value => { security=value; },preview:value => { preview=value; },failure:(value,body={error:'operation_failed',warnings:[]}) => { failure=value; errorBody=body; },raw:value => { raw=value; },ack:value => { ack=value; }};
 }
 (async () => {
  const technical=boot(); await tick();
@@ -742,6 +742,23 @@ function boot(hash = '#token=test-session-token', storage = null, local = memory
  changeLocale(envUi,'es'); assert(envUi.el('envNote').textContent.includes('Mitigación presente en el entorno (Máquina), sin verificar en ELO')); changeLocale(envUi,'en');
  envUi.environment({machine:'Conflict',user:'Unknown'}); await envUi.poll(); assert.equal(envUi.el('envNote').attrs.hidden,'');
  envUi.environment({machine:'yes',user:'Absent'}); await envUi.poll(); assert(envUi.el('error').textContent.includes('invalid response'));
+ // ---- catalog source and tool update: offered, explicitly confirmed, then a restart is requested
+ const upUi = boot(); await tick();
+ assert.equal(upUi.el('updateBox').attrs.hidden,''); assert.equal(upUi.el('catalogNote').attrs.hidden,'');
+ const onlineState = (over={}) => ({checked:true,current:'1.4.0',latest:'1.5.0',available:true,installed:'',catalog:{source:'downloaded',updated:'2026-12-01',reason:''},...over});
+ upUi.online(onlineState()); await upUi.poll();
+ assert.equal(upUi.el('updateBox').attrs.hidden,undefined); assert(upUi.el('updateText').textContent.includes('1.5.0') && upUi.el('updateText').textContent.includes('1.4.0'));
+ assert(upUi.el('catalogNote').textContent.includes('downloaded from the latest GitHub release') && upUi.el('catalogNote').textContent.includes('2026-12-01'));
+ assert.equal(upUi.el('updateTool').disabled,true,'not without confirmation');
+ upUi.el('updateConfirm').checked=true; upUi.el('updateConfirm').onchange(); assert.equal(upUi.el('updateTool').disabled,false);
+ await upUi.el('updateTool').click();
+ const sent=upUi.calls.filter(call => call.path === '/api/self-update'); assert.equal(sent.length,1); assert.deepEqual(JSON.parse(sent[0].options.body),{version:'1.5.0'});
+ upUi.online(onlineState({installed:'1.5.0'})); await upUi.poll();
+ assert(upUi.el('updateText').textContent.includes('Close the tool window')); assert.equal(upUi.el('updateActions').attrs.hidden,'');
+ upUi.online(onlineState({available:false,latest:'1.4.0',catalog:{source:'packaged',updated:'2026-11-27',reason:'github_unreachable'}})); await upUi.poll();
+ assert.equal(upUi.el('updateBox').attrs.hidden,''); assert(upUi.el('catalogNote').textContent.includes('included in this tool') && upUi.el('catalogNote').textContent.includes('GitHub could not be reached'));
+ changeLocale(upUi,'es'); assert(upUi.el('catalogNote').textContent.includes('incluido en esta herramienta')); changeLocale(upUi,'en');
+ upUi.online(onlineState({latest:'<img>'})); await upUi.poll(); assert(upUi.el('error').textContent.includes('invalid response'));
  console.log('PASS: JVM evidence/export, exact advisory allowlist, bounded errors/warnings, admin/access denial, rollback/recovery lock, unavailable update, locales and token security');
 })().catch(error => { console.error(error); process.exitCode=1; });
 '@

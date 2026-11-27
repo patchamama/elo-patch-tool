@@ -25,6 +25,11 @@ Usage (embedded launcher): ELO-Patch-Tools.bat [options]
   --update-runtime        Separate option: update the selected runtime to the newest release of its branch
                           (Eclipse Temurin / Azul Zulu). Needs --target N --confirm-admin --confirm-update and
                           a typed APPLY UPDATE; a verified backup ZIP and automatic rollback are included.
+  --check-update          Ask GitHub whether a newer release of this tool exists. Read-only.
+  --self-update           Replace this .bat with the newest release after its SHA256 is verified; the current file
+                          is kept as a backup. Needs --confirm-update and a typed APPLY TOOL UPDATE. Restart afterwards.
+                          With no installed catalog, a scan uses the vulndb.json of the latest GitHub release.
+                          Set ELO_PATCH_NO_UPDATE_CHECK=1 to disable every GitHub request.
   --catalog-validate FILE Validate a vulnerability catalog (JSON) without using it. Read-only.
   --catalog-simulate ID|FILE  Replay the catalog entry's (or every entry of a FILE, e.g. an AI draft) simulated java output through the real classifier
                           (shows how the vulnerability would be detected; no Java is run). Read-only.
@@ -262,7 +267,7 @@ function Invoke-EloCli {
         $options = @{}
         $allowed = @('--help','--cli','--scan','--json','--no-browser','--keep-temp',
             '--manual-path','--manual','--mitigate','--target','--confirm-admin',
-            '--confirm-mitigation','--confirm-update','--update-runtime',
+            '--confirm-mitigation','--confirm-update','--update-runtime','--check-update','--self-update',
             '--catalog-validate','--catalog-install','--catalog-simulate','--catalog-list','--catalog-restore')
         for ($i=0; $i -lt $Arguments.Count; $i++) {
             $arg = $Arguments[$i]
@@ -274,6 +279,31 @@ function Invoke-EloCli {
                 $value = $Arguments[$i]
             }
             $options[$arg] = $value
+        }
+        if ($options.ContainsKey('--check-update') -or $options.ContainsKey('--self-update')) {
+            $apply = $options.ContainsKey('--self-update')
+            $extra = @($options.Keys | Where-Object { @('--cli','--json','--keep-temp','--check-update','--self-update','--confirm-update') -cnotcontains $_ })
+            if ($extra.Count -gt 0 -or ($apply -and $options.ContainsKey('--check-update')) -or (-not $apply -and $options.ContainsKey('--confirm-update'))) { throw 'Online options cannot be combined with other modes.' }
+            if ($apply -and -not $options.ContainsKey('--confirm-update')) { throw '--self-update requires --confirm-update.' }
+            $code = 1
+            if ($Actions['CheckUpdate'] -isnot [scriptblock] -or $Actions['SelfUpdate'] -isnot [scriptblock]) { throw 'Trusted action backend not available.' }
+            $state = & $Actions.CheckUpdate
+            if (-not $state.Checked) { throw ('GitHub could not be checked: ' + [string]$state.Catalog.Reason) }
+            $report.action = @{ result = $state }
+            if ($apply) {
+                if (-not $state.Available) { throw 'No newer release is available.' }
+                foreach ($name in @('IsInteractive','Write','ReadLine')) {
+                    if ($Console[$name] -isnot [scriptblock]) { throw 'Interactive console required; no action performed.' }
+                }
+                if ((& $Console.IsInteractive) -ne $true) { throw 'Interactive console required; noninteractive action refused.' }
+                $null = & $Console.Write ('This replaces the tool ' + $state.Current + ' with release ' + $state.Latest + ' from GitHub. The current file is kept as a backup. Type APPLY TOOL UPDATE to continue; anything else cancels:')
+                if ((& $Console.ReadLine) -cne 'APPLY TOOL UPDATE') { throw 'Tool update cancelled; no action performed.' }
+                $report.readOnly = $false
+                $report.action.installed = & $Actions.SelfUpdate $state.Current $state.Latest
+            }
+            $code = 0
+            if ($json) { $output = ConvertTo-Json -InputObject $report -Depth 30 -Compress } else { $output = "ELO Patch Tools update`r`n" + (ConvertTo-Json -InputObject $report -Depth 30) }
+            return [pscustomobject]@{ ExitCode = $code; Output = $output }
         }
         $catalogMode = @('--catalog-validate','--catalog-install','--catalog-simulate','--catalog-list','--catalog-restore') | Where-Object { $options.ContainsKey($_) }
         $modes = @('--help','--manual','--mitigate','--update-runtime') | Where-Object { $options.ContainsKey($_) }

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updated": "2026-11-25",
+  "updated": "2026-11-27",
   "description": "Vulnerability catalog of ELO Patch Tools. Everything the tool knows about a vulnerability lives here: how to detect it (java.exe argument lists + expect patterns), the problem message, the actions that fix it and the final report text. Add an entry to support a new vulnerability. No passwords or API keys belong in this file.",
   "sources": [
     {

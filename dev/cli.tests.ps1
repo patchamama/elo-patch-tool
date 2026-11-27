@@ -38,7 +38,27 @@ function Invoke-InteractiveTestCli {
     param($Arguments, $Scanner, $Actions)
     Invoke-EloCli -Arguments $Arguments -Scanner $Scanner -Actions $Actions -Console $console
 }
+$script:selfUpdates=0
+$onlineActions=@{
+    CheckUpdate={ @{Checked=$true;Current='1.4.0';Latest='1.5.0';Available=$true;Catalog=@{Source='downloaded';Updated='2026-12-01';Reason=''}} }
+    SelfUpdate={ param($Current,$Expected) $script:selfUpdates++; @{Version=$Expected;Backup='C:\Tools\backup'} }
+}
+$r = Invoke-EloCli -Arguments @('--cli','--check-update','--json') -Scanner $scanner -Actions $onlineActions
+Assert ($r.ExitCode -eq 0 -and (ConvertFrom-Json $r.Output).action.result.Latest -ceq '1.5.0' -and $script:selfUpdates -eq 0 -and $script:scanCalls -eq 0) 'check-update reports and changes nothing'
+$r = Invoke-EloCli -Arguments @('--cli','--self-update','--json') -Scanner $scanner -Actions $onlineActions
+Assert ($r.ExitCode -ne 0 -and $script:selfUpdates -eq 0) 'self-update needs --confirm-update'
+$r = Invoke-EloCli -Arguments @('--cli','--self-update','--confirm-update','--json') -Scanner $scanner -Actions $onlineActions -Console @{IsInteractive={ $false }}
+Assert ($r.ExitCode -ne 0 -and $script:selfUpdates -eq 0) 'self-update is refused without an interactive console'
+$typed=@{IsInteractive={ $true };Write={ param($Text) };ReadLine={ 'no' }}
+$r = Invoke-EloCli -Arguments @('--cli','--self-update','--confirm-update','--json') -Scanner $scanner -Actions $onlineActions -Console $typed
+Assert ($r.ExitCode -ne 0 -and $script:selfUpdates -eq 0) 'self-update is cancelled unless the phrase is typed'
+$typed.ReadLine={ 'APPLY TOOL UPDATE' }
+$r = Invoke-EloCli -Arguments @('--cli','--self-update','--confirm-update','--json') -Scanner $scanner -Actions $onlineActions -Console $typed
+Assert ($r.ExitCode -eq 0 -and $script:selfUpdates -eq 1) 'a typed confirmation installs the update'
+$r = Invoke-EloCli -Arguments @('--cli','--check-update','--scan','--json') -Scanner $scanner -Actions $onlineActions
+Assert ($r.ExitCode -ne 0) 'online modes cannot be combined with other modes'
 $r = Invoke-EloCli -Arguments @('--help') -Scanner $scanner
+Assert ($r.Output.Contains('--check-update') -and $r.Output.Contains('--self-update') -and $r.Output.Contains('ELO_PATCH_NO_UPDATE_CHECK')) 'help documents the online options'
 Assert ($r.ExitCode -eq 0 -and $r.Output -match 'README' -and $r.Output -match 'JAVA_TOOL_OPTIONS') 'complete help'
 Assert ($r.Output.Contains('ready fixed or removable drives C: through Z:') -and $r.Output.Contains('\java\bin\java.exe') -and $r.Output.Contains('\ELO\java\bin\java.exe')) 'help specifies drive scope and exact root layouts'
 Assert ($r.Output.Contains('after root checks') -and $r.Output.Contains('depth 5') -and $r.Output.Contains('10,000 entries') -and $r.Output -notmatch 'searched before drive roots') 'help specifies optional bounded manual search order'

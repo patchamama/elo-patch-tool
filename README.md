@@ -107,6 +107,15 @@ move "C:\ELO\java.restore\tree" "C:\ELO\java"
 
 The ZIP holds `manifest.json` (every file, size, SHA256, permissions) and a `tree\` folder with the runtime. The CLI has no restore command.
 
+## Online catalog and tool updates
+
+When the web UI starts, and before a command-line scan, the tool asks GitHub for the latest release of `patchamama/elo-patch-tool`. No information about the server is sent; as with any request, GitHub sees the server's IP address. Set `ELO_PATCH_NO_UPDATE_CHECK=1` to disable every GitHub request.
+
+- **Catalog.** If no catalog is installed in `C:\ProgramData\ELO-Patch-Toolsulndb.json`, the `vulndb.json` of the latest release is used automatically for that run (it is not saved). It is used only if the release is not older than the running tool, its SHA256 matches `SHA256SUMS.txt`, it passes validation, it is not older than the packaged catalog and it keeps every packaged vulnerability. Otherwise, or without network, the packaged catalog is used. The page and the console say which one is in use.
+- **Tool update.** A newer release is only announced. It is installed after you confirm it on the page, or with `--cli --self-update --confirm-update` plus the typed phrase `APPLY TOOL UPDATE` (`--cli --check-update` only asks). The `.bat` is checked against the release SHA256, the previous file is kept as `ELO-Patch-Tools.bat.backup-<timestamp>`, and the new version runs after you restart the tool.
+- **Trust.** The checksum detects a damaged or altered download. It comes from the same release, so it cannot protect against a compromised repository account; releases are not signed.
+- **First time.** Versions up to 1.3.1 cannot update themselves: replace the file by hand once.
+
 ## The vulnerability catalog (`dev/vulndb.json`)
 
 Everything the tool knows about a vulnerability lives in **one JSON file** that is shared in this repository (it never contains passwords or API keys). The scan, the web UI, the CLI, the restore warnings and the technical report all read it, so supporting a new vulnerability is an edit of the JSON, not of the code.
@@ -189,6 +198,7 @@ The web UI, the technical report and the catalog texts are available in **Englis
 
 - Windows with Windows PowerShell 5.1 (the execution policy must allow it; the launcher never overrides it).
 - Administrator session for the update and the mitigation.
+- Optional: `api.github.com`, `github.com`, `objects.githubusercontent.com` and `release-assets.githubusercontent.com` for the release check, the shared catalog and the tool update.
 - Network access to `api.azul.com`, `cdn.azul.com`, `api.adoptium.net`, `github.com` and `release-assets.githubusercontent.com` for the update (the system proxy is honoured).
 - Nothing else has to be installed to use the tool (the community helper in `tools/community` is optional and asks first).
 - Run discovery only on trusted installations: obtaining a version executes the discovered `java.exe`.
@@ -207,6 +217,7 @@ The web UI, the technical report and the catalog texts are available in **Englis
 - `dev/*.tests.ps1` — deterministic tests (vulndb, scan, server, cli, launcher, report, update, integration) in PowerShell 5.1; `dev/ui.tests.ps1` also needs PowerShell 7 and Node.js.
 - `dev/update.live.tests.ps1` — opt-in (`ELO_LIVE_UPDATE_TEST=1`, administrator, network, ~1.5 GB): updates, restores and rolls back scratch Temurin 17, Zulu 17 and Zulu 8 runtimes through the server API.
 - `dev/e2e/wizard.e2e.js` — opt-in (`ELO_E2E=1`, Chrome, `npm install --prefix dev/e2e`): real server + real browser through scan, update, report, restore and start over.
+- `dev/online.tests.ps1` — release check, online catalog and self-update against a simulated GitHub.
 - `tools/community` — `npm test --prefix tools/community` (Node, no network).
 - After editing any file in `dev/`, run `pwsh dev/build-bat.ps1` to regenerate the BAT.
 

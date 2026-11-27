@@ -14,12 +14,10 @@ if not defined ELO_PATCH_BASE exit /b 1
 for /f "usebackq delims=" %%D in (`powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $dir=$null; try { $files=@{BOOTSTRAP_PS='launcher.ps1';BACKEND_PS='backend.ps1';SCAN_PS='scan.ps1';SERVER_PS='server.ps1';CLI_PS='cli.ps1';UI_HTML='ui.html';REPORT_PS='report.ps1';UPDATE_PS='update.ps1';CATALOG_PS='catalog.ps1';VULNDB_PS='vulndb.ps1';VULNDB_JSON='vulndb.json'}; $blocks=@{}; $active=$null; $buffer=New-Object 'System.Collections.Generic.List[string]'; foreach($line in [IO.File]::ReadAllLines($env:ELO_PATCH_SOURCE,[Text.Encoding]::UTF8)) { if($line.TrimStart().StartsWith('::ELO_PATCH_',[StringComparison]::OrdinalIgnoreCase)) { if($line -cnotmatch '^::ELO_PATCH_(BEGIN|END):(BOOTSTRAP_PS|BACKEND_PS|SCAN_PS|SERVER_PS|CLI_PS|UI_HTML|REPORT_PS|UPDATE_PS|CATALOG_PS|VULNDB_PS|VULNDB_JSON)$') { throw 'Malformed extraction marker' }; $kind=$Matches[1]; $name=$Matches[2]; if($kind -ceq 'BEGIN') { if($null -ne $active -or $blocks.ContainsKey($name)) { throw 'Duplicate or nested extraction marker' }; $active=$name; $buffer.Clear() } else { if($active -cne $name) { throw 'Unmatched extraction marker' }; $blocks[$name]=[string]::Join([Environment]::NewLine,$buffer); $active=$null } } elseif($null -ne $active) { $buffer.Add($line) } }; if($null -ne $active -or $blocks.Count -ne $files.Count) { throw 'Missing extraction marker' }; $id=[guid]::NewGuid().ToString('N'); $dir=Join-Path $env:ELO_PATCH_BASE ('elo-patch-'+$id); [void][IO.Directory]::CreateDirectory($dir); foreach($name in $files.Keys) { [IO.File]::WriteAllText((Join-Path $dir $files[$name]),$blocks[$name],[Text.Encoding]::UTF8) }; Write-Output $id } catch { if($null -ne $dir -and [IO.Directory]::Exists($dir)) { [IO.Directory]::Delete($dir,$true) }; [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"`) do set "ELO_PATCH_SESSION=%ELO_PATCH_BASE%\elo-patch-%%D"
 if not defined ELO_PATCH_SESSION exit /b 1
 rem Keep a live console for CLI confirmation; read-only modes never prompt.
-powershell.exe -NoProfile -File "%ELO_PATCH_SESSION%\launcher.ps1" %*
-set "ELO_PATCH_EXIT=%errorlevel%"
 rem Also clean up when policy prevents the bootstrap from starting.
-if exist "%ELO_PATCH_SESSION%\launcher.ps1" if not exist "%ELO_PATCH_SESSION%\keep-temp" powershell.exe -NoProfile -NonInteractive -Command "try { [IO.Directory]::Delete($env:ELO_PATCH_SESSION,$true) } catch { [Console]::Error.WriteLine('Session cleanup failed.'); exit 1 }"
-if errorlevel 1 if "%ELO_PATCH_EXIT%"=="0" set "ELO_PATCH_EXIT=1"
-exit /b %ELO_PATCH_EXIT%
+rem Everything after PowerShell is ONE line: cmd loads it before running it and never reads this file
+rem again, so the tool can safely replace this .bat (self-update) while it runs.
+powershell.exe -NoProfile -File "%ELO_PATCH_SESSION%\launcher.ps1" %* & call set "ELO_PATCH_EXIT=%%errorlevel%%" & (if exist "%ELO_PATCH_SESSION%\launcher.ps1" if not exist "%ELO_PATCH_SESSION%\keep-temp" powershell.exe -NoProfile -NonInteractive -Command "try { [IO.Directory]::Delete($env:ELO_PATCH_SESSION,$true) } catch { [Console]::Error.WriteLine('Session cleanup failed.'); exit 1 }") & call exit /b %%ELO_PATCH_EXIT%%
 
 ::ELO_PATCH_BEGIN:BOOTSTRAP_PS
 $ErrorActionPreference = 'Stop'
@@ -93,6 +91,15 @@ function New-EloPackagedCliActions {
     $update = New-EloPackagedActionPair $trusted.UpdatePreview $trusted.UpdateApply
     @{ IsAdmin=$trusted.IsAdmin; Preview=$mitigation.Preview; Apply=$mitigation.Apply; UpdatePreview=$update.Preview; UpdateApply=$update.Apply }
 }
+function Get-EloPackagedVersion {
+    Get-EloToolVersion ([IO.File]::ReadAllText((Join-Path $script:EloPackagedRoot 'ui.html'),[Text.Encoding]::UTF8))
+}
+function New-EloPackagedOnlineActions {
+    @{
+        CheckUpdate = { Get-EloOnlineState -CurrentVersion (Get-EloPackagedVersion) -Disabled:($env:ELO_PATCH_NO_UPDATE_CHECK -ceq '1') }
+        SelfUpdate = { param($Current, $Expected) Install-EloToolUpdate -BatPath $env:ELO_PATCH_SOURCE -CurrentVersion $Current -ExpectedVersion $Expected }
+    }
+}
 function Invoke-EloPackagedTool {
     param([string[]]$Arguments = @())
     $ErrorActionPreference = 'Stop'
@@ -102,6 +109,10 @@ function Invoke-EloPackagedTool {
             $roots = @([IO.DriveInfo]::GetDrives() | Where-Object {
                 $_.IsReady -and $_.DriveType -in @([IO.DriveType]::Fixed,[IO.DriveType]::Removable)
             } | ForEach-Object { $_.RootDirectory.FullName })
+            # With no installed catalog the scan uses the one of the latest GitHub release; the packaged one otherwise.
+            $notice = Get-EloOnlineState -CurrentVersion (Get-EloPackagedVersion) -Disabled:($env:ELO_PATCH_NO_UPDATE_CHECK -ceq '1')
+            [Console]::Error.WriteLine((Format-EloCatalogNotice $notice))
+            if ($notice.Available) { [Console]::Error.WriteLine("A newer version of the tool is available: $($notice.Latest). Run --cli --self-update --confirm-update to install it.") }
             Invoke-EloJavaScan -DriveRoots $roots -ManualPath $ManualPath -ErrorAction Stop
         }
         $actions = @{}
@@ -110,6 +121,7 @@ function Invoke-EloPackagedTool {
             $session = New-EloServerSession -Port 49152 -UiHtml 'CLI session' -ScanSource 'CLI scanner'
             $actions = New-EloPackagedCliActions -Session $session
         }
+        if ($Arguments -ccontains '--check-update' -or $Arguments -ccontains '--self-update') { $actions = New-EloPackagedOnlineActions }
         $result = Invoke-EloCli -Arguments $Arguments -Scanner $scan -Actions $actions
         # The module README describes its standalone default; clarify the BAT route.
         if ($Arguments -ccontains '--help') {
@@ -583,6 +595,11 @@ Usage (embedded launcher): ELO-Patch-Tools.bat [options]
   --update-runtime        Separate option: update the selected runtime to the newest release of its branch
                           (Eclipse Temurin / Azul Zulu). Needs --target N --confirm-admin --confirm-update and
                           a typed APPLY UPDATE; a verified backup ZIP and automatic rollback are included.
+  --check-update          Ask GitHub whether a newer release of this tool exists. Read-only.
+  --self-update           Replace this .bat with the newest release after its SHA256 is verified; the current file
+                          is kept as a backup. Needs --confirm-update and a typed APPLY TOOL UPDATE. Restart afterwards.
+                          With no installed catalog, a scan uses the vulndb.json of the latest GitHub release.
+                          Set ELO_PATCH_NO_UPDATE_CHECK=1 to disable every GitHub request.
   --catalog-validate FILE Validate a vulnerability catalog (JSON) without using it. Read-only.
   --catalog-simulate ID|FILE  Replay the catalog entry's (or every entry of a FILE, e.g. an AI draft) simulated java output through the real classifier
                           (shows how the vulnerability would be detected; no Java is run). Read-only.
@@ -820,7 +837,7 @@ function Invoke-EloCli {
         $options = @{}
         $allowed = @('--help','--cli','--scan','--json','--no-browser','--keep-temp',
             '--manual-path','--manual','--mitigate','--target','--confirm-admin',
-            '--confirm-mitigation','--confirm-update','--update-runtime',
+            '--confirm-mitigation','--confirm-update','--update-runtime','--check-update','--self-update',
             '--catalog-validate','--catalog-install','--catalog-simulate','--catalog-list','--catalog-restore')
         for ($i=0; $i -lt $Arguments.Count; $i++) {
             $arg = $Arguments[$i]
@@ -832,6 +849,31 @@ function Invoke-EloCli {
                 $value = $Arguments[$i]
             }
             $options[$arg] = $value
+        }
+        if ($options.ContainsKey('--check-update') -or $options.ContainsKey('--self-update')) {
+            $apply = $options.ContainsKey('--self-update')
+            $extra = @($options.Keys | Where-Object { @('--cli','--json','--keep-temp','--check-update','--self-update','--confirm-update') -cnotcontains $_ })
+            if ($extra.Count -gt 0 -or ($apply -and $options.ContainsKey('--check-update')) -or (-not $apply -and $options.ContainsKey('--confirm-update'))) { throw 'Online options cannot be combined with other modes.' }
+            if ($apply -and -not $options.ContainsKey('--confirm-update')) { throw '--self-update requires --confirm-update.' }
+            $code = 1
+            if ($Actions['CheckUpdate'] -isnot [scriptblock] -or $Actions['SelfUpdate'] -isnot [scriptblock]) { throw 'Trusted action backend not available.' }
+            $state = & $Actions.CheckUpdate
+            if (-not $state.Checked) { throw ('GitHub could not be checked: ' + [string]$state.Catalog.Reason) }
+            $report.action = @{ result = $state }
+            if ($apply) {
+                if (-not $state.Available) { throw 'No newer release is available.' }
+                foreach ($name in @('IsInteractive','Write','ReadLine')) {
+                    if ($Console[$name] -isnot [scriptblock]) { throw 'Interactive console required; no action performed.' }
+                }
+                if ((& $Console.IsInteractive) -ne $true) { throw 'Interactive console required; noninteractive action refused.' }
+                $null = & $Console.Write ('This replaces the tool ' + $state.Current + ' with release ' + $state.Latest + ' from GitHub. The current file is kept as a backup. Type APPLY TOOL UPDATE to continue; anything else cancels:')
+                if ((& $Console.ReadLine) -cne 'APPLY TOOL UPDATE') { throw 'Tool update cancelled; no action performed.' }
+                $report.readOnly = $false
+                $report.action.installed = & $Actions.SelfUpdate $state.Current $state.Latest
+            }
+            $code = 0
+            if ($json) { $output = ConvertTo-Json -InputObject $report -Depth 30 -Compress } else { $output = "ELO Patch Tools update`r`n" + (ConvertTo-Json -InputObject $report -Depth 30) }
+            return [pscustomobject]@{ ExitCode = $code; Output = $output }
         }
         $catalogMode = @('--catalog-validate','--catalog-install','--catalog-simulate','--catalog-list','--catalog-restore') | Where-Object { $options.ContainsKey($_) }
         $modes = @('--help','--manual','--mitigate','--update-runtime') | Where-Object { $options.ContainsKey($_) }
@@ -1004,7 +1046,7 @@ function New-EloServerSession {
     @{
         Port=$Port; Origin="http://127.0.0.1:$Port"; Token=(New-EloSecret); UiHtml=$UiHtml; ScanSource=$ScanSource
         State='idle'; Results=@(); Targets=@{}; Preview=$null; Worker=$null; Backup=$null; RecoveryRequired=$false; LastError=$null
-        ReportJvms=@(); ReportActions=@(); ReportIndexes=@{}; UpdateContext=$null; ReportRecovery=$null; LastUpdate=$null; Backups=@{}; BackupsCache=$null; BackupsLogged=-1; LastRejected=''; CommunityJob=$null
+        ReportJvms=@(); ReportActions=@(); ReportIndexes=@{}; UpdateContext=$null; ReportRecovery=$null; LastUpdate=$null; Backups=@{}; BackupsCache=$null; BackupsLogged=-1; LastRejected=''; CommunityJob=$null; Online=$null
         Adapters=@{
             NewUpdateContext={ param($Root,$Runtime,$StopServices) New-EloUpdateContext -Adapters (New-EloWindowsUpdateAdapters -ApprovedRoot $Root -Runtime $Runtime -AllowServiceStop:([bool]$StopServices)) -Production }
             BackupRoots={ @([IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -in @([IO.DriveType]::Fixed,[IO.DriveType]::Removable) -and $_.Name -cmatch '^[C-Z]:\\$' } | ForEach-Object { $_.RootDirectory.FullName }) }
@@ -1044,6 +1086,7 @@ function New-EloServerSession {
             ResolveRelease={ param($Identity) Resolve-EloLatestRelease -Vendor $Identity.Vendor -Branch $Identity.Branch -Architecture $Identity.Architecture -ImageType $Identity.ImageType }
             RuntimeUsers={ param($Path) Get-EloAffectedServices $Path }
             RecordedServices={ param($Backup,$Runtime) Get-EloRecordedServices $Backup $Runtime }
+            InstallUpdate={ param($Current,$Expected) Install-EloToolUpdate -BatPath $env:ELO_PATCH_SOURCE -CurrentVersion $Current -ExpectedVersion $Expected }
             RestoreBackup={ param($Root,$Runtime,$Backup,$StopServices,$Stamp)
                 $services=New-EloWindowsUpdateAdapters -ApprovedRoot $Root -Runtime $Runtime -AllowServiceStop:([bool]$StopServices)
                 $quiesce=$null; $resume=$null
@@ -1149,6 +1192,25 @@ function Get-EloEnvironmentMitigation {
         $state.user=Get-EloReportOptionState $options.User
     } catch { }
     return $state
+}
+function Get-EloOnlineView {
+    param($Online)
+    return @{checked=[bool]$Online.Checked;current=[string]$Online.Current;latest=[string]$Online.Latest;available=[bool]$Online.Available;installed=[string]$Online.Installed
+        catalog=@{source=[string]$Online.Catalog.Source;updated=[string]$Online.Catalog.Updated;reason=[string]$Online.Catalog.Reason}}
+}
+function Invoke-EloSelfUpdate {
+    # Only the version the page offered, once, and never while a scan or a recovery is pending.
+    param($Session,[string]$Version)
+    $online=$Session.Online
+    if (-not $online -or -not $online.Available -or $online.Installed -or [string]$online.Latest -cne $Version -or $Session.Worker -or $Session.RecoveryRequired) { Stop-EloRequest 409 'tool_update_unavailable' }
+    try { $done=& $Session.Adapters.InstallUpdate ([string]$online.Current) $Version }
+    catch {
+        Write-EloLog $Session "Tool update to $Version FAILED: $(ConvertTo-EloUpdateCode $_.Exception.Message)"
+        Stop-EloRequestDetail 409 'tool_update_failed' (ConvertTo-EloUpdateCode $_.Exception.Message)
+    }
+    $online.Installed=[string]$done.Version
+    Write-EloLog $Session "Tool updated to $($done.Version). Previous file: $($done.Backup). Close this window and start the .bat again."
+    return @{ok=$true}
 }
 function Get-EloVulnerabilityInfo {
     # What the UI needs per active vulnerability: severity, problem and solution texts, and the action ids.
@@ -2159,7 +2221,7 @@ function Invoke-EloApi {
     param($Session,$Request)
     Assert-EloBoundary $Session $Request
     if (-not (Test-EloSecret ([string]$Request.Headers['X-Session-Token']) $Session.Token)) { Stop-EloRequest 401 'authentication_required' }
-    $get=@('/api/status','/api/results','/api/community/status','/api/community/job'); $post=@('/api/scan','/api/cancel','/api/preview','/api/action','/api/report','/api/community/models','/api/community/setup','/api/community/run','/api/community/cancel','/api/community/access','/api/community/refine','/api/community/validate')
+    $get=@('/api/status','/api/results','/api/community/status','/api/community/job'); $post=@('/api/scan','/api/cancel','/api/preview','/api/action','/api/report','/api/self-update','/api/community/models','/api/community/setup','/api/community/run','/api/community/cancel','/api/community/access','/api/community/refine','/api/community/validate')
     if ($Request.Target -cnotin ($get+$post)) { Stop-EloRequest 404 'unknown_route' }
     if (($Request.Target -cin $get -and $Request.Method -cne 'GET') -or ($Request.Target -cin $post -and $Request.Method -cne 'POST')) { Stop-EloRequest 405 'method_rejected' }
     Update-EloScanWorker $Session
@@ -2173,10 +2235,17 @@ function Invoke-EloApi {
         if ($Request.Target -ceq '/api/status') { return @{state=$Session.State} }
         if ($Session.RecoveryRequired) { Stop-EloRequest 500 'rollback_failed_manual_recovery_required' }
         if ($Session.LastError) { Stop-EloRequest $Session.LastError.Status $Session.LastError.Code }
-        return @{results=@($Session.Results);security=(Get-EloSecurityMetadata);vulnerabilities=@(Get-EloVulnerabilityInfo);backups=@(Get-EloBackupList $Session);environment=(Get-EloEnvironmentMitigation $Session)}
+        $payload=@{results=@($Session.Results);security=(Get-EloSecurityMetadata);vulnerabilities=@(Get-EloVulnerabilityInfo);backups=@(Get-EloBackupList $Session);environment=(Get-EloEnvironmentMitigation $Session)}
+        if ($Session.Online) { $payload.online=Get-EloOnlineView $Session.Online }
+        return $payload
     }
     if ($Request.Headers['Content-Type'] -cnotin @('application/json','application/json; charset=utf-8')) { Stop-EloRequest 415 'json_required' }
     switch -CaseSensitive ($Request.Target) {
+        '/api/self-update' {
+            $body=ConvertFrom-EloBody $Request.Body -Required @('version')
+            if ($body.version -cnotmatch '^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$') { Stop-EloRequest 400 'invalid_version' }
+            return (Invoke-EloSelfUpdate $Session $body.version)
+        }
         '/api/report' {
             $body=ConvertFrom-EloBody $Request.Body -Required @('language')
             if ($body.language -cnotin @('en','de','es')) { Stop-EloRequest 400 'invalid_language' }
@@ -2331,6 +2400,8 @@ function ConvertTo-EloErrorResponse {
             else { $warnings+=@{en="The community helper failed.$detail Check the backend window for details; credentials are never shown.";de="Der Community-Helfer ist fehlgeschlagen.$detail Details im Backend-Fenster pruefen; Zugangsdaten werden nie angezeigt."} }
         }
         'community_run_missing' { $warnings+=@{en='That run folder no longer exists. Run the analysis again.';de='Dieser Lauf-Ordner existiert nicht mehr. Analyse erneut ausfuehren.';es='Esa carpeta de ejecucion ya no existe. Vuelve a ejecutar el analisis.'} }
+        'tool_update_failed' { $warnings+=@{en="The tool update failed.$detail The tool file is unchanged.";de="Die Aktualisierung des Werkzeugs ist fehlgeschlagen.$detail Die Datei des Werkzeugs ist unveraendert.";es="Falló la actualización de la herramienta.$detail El archivo de la herramienta no ha cambiado."} }
+        'tool_update_unavailable' { $warnings+=@{en='This tool update cannot be applied now. Wait for a running scan or restart the tool.';de='Diese Aktualisierung kann jetzt nicht angewendet werden. Laufenden Scan abwarten oder das Werkzeug neu starten.';es='Esta actualización no se puede aplicar ahora. Espera a que termine el escaneo o reinicia la herramienta.'} }
         'update_not_needed' { $warnings+=@{en='This runtime is already the newest release of its branch. Nothing to update.';de='Diese Runtime ist bereits die neueste Version ihres Branches. Nichts zu aktualisieren.'} }
         'no_backup_for_target' { $warnings+=@{en='No backup from this session exists for this runtime. Restore manually from a backup ZIP using the commands in the technical report.';de='Fuer diese Runtime existiert in dieser Sitzung kein Backup. Manuell aus einem Backup-ZIP wiederherstellen; Befehle stehen im technischen Bericht.'} }
         'restore_failed_no_change' { $warnings+=@{en="The restore was rejected before the runtime was swapped.$detail The current runtime is unchanged.";de="Die Wiederherstellung wurde abgelehnt, bevor die Runtime getauscht wurde.$detail Die aktuelle Runtime ist unveraendert."} }
@@ -2379,6 +2450,14 @@ function Start-EloServer {
     try {
         $Port=$listener.LocalEndpoint.Port
         $session=New-EloServerSession -Port $Port -UiHtml $UiHtml -ScanSource $ScanSource
+        if (Get-Command Get-EloOnlineState -CommandType Function -ErrorAction SilentlyContinue) {
+            # Once per start, before the page loads: a newer release, and the shared catalog when none is installed.
+            Write-EloLog $session 'Checking GitHub for a newer release (ELO_PATCH_NO_UPDATE_CHECK=1 disables this).'
+            $session.Online=Get-EloOnlineState -CurrentVersion (Get-EloToolVersion $UiHtml) -Disabled:($env:ELO_PATCH_NO_UPDATE_CHECK -ceq '1')
+            $session.Online.Installed=''
+            Write-EloLog $session (Format-EloCatalogNotice $session.Online)
+            if ($session.Online.Available) { Write-EloLog $session "A newer version of the tool is available: $($session.Online.Latest) (running $($session.Online.Current))." }
+        }
         Invoke-EloSessionLaunch $session -NoBrowser:$NoBrowser -LaunchHandler $LaunchHandler
         Write-Output "ELO local server listening on 127.0.0.1:$Port. Close this host to stop."
         while ($true) {
@@ -2689,6 +2768,7 @@ pre.cmd .c-str{color:#fca5a5}
 <li><button class="step" id="nav5" type="button" data-state="todo" disabled><span class="dot"><svg class="i"><use href="#i-file"/></svg></span><span class="lbl" data-i18n="step5"></span></button></li>
 </ol></nav>
 <div id="busy" class="busy" role="status" aria-live="polite" hidden><span class="spin"></span><span data-i18n="working"></span></div>
+<div id="updateBox" class="notice" role="status" hidden><p id="updateText"></p><div id="updateActions"><label class="confirm"><input id="updateConfirm" type="checkbox"><span data-i18n="updateConfirmText"></span></label><button id="updateTool" class="btn primary" type="button" disabled><svg class="i"><use href="#i-download"/></svg><span data-i18n="updateToolButton"></span></button></div></div>
 <pre id="error" class="banner" role="alert"></pre>
 <pre id="recoveryNotice" class="banner" role="alert"></pre>
 
@@ -2746,6 +2826,7 @@ pre.cmd .c-str{color:#fca5a5}
 <p id="scanOk" class="notice" role="status" hidden></p>
 <p id="envNote" class="notice" role="status" hidden></p>
 <p id="resultNotice" class="muted" role="status"></p>
+<p id="catalogNote" class="muted" role="status" hidden></p>
 <details><summary><svg class="i"><use href="#i-list"/></svg><span data-i18n="advanced"></span></summary><div class="body">
 <label class="field"><span data-i18n="searchPath"></span><input id="searchPath" type="text" maxlength="1024" autocomplete="off" spellcheck="false" aria-describedby="searchHelp"></label>
 <p id="searchHelp" class="muted" data-i18n="searchHelp"></p>
@@ -2839,6 +2920,7 @@ const messages = {
  continue:'Continue',back:'Back',startOver:'Scan again',advanced:'Advanced: search another folder',evidence:'Technical evidence',
  noIssue:'No security problem was detected in the {n} Java runtime(s) found.',noIssueUnknown:'No security problem was detected. However, {n} runtime(s) could not be evaluated against the vulnerability catalog, so this does not prove they are safe.',noIssueUpdate:'You can still update the Java used by ELO in step 3.',serviceAlertTitle:'ELO did not come back cleanly',loadCheck:'Sign in to ELO to confirm that it works; if it does not, restore the previous version. The automatic check only covers the state and ports of the services listed before confirming.',
  envMitigation:'Mitigation present in the environment ({scopes}), not verified in ELO. Running processes and services may not use it; vulnerable runtimes stay marked until Java is updated.',envMachine:'Machine',envUser:'User',
+ updateAvailable:'Version {latest} of this tool is available (running {current}).',updateInstalled:'Version {latest} is installed. Close the tool window and start ELO-Patch-Tools.bat again. The previous file was kept next to it.',updateConfirmText:'I want to download that version from GitHub and replace this tool. Its SHA256 is checked and the current file is kept.',updateToolButton:'Update tool',toolUpdateError:'The tool was not updated.',catalog_downloaded:'Vulnerability catalog downloaded from the latest GitHub release',catalog_installed:'Vulnerability catalog installed on this server',catalog_packaged:'Vulnerability catalog included in this tool',catalogUpdated:'updated {date}',catalogOffline:'GitHub could not be reached.',catalogDisabled:'The online check is disabled.',catalogRejected:'The downloaded catalog was not used.',
  scanningNow:'Scanning drives',foundN:'Java runtimes found: {n}.',foundNone:'No Java runtime found. Open “Advanced” to search another folder, then scan again.',
  updateDesc:'Installs the newest release of the same Java branch and vendor, even without a detected vulnerability. Verified backup, Java self-test, stop and restart of all ELO services, load check and rollback.',
  mitigateDesc:'Adds -XX:-UseBASE64Intrinsics to the machine environment. Quick and temporary; it is not a Java update.',
@@ -2902,6 +2984,7 @@ restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: this versi
  continue:'Weiter',back:'Zurück',startOver:'Erneut scannen',advanced:'Erweitert: anderen Ordner durchsuchen',evidence:'Technische Nachweise',
  noIssue:'In den {n} gefundenen Java-Runtimes wurde kein Sicherheitsproblem erkannt.',noIssueUnknown:'Es wurde kein Sicherheitsproblem erkannt. Allerdings konnten {n} Runtime(s) nicht anhand des Schwachstellenkatalogs bewertet werden; das beweist nicht, dass sie sicher sind.',noIssueUpdate:'Das von ELO verwendete Java kann in Schritt 3 trotzdem aktualisiert werden.',serviceAlertTitle:'ELO wurde nicht korrekt wieder gestartet',loadCheck:'Melden Sie sich bei ELO an; funktioniert es nicht, stellen Sie die vorherige Version wieder her. Die automatische Prüfung umfasst nur Status und Ports der vor der Bestätigung aufgeführten Dienste.',
  envMitigation:'Risikominderung in der Umgebung vorhanden ({scopes}), in ELO nicht geprüft. Laufende Prozesse und Dienste verwenden sie möglicherweise nicht; verwundbare Runtimes bleiben markiert, bis Java aktualisiert ist.',envMachine:'System',envUser:'Benutzer',
+ updateAvailable:'Version {latest} dieses Werkzeugs ist verfügbar (aktiv: {current}).',updateInstalled:'Version {latest} ist installiert. Schließen Sie das Fenster des Werkzeugs und starten Sie ELO-Patch-Tools.bat erneut. Die vorherige Datei wurde daneben aufbewahrt.',updateConfirmText:'Ich möchte diese Version von GitHub herunterladen und das Werkzeug ersetzen. Die SHA256 wird geprüft und die aktuelle Datei behalten.',updateToolButton:'Werkzeug aktualisieren',toolUpdateError:'Das Werkzeug wurde nicht aktualisiert.',catalog_downloaded:'Schwachstellenkatalog aus dem neuesten GitHub-Release geladen',catalog_installed:'Auf diesem Server installierter Schwachstellenkatalog',catalog_packaged:'In diesem Werkzeug enthaltener Schwachstellenkatalog',catalogUpdated:'Stand {date}',catalogOffline:'GitHub war nicht erreichbar.',catalogDisabled:'Die Online-Prüfung ist deaktiviert.',catalogRejected:'Der heruntergeladene Katalog wurde nicht verwendet.',
  scanningNow:'Laufwerke werden durchsucht',foundN:'Gefundene Java-Runtimes: {n}.',foundNone:'Keine Java-Runtime gefunden. Öffnen Sie „Erweitert“, um einen anderen Ordner zu durchsuchen, und scannen Sie erneut.',
  updateDesc:'Installiert die neueste Version desselben Java-Branches und Herstellers, auch ohne erkannte Schwachstelle. Geprüftes Backup, Java-Selbsttest, Stopp und Neustart aller ELO-Dienste, Ladeprüfung und Wiederherstellung.',
  mitigateDesc:'Ergänzt -XX:-UseBASE64Intrinsics in der Systemumgebung. Schnell und vorübergehend; kein Java-Update.',
@@ -2965,6 +3048,7 @@ restoreShort:'Dieses Backup wiederherstellen',backupRisk_vulnerable:'Verwundbar:
  continue:'Continuar',back:'Atrás',startOver:'Escanear de nuevo',advanced:'Avanzado: buscar en otra carpeta',evidence:'Evidencia técnica',
  noIssue:'No se ha detectado ningún problema de seguridad en los {n} runtimes de Java encontrados.',noIssueUnknown:'No se ha detectado ningún problema de seguridad. Sin embargo, {n} runtime(s) no se pudieron evaluar con el catálogo de vulnerabilidades, así que esto no demuestra que sean seguros.',noIssueUpdate:'Igualmente puedes actualizar el Java que usa ELO en el paso 3.',serviceAlertTitle:'ELO no volvió a levantar correctamente',loadCheck:'Inicia sesión en ELO para confirmar que funciona; si no, restaura la versión anterior. La comprobación automática solo cubre el estado y los puertos de los servicios listados antes de confirmar.',
  envMitigation:'Mitigación presente en el entorno ({scopes}), sin verificar en ELO. Los procesos y servicios en ejecución pueden no usarla; los runtimes vulnerables siguen marcados hasta actualizar Java.',envMachine:'Máquina',envUser:'Usuario',
+ updateAvailable:'Está disponible la versión {latest} de esta herramienta (en ejecución: {current}).',updateInstalled:'La versión {latest} está instalada. Cierra la ventana de la herramienta y vuelve a iniciar ELO-Patch-Tools.bat. El archivo anterior se conservó a su lado.',updateConfirmText:'Quiero descargar esa versión de GitHub y reemplazar esta herramienta. Se comprueba su SHA256 y se conserva el archivo actual.',updateToolButton:'Actualizar la herramienta',toolUpdateError:'La herramienta no se actualizó.',catalog_downloaded:'Catálogo de vulnerabilidades descargado del último release de GitHub',catalog_installed:'Catálogo de vulnerabilidades instalado en este servidor',catalog_packaged:'Catálogo de vulnerabilidades incluido en esta herramienta',catalogUpdated:'actualizado el {date}',catalogOffline:'No se pudo conectar con GitHub.',catalogDisabled:'La comprobación en línea está desactivada.',catalogRejected:'El catálogo descargado no se usó.',
  scanningNow:'Escaneando unidades',foundN:'Runtimes de Java encontrados: {n}.',foundNone:'No se encontró ningún runtime de Java. Abre «Avanzado» para buscar en otra carpeta y vuelve a escanear.',
  updateDesc:'Instala la última versión de la misma rama y fabricante de Java, aunque no se haya detectado una vulnerabilidad. Copia verificada, prueba de Java, parada y arranque de todos los servicios de ELO, comprobación de carga y reversión.',
  mitigateDesc:'Añade -XX:-UseBASE64Intrinsics al entorno de la máquina. Rápido y temporal; no es una actualización de Java.',
@@ -3032,7 +3116,7 @@ try {
 } catch (_) { /* storage unavailable: the link must be reopened after a refresh */ }
 const forgetToken = () => { try { sessionStorage.removeItem('eloSessionToken'); } catch (_) { } };
 let language = 'en', state = 'idle', rows = [], preview = null, pending = false, polling = false, lastError = '';
-let envState = null, vulns = [], backups = [], backupsKey = '', progress = null, checked = null, lastSuccessfulRefresh = null, security = {verifiedOn:null,advisories:[]};
+let onlineState = null, envState = null, vulns = [], backups = [], backupsKey = '', progress = null, checked = null, lastSuccessfulRefresh = null, security = {verifiedOn:null,advisories:[]};
 let lastWarnings = [], errorFromPoll = false, recoveryRequired = false, recoveryWarnings = [];
 let step = 1, awaitingScan = false, scanStartedAt = null, finalKind = '', canRestore = false, cardsKey = '', serviceWarning = null;
 const events = [], states = ['idle','scanning','cancelling','completed','cancelled','error'];
@@ -3079,7 +3163,7 @@ const errorMessages = Object.fromEntries(Object.entries({
  boundaryRejected:['loopback_only','host_rejected','origin_rejected','cross_site','origin_required'],
  expired:['preview_expired_or_mismatched','stale_preview'],
  updateRefused:['update_preview_refused'],updateRejected:['update_rejected_no_change'],updateRolledBack:['update_failed_rolled_back'],updateManualRecovery:['update_manual_recovery_required'],
- updateNotNeeded:['update_not_needed'],noBackup:['no_backup_for_target'],restoreFailed:['restore_failed_no_change'],
+ toolUpdateError:['tool_update_failed','tool_update_unavailable'], updateNotNeeded:['update_not_needed'],noBackup:['no_backup_for_target'],restoreFailed:['restore_failed_no_change'],
  rollbackFailed:['rollback_failed_manual_recovery_required'],manualRecovery:['manual_recovery_required_close_session'],
  rolledBack:['verification_failed_rolled_back'],probeFailed:['probe_failed_no_change'],
  updateUnavailable:['update_unavailable_provenance_compatibility_backup_replacement_rollback_not_verified'],
@@ -3331,6 +3415,24 @@ function renderEnvironment() {
  const scopes = [['machine','envMachine'],['user','envUser']].filter(([key]) => envState && envState[key] === 'Present').map(([,label]) => t(label));
  const message = scopes.length ? t('envMitigation').replace('{scopes}',() => scopes.join(', ')) : '';
  ['envNote','envNote2'].forEach(id => { $(id).textContent = message; toggle(id,!message); });
+}
+// The release check and the catalog in use; the tool is only replaced after an explicit confirmation.
+const validVersion = value => typeof value === 'string' && /^(?:[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4})?$/.test(value);
+const validOnline = value => keys(value,['checked','current','latest','available','installed','catalog']) && typeof value.checked === 'boolean' && typeof value.available === 'boolean' && ['current','latest','installed'].every(key => validVersion(value[key])) &&
+ keys(value.catalog,['source','updated','reason']) && ['downloaded','installed','packaged'].includes(value.catalog.source) && typeof value.catalog.updated === 'string' && /^(?:[0-9]{4}-[0-9]{2}-[0-9]{2})?$/.test(value.catalog.updated) && typeof value.catalog.reason === 'string' && /^[a-z_]{0,64}$/.test(value.catalog.reason);
+function renderOnline() {
+ const online = onlineState, installed = !!(online && online.installed), offered = !!(online && online.available && !installed);
+ const values = text => text.replace('{latest}',() => online.installed || online.latest).replace('{current}',() => online.current);
+ $('updateText').textContent = installed ? values(t('updateInstalled')) : offered ? values(t('updateAvailable')) : '';
+ toggle('updateBox',!installed && !offered); toggle('updateActions',!offered);
+ $('updateTool').disabled = !offered || pending || running() || recoveryRequired || !$('updateConfirm').checked;
+ let note = '';
+ if (online) {
+ const reason = online.catalog.reason;
+ note = t('catalog_'+online.catalog.source)+(online.catalog.updated ? ' ('+t('catalogUpdated').replace('{date}',() => online.catalog.updated)+')' : '')+'.';
+ if (reason) note += ' '+t(reason === 'github_unreachable' ? 'catalogOffline' : reason === 'online_check_disabled' ? 'catalogDisabled' : 'catalogRejected');
+ }
+ $('catalogNote').textContent = note; toggle('catalogNote',!note);
 }
 function renderAdvice(row) {
  renderScanAlert(); renderEnvironment();
@@ -3674,7 +3776,7 @@ $('aiProvider').onchange = () => { $('aiModel').replaceChildren(); cModels = [];
  rows.forEach(item => { const tr = document.createElement('tr'); cells(item).forEach(value => { const td = document.createElement('td'); td.textContent = value; tr.append(td); }); $('jvmRows').append(tr); });
  const labels = ['path','runtimeRoot','version','vendor','architecture','classification','eloRationale','classificationEvidence'];
  $('details').textContent = row ? cells(row).map((value,index) => t(labels[index])+': '+value).join('\n') : '';
- renderCards(); renderBackups(); renderAdvice(row); renderBehind(row); renderCommunity();
+ renderOnline(); renderCards(); renderBackups(); renderAdvice(row); renderBehind(row); renderCommunity();
  $('verifiedOn').textContent = security.verifiedOn ? t('verifiedDate')+': '+security.verifiedOn : t('noAdvisories');
  $('advisories').replaceChildren();
  security.advisories.forEach(item => {
@@ -3725,11 +3827,11 @@ async function refresh() {
  const status = await api('status');
  if (!keys(status,['state'],['progress','checked']) || !states.includes(status.state) || (status.progress !== undefined && (!Number.isFinite(status.progress) || status.progress < 0 || status.progress > 100)) || (status.checked !== undefined && (!Number.isSafeInteger(status.checked) || status.checked < 0))) throw 'invalid';
  const result = await api('results');
- if (!keys(result,['results','security'],['backups','vulnerabilities','environment']) || (result.environment !== undefined && (!keys(result.environment,['machine','user']) || !Object.values(result.environment).every(value => ['Present','Absent','Conflict','Unknown'].includes(value)))) || (result.vulnerabilities !== undefined && (!Array.isArray(result.vulnerabilities) || result.vulnerabilities.length > 32 || result.vulnerabilities.some(item => !validVuln(item)))) || (result.backups !== undefined && (!Array.isArray(result.backups) || result.backups.length > 50 || result.backups.some(item => !validBackup(item)) || new Set(result.backups.map(item => item.id)).size !== result.backups.length)) || !Array.isArray(result.results) || result.results.length > 250 || result.results.some(row => !validRow(row)) || new Set(result.results.map(row => row.id)).size !== result.results.length || !validSecurity(result.security)) throw 'invalid';
+ if (!keys(result,['results','security'],['backups','vulnerabilities','environment','online']) || (result.online !== undefined && !validOnline(result.online)) || (result.environment !== undefined && (!keys(result.environment,['machine','user']) || !Object.values(result.environment).every(value => ['Present','Absent','Conflict','Unknown'].includes(value)))) || (result.vulnerabilities !== undefined && (!Array.isArray(result.vulnerabilities) || result.vulnerabilities.length > 32 || result.vulnerabilities.some(item => !validVuln(item)))) || (result.backups !== undefined && (!Array.isArray(result.backups) || result.backups.length > 50 || result.backups.some(item => !validBackup(item)) || new Set(result.backups.map(item => item.id)).size !== result.backups.length)) || !Array.isArray(result.results) || result.results.length > 250 || result.results.some(row => !validRow(row)) || new Set(result.results.map(row => row.id)).size !== result.results.length || !validSecurity(result.security)) throw 'invalid';
  const nextRows = result.results;
  if (state !== status.state || JSON.stringify(rows) !== JSON.stringify(nextRows) || JSON.stringify(security) !== JSON.stringify(result.security)) clearPreview();
  if (status.state === 'scanning' && scanStartedAt === null) scanStartedAt = Date.now();
- state = status.state; rows = nextRows; security = result.security; backups = result.backups || []; vulns = result.vulnerabilities || []; envState = result.environment || null;
+ state = status.state; rows = nextRows; security = result.security; backups = result.backups || []; vulns = result.vulnerabilities || []; envState = result.environment || null; onlineState = result.online || null;
  if (state !== 'scanning' && state !== 'cancelling') scanStartedAt = null;
  // A finished scan moves the wizard on by itself; anything else releases the wait.
  if (awaitingScan && state === 'completed') { awaitingScan = false; if (rows.length) step = 2; }
@@ -3770,6 +3872,12 @@ async function getPreview(actionId, explicitId) {
  });
 }
 $('mitigate').onclick = () => getPreview('mitigate');
+$('updateConfirm').onchange = render;
+$('updateTool').onclick = () => {
+ if (!onlineState || !onlineState.available || !$('updateConfirm').checked) return;
+ const version = onlineState.latest;
+ return perform(async () => { await acknowledge('self-update',{version}); $('updateConfirm').checked = false; onlineState = {...onlineState,installed:version}; });
+};
 $('update').onclick = () => getPreview('update-runtime');
 $('restore').onclick = () => getPreview('restore-backup');
 $('apply').onclick = () => {
@@ -5625,6 +5733,167 @@ function Resolve-EloLatestRelease {
     }
     return Assert-EloReleaseRecord $raw
 }
+
+# ---- Online: the latest release of this tool on GitHub, its shared catalog and the self-update. Only
+# GitHub HTTPS hosts are contacted, redirects are followed by hand, every asset is checked against the
+# release's SHA256SUMS.txt, and no information about the server is sent. The checksum detects a damaged
+# or altered download; it cannot protect against a compromised repository account.
+$script:EloToolRepository = 'patchamama/elo-patch-tool'
+$script:EloGitHubHosts = @('api.github.com', 'github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com')
+
+function Assert-EloGitHubAddress {
+    param([string]$Address)
+    $uri = $null
+    if (-not [Uri]::TryCreate($Address, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -cne 'https' -or -not $uri.IsDefaultPort -or $uri.UserInfo -or
+        $uri.HostNameType -ne [UriHostNameType]::Dns -or $script:EloGitHubHosts -cnotcontains $uri.DnsSafeHost.ToLowerInvariant()) { throw 'unverified_https_host' }
+    return $uri
+}
+function Invoke-EloGitHubFetch {
+    # Real network adapter: bytes of one GitHub resource, size-bounded, short time-outs.
+    param([string]$Url, [int]$MaxBytes = 1MB, [int]$TimeoutMilliseconds = 6000)
+    $previous = [Net.ServicePointManager]::SecurityProtocol
+    [Net.ServicePointManager]::SecurityProtocol = $previous -bor [Net.SecurityProtocolType]::Tls12
+    try {
+        $uri = Assert-EloGitHubAddress $Url
+        for ($hop = 0; $hop -le 5; $hop++) {
+            $request = [Net.HttpWebRequest]::Create($uri)
+            $request.AllowAutoRedirect = $false; $request.UseDefaultCredentials = $false
+            $request.UserAgent = 'elo-patch-tool'
+            $request.Timeout = $TimeoutMilliseconds; $request.ReadWriteTimeout = $TimeoutMilliseconds
+            $response = $null
+            try {
+                $response = $request.GetResponse()
+                $status = [int]$response.StatusCode
+                if (@(301, 302, 303, 307, 308) -contains $status) {
+                    $next = $null
+                    if (-not [Uri]::TryCreate($uri, [string]$response.Headers['Location'], [ref]$next)) { throw 'download_failed' }
+                    $uri = Assert-EloGitHubAddress $next.AbsoluteUri
+                    continue
+                }
+                if ($status -ne 200) { throw 'download_failed' }
+                $stream = $response.GetResponseStream(); $memory = New-Object IO.MemoryStream
+                $buffer = New-Object byte[] 65536; $watch = [Diagnostics.Stopwatch]::StartNew()
+                while (($count = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    if ($memory.Length + $count -gt $MaxBytes -or $watch.Elapsed.TotalSeconds -gt 120) { throw 'download_limit' }
+                    $memory.Write($buffer, 0, $count)
+                }
+                return , $memory.ToArray()
+            } finally { if ($response) { $response.Dispose() } }
+        }
+        throw 'download_failed'
+    } finally { [Net.ServicePointManager]::SecurityProtocol = $previous }
+}
+function Get-EloToolVersion {
+    # The version shown in the packaged page is the single version of the running tool.
+    param([string]$Html)
+    if ($Html -cmatch 'id="appVersion" class="version">v([0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4})<') { return $Matches[1] }
+    return ''
+}
+function Test-EloNewerVersion {
+    param([string]$Candidate, [string]$Current)
+    try { return ([version]$Candidate) -gt ([version]$Current) } catch { return $false }
+}
+function Get-EloLatestToolRelease {
+    param([scriptblock]$Fetch = { param($Url, $MaxBytes) Invoke-EloGitHubFetch $Url $MaxBytes })
+    $bytes = & $Fetch ('https://api.github.com/repos/' + $script:EloToolRepository + '/releases/latest') 1MB
+    try { $data = [Text.Encoding]::UTF8.GetString([byte[]]$bytes) | ConvertFrom-Json } catch { throw 'release_unreadable' }
+    if ($data.draft -or $data.prerelease -or [string]$data.tag_name -cnotmatch '^v([0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4})$') { throw 'release_unreadable' }
+    $version = $Matches[1]
+    $prefix = 'https://github.com/' + $script:EloToolRepository + '/releases/download/v' + $version + '/'
+    $assets = @{}
+    foreach ($asset in @($data.assets)) {
+        $name = [string]$asset.name
+        # Only the exact download path of this release is accepted, never an address from elsewhere.
+        if (@('ELO-Patch-Tools.bat', 'vulndb.json', 'SHA256SUMS.txt') -ccontains $name -and [string]$asset.browser_download_url -ceq ($prefix + $name)) { $assets[$name] = $prefix + $name }
+    }
+    return @{ Version = $version; Assets = $assets }
+}
+function Get-EloReleaseAsset {
+    param($Release, [string]$Name, [scriptblock]$Fetch, [int]$MaxBytes = 1MB)
+    if (-not $Release.Assets.ContainsKey($Name) -or -not $Release.Assets.ContainsKey('SHA256SUMS.txt')) { throw 'release_asset_missing' }
+    $sums = [Text.Encoding]::UTF8.GetString([byte[]](& $Fetch $Release.Assets['SHA256SUMS.txt'] 64KB))
+    $expected = [regex]::Match($sums, '(?m)^([a-fA-F0-9]{64})[ \t]+\*?' + [regex]::Escape($Name) + '[ \t]*\r?$')
+    if (-not $expected.Success) { throw 'checksum_missing' }
+    $bytes = [byte[]](& $Fetch $Release.Assets[$Name] $MaxBytes)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $actual = ([BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '') } finally { $sha.Dispose() }
+    if ($actual -ine $expected.Groups[1].Value) { throw 'checksum_mismatch' }
+    return , $bytes
+}
+function Use-EloOnlineCatalog {
+    # With no installed catalog, the catalog of the latest release is used for this session (memory only).
+    # It must come from a release at least as new as the tool, be at least as recent as the packaged one,
+    # pass the same validation and keep every packaged vulnerability.
+    param($Release, [string]$CurrentVersion, [scriptblock]$Fetch, [string]$ProgramDataRoot = $env:ProgramData)
+    $packaged = Read-EloVulnDbFile (Join-Path $PSScriptRoot 'vulndb.json')
+    $installed = Get-EloVulnDbPath $ProgramDataRoot
+    if ($installed -cne (Join-Path $PSScriptRoot 'vulndb.json')) {
+        try { $db = Read-EloVulnDbFile $installed; return @{ Source = 'installed'; Updated = [string]$db.updated; Reason = '' } } catch { }
+    }
+    $result = @{ Source = 'packaged'; Updated = [string]$packaged.updated; Reason = '' }
+    $temp = $null
+    try {
+        if (Test-EloNewerVersion $CurrentVersion $Release.Version) { throw 'release_older_than_tool' }
+        $bytes = Get-EloReleaseAsset -Release $Release -Name 'vulndb.json' -Fetch $Fetch
+        $temp = Join-Path ([IO.Path]::GetTempPath()) ('elo-catalog-' + [guid]::NewGuid().ToString('N') + '.json')
+        [IO.File]::WriteAllBytes($temp, $bytes)
+        $db = Read-EloVulnDbFile $temp
+        if ([string]$db.updated -cnotmatch '^\d{4}-\d{2}-\d{2}$' -or [string]::CompareOrdinal([string]$db.updated, [string]$packaged.updated) -lt 0) { throw 'catalog_older_than_packaged' }
+        $ids = @(Get-EloActiveVulnerabilities $db | ForEach-Object { [string]$_.id })
+        if (@(Get-EloActiveVulnerabilities $packaged | Where-Object { $ids -cnotcontains [string]$_.id }).Count -gt 0) { throw 'catalog_drops_vulnerability' }
+        $script:EloVulnCache = $db
+        $result = @{ Source = 'downloaded'; Updated = [string]$db.updated; Reason = '' }
+    } catch {
+        $code = [string]$_.Exception.Message
+        if ($code -cmatch '^([a-z_]{1,64})') { $result.Reason = $Matches[1] } else { $result.Reason = 'download_failed' }
+    } finally { if ($temp -and (Test-Path -LiteralPath $temp)) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } }
+    return $result
+}
+function Get-EloOnlineState {
+    # One check per run. It never throws: offline or broken answers leave the packaged catalog in use.
+    param([string]$CurrentVersion, [scriptblock]$Fetch = { param($Url, $MaxBytes) Invoke-EloGitHubFetch $Url $MaxBytes },
+        [string]$ProgramDataRoot = $env:ProgramData, [switch]$Disabled)
+    $state = @{ Checked = $false; Current = $CurrentVersion; Latest = ''; Available = $false; Catalog = @{ Source = 'packaged'; Updated = ''; Reason = '' } }
+    try {
+        $current = Read-EloVulnDbFile (Get-EloVulnDbPath $ProgramDataRoot)
+        $state.Catalog.Updated = [string]$current.updated
+        if ((Get-EloVulnDbPath $ProgramDataRoot) -cne (Join-Path $PSScriptRoot 'vulndb.json')) { $state.Catalog.Source = 'installed' }
+    } catch { }
+    if ($Disabled) { $state.Catalog.Reason = 'online_check_disabled'; return $state }
+    try { $release = Get-EloLatestToolRelease -Fetch $Fetch } catch { $state.Catalog.Reason = 'github_unreachable'; return $state }
+    $state.Checked = $true; $state.Latest = $release.Version
+    $state.Available = (Test-EloNewerVersion $release.Version $CurrentVersion)
+    try { $state.Catalog = Use-EloOnlineCatalog -Release $release -CurrentVersion $CurrentVersion -Fetch $Fetch -ProgramDataRoot $ProgramDataRoot } catch { $state.Catalog.Reason = 'download_failed' }
+    return $state
+}
+function Format-EloCatalogNotice {
+    param($State)
+    $text = 'Vulnerability catalog: ' + $State.Catalog.Source + ' (updated ' + $State.Catalog.Updated + ')'
+    if ($State.Catalog.Reason) { $text += ' [' + $State.Catalog.Reason + ']' }
+    return $text
+}
+function Install-EloToolUpdate {
+    # Replaces the .bat with the verified one of the confirmed release; the previous file is kept next to it.
+    # The running session keeps using its extracted files: the new version runs after a restart.
+    param([string]$BatPath, [string]$CurrentVersion, [string]$ExpectedVersion,
+        [scriptblock]$Fetch = { param($Url, $MaxBytes) Invoke-EloGitHubFetch $Url $MaxBytes }, [scriptblock]$Clock = { [datetime]::UtcNow })
+    if (-not $BatPath -or $BatPath -notmatch '(?i)\.bat$' -or -not (Test-Path -LiteralPath $BatPath -PathType Leaf)) { throw 'tool_path_unavailable' }
+    if ((Get-Item -LiteralPath $BatPath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'tool_path_unavailable' }
+    $release = Get-EloLatestToolRelease -Fetch $Fetch
+    if ($release.Version -cne $ExpectedVersion) { throw 'release_changed' }
+    if (-not (Test-EloNewerVersion $release.Version $CurrentVersion)) { throw 'tool_update_not_needed' }
+    $bytes = Get-EloReleaseAsset -Release $release -Name 'ELO-Patch-Tools.bat' -Fetch $Fetch -MaxBytes 8MB
+    $text = [Text.Encoding]::UTF8.GetString($bytes)
+    if (-not $text.StartsWith('@echo off') -or (Get-EloToolVersion $text) -cne $release.Version) { throw 'downloaded_tool_invalid' }
+    $backup = $BatPath + '.backup-' + (& $Clock).ToString('yyyyMMddHHmmss')
+    if (Test-Path -LiteralPath $backup) { throw 'tool_backup_exists' }
+    $temp = $BatPath + '.new-' + [guid]::NewGuid().ToString('N')
+    try {
+        [IO.File]::WriteAllBytes($temp, $bytes)
+        [IO.File]::Replace($temp, $BatPath, $backup)
+    } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } }
+    return @{ Version = $release.Version; Backup = $backup; Path = $BatPath }
+}
 ::ELO_PATCH_END:CATALOG_PS
 
 ::ELO_PATCH_BEGIN:VULNDB_PS
@@ -5965,7 +6234,7 @@ function Install-EloVulnDb {
 ::ELO_PATCH_BEGIN:VULNDB_JSON
 {
   "schemaVersion": 1,
-  "updated": "2026-11-25",
+  "updated": "2026-11-27",
   "description": "Vulnerability catalog of ELO Patch Tools. Everything the tool knows about a vulnerability lives here: how to detect it (java.exe argument lists + expect patterns), the problem message, the actions that fix it and the final report text. Add an entry to support a new vulnerability. No passwords or API keys belong in this file.",
   "sources": [
     {

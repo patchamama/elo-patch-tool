@@ -36,7 +36,7 @@ function New-EloServerSession {
     @{
         Port=$Port; Origin="http://127.0.0.1:$Port"; Token=(New-EloSecret); UiHtml=$UiHtml; ScanSource=$ScanSource
         State='idle'; Results=@(); Targets=@{}; Preview=$null; Worker=$null; Backup=$null; RecoveryRequired=$false; LastError=$null
-        ReportJvms=@(); ReportActions=@(); ReportIndexes=@{}; UpdateContext=$null; ReportRecovery=$null; LastUpdate=$null; Backups=@{}; BackupsCache=$null; BackupsLogged=-1; LastRejected=''; CommunityJob=$null
+        ReportJvms=@(); ReportActions=@(); ReportIndexes=@{}; UpdateContext=$null; ReportRecovery=$null; LastUpdate=$null; Backups=@{}; BackupsCache=$null; BackupsLogged=-1; LastRejected=''; CommunityJob=$null; Online=$null
         Adapters=@{
             NewUpdateContext={ param($Root,$Runtime,$StopServices) New-EloUpdateContext -Adapters (New-EloWindowsUpdateAdapters -ApprovedRoot $Root -Runtime $Runtime -AllowServiceStop:([bool]$StopServices)) -Production }
             BackupRoots={ @([IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -in @([IO.DriveType]::Fixed,[IO.DriveType]::Removable) -and $_.Name -cmatch '^[C-Z]:\\$' } | ForEach-Object { $_.RootDirectory.FullName }) }
@@ -76,6 +76,7 @@ function New-EloServerSession {
             ResolveRelease={ param($Identity) Resolve-EloLatestRelease -Vendor $Identity.Vendor -Branch $Identity.Branch -Architecture $Identity.Architecture -ImageType $Identity.ImageType }
             RuntimeUsers={ param($Path) Get-EloAffectedServices $Path }
             RecordedServices={ param($Backup,$Runtime) Get-EloRecordedServices $Backup $Runtime }
+            InstallUpdate={ param($Current,$Expected) Install-EloToolUpdate -BatPath $env:ELO_PATCH_SOURCE -CurrentVersion $Current -ExpectedVersion $Expected }
             RestoreBackup={ param($Root,$Runtime,$Backup,$StopServices,$Stamp)
                 $services=New-EloWindowsUpdateAdapters -ApprovedRoot $Root -Runtime $Runtime -AllowServiceStop:([bool]$StopServices)
                 $quiesce=$null; $resume=$null
@@ -181,6 +182,25 @@ function Get-EloEnvironmentMitigation {
         $state.user=Get-EloReportOptionState $options.User
     } catch { }
     return $state
+}
+function Get-EloOnlineView {
+    param($Online)
+    return @{checked=[bool]$Online.Checked;current=[string]$Online.Current;latest=[string]$Online.Latest;available=[bool]$Online.Available;installed=[string]$Online.Installed
+        catalog=@{source=[string]$Online.Catalog.Source;updated=[string]$Online.Catalog.Updated;reason=[string]$Online.Catalog.Reason}}
+}
+function Invoke-EloSelfUpdate {
+    # Only the version the page offered, once, and never while a scan or a recovery is pending.
+    param($Session,[string]$Version)
+    $online=$Session.Online
+    if (-not $online -or -not $online.Available -or $online.Installed -or [string]$online.Latest -cne $Version -or $Session.Worker -or $Session.RecoveryRequired) { Stop-EloRequest 409 'tool_update_unavailable' }
+    try { $done=& $Session.Adapters.InstallUpdate ([string]$online.Current) $Version }
+    catch {
+        Write-EloLog $Session "Tool update to $Version FAILED: $(ConvertTo-EloUpdateCode $_.Exception.Message)"
+        Stop-EloRequestDetail 409 'tool_update_failed' (ConvertTo-EloUpdateCode $_.Exception.Message)
+    }
+    $online.Installed=[string]$done.Version
+    Write-EloLog $Session "Tool updated to $($done.Version). Previous file: $($done.Backup). Close this window and start the .bat again."
+    return @{ok=$true}
 }
 function Get-EloVulnerabilityInfo {
     # What the UI needs per active vulnerability: severity, problem and solution texts, and the action ids.
@@ -1191,7 +1211,7 @@ function Invoke-EloApi {
     param($Session,$Request)
     Assert-EloBoundary $Session $Request
     if (-not (Test-EloSecret ([string]$Request.Headers['X-Session-Token']) $Session.Token)) { Stop-EloRequest 401 'authentication_required' }
-    $get=@('/api/status','/api/results','/api/community/status','/api/community/job'); $post=@('/api/scan','/api/cancel','/api/preview','/api/action','/api/report','/api/community/models','/api/community/setup','/api/community/run','/api/community/cancel','/api/community/access','/api/community/refine','/api/community/validate')
+    $get=@('/api/status','/api/results','/api/community/status','/api/community/job'); $post=@('/api/scan','/api/cancel','/api/preview','/api/action','/api/report','/api/self-update','/api/community/models','/api/community/setup','/api/community/run','/api/community/cancel','/api/community/access','/api/community/refine','/api/community/validate')
     if ($Request.Target -cnotin ($get+$post)) { Stop-EloRequest 404 'unknown_route' }
     if (($Request.Target -cin $get -and $Request.Method -cne 'GET') -or ($Request.Target -cin $post -and $Request.Method -cne 'POST')) { Stop-EloRequest 405 'method_rejected' }
     Update-EloScanWorker $Session
@@ -1205,10 +1225,17 @@ function Invoke-EloApi {
         if ($Request.Target -ceq '/api/status') { return @{state=$Session.State} }
         if ($Session.RecoveryRequired) { Stop-EloRequest 500 'rollback_failed_manual_recovery_required' }
         if ($Session.LastError) { Stop-EloRequest $Session.LastError.Status $Session.LastError.Code }
-        return @{results=@($Session.Results);security=(Get-EloSecurityMetadata);vulnerabilities=@(Get-EloVulnerabilityInfo);backups=@(Get-EloBackupList $Session);environment=(Get-EloEnvironmentMitigation $Session)}
+        $payload=@{results=@($Session.Results);security=(Get-EloSecurityMetadata);vulnerabilities=@(Get-EloVulnerabilityInfo);backups=@(Get-EloBackupList $Session);environment=(Get-EloEnvironmentMitigation $Session)}
+        if ($Session.Online) { $payload.online=Get-EloOnlineView $Session.Online }
+        return $payload
     }
     if ($Request.Headers['Content-Type'] -cnotin @('application/json','application/json; charset=utf-8')) { Stop-EloRequest 415 'json_required' }
     switch -CaseSensitive ($Request.Target) {
+        '/api/self-update' {
+            $body=ConvertFrom-EloBody $Request.Body -Required @('version')
+            if ($body.version -cnotmatch '^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$') { Stop-EloRequest 400 'invalid_version' }
+            return (Invoke-EloSelfUpdate $Session $body.version)
+        }
         '/api/report' {
             $body=ConvertFrom-EloBody $Request.Body -Required @('language')
             if ($body.language -cnotin @('en','de','es')) { Stop-EloRequest 400 'invalid_language' }
@@ -1363,6 +1390,8 @@ function ConvertTo-EloErrorResponse {
             else { $warnings+=@{en="The community helper failed.$detail Check the backend window for details; credentials are never shown.";de="Der Community-Helfer ist fehlgeschlagen.$detail Details im Backend-Fenster pruefen; Zugangsdaten werden nie angezeigt."} }
         }
         'community_run_missing' { $warnings+=@{en='That run folder no longer exists. Run the analysis again.';de='Dieser Lauf-Ordner existiert nicht mehr. Analyse erneut ausfuehren.';es='Esa carpeta de ejecucion ya no existe. Vuelve a ejecutar el analisis.'} }
+        'tool_update_failed' { $warnings+=@{en="The tool update failed.$detail The tool file is unchanged.";de="Die Aktualisierung des Werkzeugs ist fehlgeschlagen.$detail Die Datei des Werkzeugs ist unveraendert.";es="Falló la actualización de la herramienta.$detail El archivo de la herramienta no ha cambiado."} }
+        'tool_update_unavailable' { $warnings+=@{en='This tool update cannot be applied now. Wait for a running scan or restart the tool.';de='Diese Aktualisierung kann jetzt nicht angewendet werden. Laufenden Scan abwarten oder das Werkzeug neu starten.';es='Esta actualización no se puede aplicar ahora. Espera a que termine el escaneo o reinicia la herramienta.'} }
         'update_not_needed' { $warnings+=@{en='This runtime is already the newest release of its branch. Nothing to update.';de='Diese Runtime ist bereits die neueste Version ihres Branches. Nichts zu aktualisieren.'} }
         'no_backup_for_target' { $warnings+=@{en='No backup from this session exists for this runtime. Restore manually from a backup ZIP using the commands in the technical report.';de='Fuer diese Runtime existiert in dieser Sitzung kein Backup. Manuell aus einem Backup-ZIP wiederherstellen; Befehle stehen im technischen Bericht.'} }
         'restore_failed_no_change' { $warnings+=@{en="The restore was rejected before the runtime was swapped.$detail The current runtime is unchanged.";de="Die Wiederherstellung wurde abgelehnt, bevor die Runtime getauscht wurde.$detail Die aktuelle Runtime ist unveraendert."} }
@@ -1411,6 +1440,14 @@ function Start-EloServer {
     try {
         $Port=$listener.LocalEndpoint.Port
         $session=New-EloServerSession -Port $Port -UiHtml $UiHtml -ScanSource $ScanSource
+        if (Get-Command Get-EloOnlineState -CommandType Function -ErrorAction SilentlyContinue) {
+            # Once per start, before the page loads: a newer release, and the shared catalog when none is installed.
+            Write-EloLog $session 'Checking GitHub for a newer release (ELO_PATCH_NO_UPDATE_CHECK=1 disables this).'
+            $session.Online=Get-EloOnlineState -CurrentVersion (Get-EloToolVersion $UiHtml) -Disabled:($env:ELO_PATCH_NO_UPDATE_CHECK -ceq '1')
+            $session.Online.Installed=''
+            Write-EloLog $session (Format-EloCatalogNotice $session.Online)
+            if ($session.Online.Available) { Write-EloLog $session "A newer version of the tool is available: $($session.Online.Latest) (running $($session.Online.Current))." }
+        }
         Invoke-EloSessionLaunch $session -NoBrowser:$NoBrowser -LaunchHandler $LaunchHandler
         Write-Output "ELO local server listening on 127.0.0.1:$Port. Close this host to stop."
         while ($true) {

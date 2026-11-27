@@ -457,6 +457,28 @@ ConvertTo-EloUiResults $s ([pscustomobject]@{Results=@($fixture)})
 Assert ($s.Results.Count -eq 1 -and $s.Results[0].status -ceq 'patched') 'exact parent-verified Temurin build maps to patched'
 Assert ($s.Results[0].path -ceq $fixture.Location) 'result path identifies actual java.exe'
 $security=(Invoke-EloApi $s (Request -Path /api/results)).security
+# Online state: shown in the results only after a check; the self-update needs the exact offered version.
+$noCheck=Invoke-EloApi $s (Request -Path /api/results)
+Assert (-not ($noCheck | ConvertTo-Json -Depth 8).Contains('"online"')) 'without a check the results carry no online state'
+Reject { Invoke-EloApi $s (Request POST /api/self-update '{"version":"9.9.9"}') } 409
+$s.Online=@{Checked=$true;Current='1.4.0';Latest='1.5.0';Available=$true;Catalog=@{Source='downloaded';Updated='2026-12-01';Reason=''}}
+$online=(Invoke-EloApi $s (Request -Path /api/results)).online
+Assert ($online.available -eq $true -and $online.latest -ceq '1.5.0' -and $online.current -ceq '1.4.0' -and $online.installed -ceq '' -and $online.catalog.source -ceq 'downloaded') 'the results report the release and catalog state'
+$script:installCalls=New-Object 'System.Collections.Generic.List[string]'
+$keptInstall=$s.Adapters.InstallUpdate
+$s.Adapters.InstallUpdate={ param($Current,$Expected) $script:installCalls.Add("$Current>$Expected"); @{Version=$Expected;Backup='C:\Tools\ELO-Patch-Tools.bat.backup-1'} }
+Reject { Invoke-EloApi $s (Request POST /api/self-update '{"version":"1.6.0"}') } 409
+Reject { Invoke-EloApi $s (Request POST /api/self-update '{"version":"1.5.0","url":"x"}') } 400
+Reject { Invoke-EloApi $s (Request POST /api/self-update '{"version":"<x>"}') } 400
+Assert ($script:installCalls.Count -eq 0) 'nothing is installed for another version or a malformed request'
+Assert ((Invoke-EloApi $s (Request POST /api/self-update '{"version":"1.5.0"}')).ok -eq $true -and ($script:installCalls -join ',') -ceq '1.4.0>1.5.0') 'the confirmed version is installed'
+Assert ((Invoke-EloApi $s (Request -Path /api/results)).online.installed -ceq '1.5.0') 'the installed version is remembered so the page asks for a restart'
+Reject { Invoke-EloApi $s (Request POST /api/self-update '{"version":"1.5.0"}') } 409
+$s.Online.Installed=''
+$s.Adapters.InstallUpdate={ param($Current,$Expected) throw 'checksum_mismatch' }
+$e=$null; try { $null=Invoke-EloApi $s (Request POST /api/self-update '{"version":"1.5.0"}') } catch { $e=ConvertTo-EloErrorResponse $_.Exception }
+Assert ($e.Status -eq 409 -and $e.Body.error -ceq 'tool_update_failed' -and $e.Body.warnings[0].en.Contains('checksum_mismatch') -and $e.Body.warnings[0].es.Contains('no ha cambiado')) 'a failed self-update says the tool is unchanged and why'
+$s.Online=$null; $s.Adapters.InstallUpdate=$keptInstall
 $keptOptions=$s.Adapters.ReportOptions
 $s.Adapters.ReportOptions={ @{Machine='-XX:-UseBASE64Intrinsics password=secret-fixture';User=$null;Process='-XX:-UseBASE64Intrinsics'} }
 $withEnv=Invoke-EloApi $s (Request -Path /api/results)
