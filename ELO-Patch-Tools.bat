@@ -1197,8 +1197,8 @@ function Get-EloEnvironmentMitigation {
 function Get-EloOnlineView {
     # The page rejects the whole results payload on an unexpected value: free-form catalog fields are blanked.
     param($Online)
-    $updated=[string]$Online.Catalog.Updated; if ($updated -cnotmatch '^[0-9]{4}-[0-9]{2}-[0-9]{2}$') { $updated='' }
-    $reason=[string]$Online.Catalog.Reason; if ($reason -cnotmatch '^[a-z_]{0,64}$') { $reason='' }
+    $updated=[string]$Online.Catalog.Updated; if ($updated -cnotmatch '\A[0-9]{4}-[0-9]{2}-[0-9]{2}\z') { $updated='' }
+    $reason=[string]$Online.Catalog.Reason; if ($reason -cnotmatch '\A[a-z_]{0,64}\z') { $reason='' }
     return @{checked=[bool]$Online.Checked;current=[string]$Online.Current;latest=[string]$Online.Latest;available=[bool]$Online.Available;installed=[string]$Online.Installed
         catalog=@{source=[string]$Online.Catalog.Source;updated=$updated;reason=$reason}}
 }
@@ -5824,6 +5824,49 @@ function Get-EloReleaseAsset {
     if ($actual -ine $expected.Groups[1].Value) { throw 'checksum_mismatch' }
     return , $bytes
 }
+function Test-EloPageText {
+    param($Value, [int]$Max)
+    foreach ($lang in @('en', 'de', 'es')) {
+        $text = $Value.$lang
+        if ($lang -ceq 'es' -and -not $text) { continue }
+        if ($text -isnot [string] -or $text.Trim().Length -lt 1 -or $text.Length -gt $Max -or $text -match '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]') { return $false }
+    }
+    return $true
+}
+function Test-EloPageContract {
+    # What the web page requires of catalog data (validVuln and validSecurity in ui.html). It rejects the whole
+    # results payload on one bad value, so a downloaded catalog must meet it. Keep both sides in step.
+    param($Db)
+    $active = @(Get-EloActiveVulnerabilities $Db)
+    if ($active.Count -gt 32) { return $false }
+    $advisoryIds = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $today = [datetime]::UtcNow.ToString('yyyy-MM-dd')
+    foreach ($v in $active) {
+        if ([string]$v.id -cnotmatch '\A[A-Za-z0-9._-]{3,64}\z' -or @('high', 'medium', 'low') -cnotcontains [string]$v.severity) { return $false }
+        if (([string](@($v.aliases) | Select-Object -First 1)).Length -gt 64) { return $false }
+        foreach ($field in @('title', 'problem', 'solution')) { if (-not (Test-EloPageText $v.$field 2048)) { return $false } }
+        $actions = @($v.actions)
+        if ($actions.Count -gt 16) { return $false }
+        foreach ($a in $actions) {
+            if ([string]$a.id -cnotmatch '\A[a-z0-9-]{1,32}\z') { return $false }
+            if ($a.label -and -not (Test-EloPageText $a.label 256)) { return $false }
+        }
+        if ($v.verifiedOn) {
+            $date = [datetime]::MinValue
+            if ([string]$v.verifiedOn -cnotmatch '\A20[0-9]{2}-[0-9]{2}-[0-9]{2}\z' -or -not [datetime]::TryParseExact([string]$v.verifiedOn, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$date) -or [string]::CompareOrdinal([string]$v.verifiedOn, $today) -gt 0) { return $false }
+        }
+        foreach ($adv in @($v.advisories | Where-Object { $_ })) {
+            $url = [string]$adv.url
+            # A plain https link only: no credentials, port, query, fragment, dot segments or encoded characters.
+            if ($url.Length -gt 512 -or $url -cnotmatch '\Ahttps://[a-z0-9]([a-z0-9.-]*[a-z0-9])?/[A-Za-z0-9._~/-]*\z' -or $url -cmatch '/\.{1,2}(/|\z)') { return $false }
+            if ([string]$adv.id -cnotmatch '\A[A-Za-z0-9_-]{1,128}\z' -or -not $advisoryIds.Add([string]$adv.id)) { return $false }
+            if (-not (Test-EloPageText $adv.title 256)) { return $false }
+        }
+    }
+    if ($advisoryIds.Count -gt 16) { return $false }
+    if ($advisoryIds.Count -gt 0 -and @($active | Where-Object { $_.verifiedOn }).Count -eq 0) { return $false }
+    return $true
+}
 function Merge-EloOnlineCatalog {
     # A downloaded catalog can only ADD vulnerabilities. Every packaged entry stays exactly as packaged, so
     # a release can never change or switch off built-in detection. An added entry may only run java with the
@@ -5843,6 +5886,7 @@ function Merge-EloOnlineCatalog {
     $merged.updated = [string]$Remote.updated
     $merged.vulnerabilities = @(@($merged.vulnerabilities) + $added)
     if (@(Test-EloVulnDb $merged).Count -gt 0) { throw 'catalog_invalid_after_merge' }
+    if (-not (Test-EloPageContract $merged)) { throw 'catalog_page_contract' }
     return $merged
 }
 function Use-EloOnlineCatalog {

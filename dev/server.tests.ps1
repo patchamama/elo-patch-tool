@@ -475,6 +475,8 @@ Assert ((Invoke-EloApi $s (Request POST /api/self-update '{"version":"1.5.0"}'))
 Assert ((Invoke-EloApi $s (Request -Path /api/results)).online.installed -ceq '1.5.0') 'the installed version is remembered so the page asks for a restart'
 Reject { Invoke-EloApi $s (Request POST /api/self-update '{"version":"1.5.0"}') } 409
 $s.Online.Installed=''
+$s.Online.Catalog=@{Source='installed';Updated="2026-11-27`n";Reason='x'}
+Assert ((Invoke-EloApi $s (Request -Path /api/results)).online.catalog.updated -ceq '') 'a date with a trailing newline is blanked'
 $s.Online.Catalog=@{Source='installed';Updated='27.11.2026';Reason='bad reason!'}
 $odd=(Invoke-EloApi $s (Request -Path /api/results)).online.catalog
 Assert ($odd.updated -ceq '' -and $odd.reason -ceq '' -and $odd.source -ceq 'installed') 'an unusual catalog date or reason never reaches the page in a form it rejects'

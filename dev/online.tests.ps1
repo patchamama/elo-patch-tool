@@ -79,7 +79,7 @@ try {
     function New-AddedEntry($ProbeArgs) {
         New-Catalog { param($d)
             $extra = $d.vulnerabilities[0] | ConvertTo-Json -Depth 30 | ConvertFrom-Json
-            $extra.id = 'CVE-2099-000002'; $extra.detection.probes[0].args = $ProbeArgs
+            $extra.id = 'CVE-2099-000002'; $extra.detection.probes[0].args = $ProbeArgs; $extra.advisories = @()
             $d.vulnerabilities = @($d.vulnerabilities[0], $extra) }.GetNewClosure()
     }
     $state = Use-Catalog (New-FakeGitHub 'v1.5.0' (New-AddedEntry @('-version')) 'x')
@@ -90,6 +90,37 @@ try {
         $state = Use-Catalog (New-FakeGitHub 'v1.5.0' (New-AddedEntry $unsafe) 'x')
         Assert ($state.Source -ceq 'packaged' -and $state.Reason -ceq 'catalog_unsafe_probe') "a downloaded probe may not pass $($unsafe[0]) to java"
     }
+    # The page rejects the WHOLE results payload when one catalog value breaks its contract, which would hide the
+    # packaged findings: a downloaded catalog with such an entry is not used.
+    function New-ExtraEntry([scriptblock]$Edit) {
+        New-Catalog { param($d)
+            $extra = $d.vulnerabilities[0] | ConvertTo-Json -Depth 30 | ConvertFrom-Json
+            $extra.id = 'CVE-2099-000003'; $extra.detection.probes[0].args = @('-version'); $extra.verifiedOn = '2026-11-01'
+            $extra.advisories = @($extra.advisories[0]); $extra.advisories[0].id = 'extra-advisory'
+            & $Edit $extra
+            $d.vulnerabilities = @($d.vulnerabilities[0], $extra) }.GetNewClosure()
+    }
+    $state = Use-Catalog (New-FakeGitHub 'v1.5.0' (New-ExtraEntry { param($e) }) 'x')
+    Assert ($state.Source -ceq 'downloaded') 'a well-formed added entry is accepted'
+    $breaking = @{
+        'an advisory link with a fragment' = { param($e) $e.advisories[0].url = 'https://example.org/cpu.html#AppendixJAVA' }
+        'an advisory link with a query' = { param($e) $e.advisories[0].url = 'https://example.org/cpu?x=1' }
+        'an advisory link with dot segments' = { param($e) $e.advisories[0].url = 'https://example.org/a/../b' }
+        'a reused advisory id' = { param($e) $e.advisories[0].id = 'temurin-november-2026' }
+        'an advisory id with a dot' = { param($e) $e.advisories[0].id = 'a.b' }
+        'too many advisories' = { param($e) $first = $e.advisories[0]; $e.advisories = @(1..13 | ForEach-Object { $c = $first | ConvertTo-Json -Depth 5 | ConvertFrom-Json; $c.id = "extra-$_"; $c }) }
+        'a long advisory title' = { param($e) $e.advisories[0].title.en = 'x' * 300 }
+        'a future verification date' = { param($e) $e.verifiedOn = '2099-01-01' }
+        'a malformed verification date' = { param($e) $e.verifiedOn = '01.11.2026' }
+        'a long alias' = { param($e) $e.aliases = @('x' * 65) }
+        'an id ending in a newline' = { param($e) $e.id = "CVE-2026-114938`n" }
+    }
+    foreach ($name in $breaking.Keys) {
+        $state = Use-Catalog (New-FakeGitHub 'v1.5.0' (New-ExtraEntry $breaking[$name]) 'x')
+        Assert ($state.Source -ceq 'packaged' -and @((Get-EloVulnDb).vulnerabilities).Count -eq 1) "a catalog with $name is not used (got $($state.Source) $($state.Reason))"
+    }
+    $many = New-Catalog { param($d) $first = $d.vulnerabilities[0]; $d.vulnerabilities = @(@($first) + @(1..32 | ForEach-Object { $c = $first | ConvertTo-Json -Depth 30 | ConvertFrom-Json; $c.id = "CVE-2099-$(100000+$_)"; $c.detection.probes[0].args = @('-version'); $c.advisories = @(); $c })) }
+    Assert ((Use-Catalog (New-FakeGitHub 'v1.5.0' $many 'x')).Source -ceq 'packaged') 'more vulnerabilities than the page accepts are not used'
     $state = Use-Catalog (New-FakeGitHub 'v1.5.0' '{"schemaVersion":1}' 'x')
     Assert ($state.Source -ceq 'packaged') 'an invalid catalog falls back to the packaged one'
     $state = Use-Catalog (New-FakeGitHub 'v1.5.0' $newerText 'x' @{ 'vulndb.json' = $newerText + ' ' })
