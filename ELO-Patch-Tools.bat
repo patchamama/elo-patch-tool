@@ -2665,7 +2665,7 @@ pre.cmd .c-str{color:#fca5a5}
 <div class="wrap">
 <header class="top">
 <div class="logo"><svg class="i"><use href="#i-cpu"/></svg></div>
-<div><h1>ELO Patch Tools <span id="appVersion" class="version">v1.2.0</span></h1><p class="sub" data-i18n="tagline"></p></div>
+<div><h1>ELO Patch Tools <span id="appVersion" class="version">v1.3.0</span></h1><p class="sub" data-i18n="tagline"></p></div>
 <button id="settingsBtn" class="btn ghost settings-btn" type="button" aria-expanded="false" aria-controls="communityBox"><svg class="i"><use href="#i-gear"/></svg><span data-i18n="settings"></span></button>
 <label class="lang"><svg class="i"><use href="#i-globe"/></svg><span data-i18n="language"></span> <select id="language"><option value="en">English</option><option value="de">Deutsch</option><option value="es">Español</option></select></label>
 </header>
