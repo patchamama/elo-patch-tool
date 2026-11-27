@@ -170,6 +170,18 @@ function Get-EloSecurityMetadata {
     if ($items.Count -eq 0) { return @{verifiedOn=$null;advisories=@()} }
     return @{verifiedOn=[string]($verified | Sort-Object -Descending | Select-Object -First 1);advisories=$items}
 }
+function Get-EloEnvironmentMitigation {
+    # State of the mitigation option in the machine and user environment, whoever set it. Only the state
+    # leaves the backend, never the variable. The tool process scope is not evidence about the server.
+    param($Session)
+    $state=@{machine='Unknown';user='Unknown'}
+    try {
+        $options=& $Session.Adapters.ReportOptions
+        $state.machine=Get-EloReportOptionState $options.Machine
+        $state.user=Get-EloReportOptionState $options.User
+    } catch { }
+    return $state
+}
 function Get-EloVulnerabilityInfo {
     # What the UI needs per active vulnerability: severity, problem and solution texts, and the action ids.
     $list=@()
@@ -1193,7 +1205,7 @@ function Invoke-EloApi {
         if ($Request.Target -ceq '/api/status') { return @{state=$Session.State} }
         if ($Session.RecoveryRequired) { Stop-EloRequest 500 'rollback_failed_manual_recovery_required' }
         if ($Session.LastError) { Stop-EloRequest $Session.LastError.Status $Session.LastError.Code }
-        return @{results=@($Session.Results);security=(Get-EloSecurityMetadata);vulnerabilities=@(Get-EloVulnerabilityInfo);backups=@(Get-EloBackupList $Session)}
+        return @{results=@($Session.Results);security=(Get-EloSecurityMetadata);vulnerabilities=@(Get-EloVulnerabilityInfo);backups=@(Get-EloBackupList $Session);environment=(Get-EloEnvironmentMitigation $Session)}
     }
     if ($Request.Headers['Content-Type'] -cnotin @('application/json','application/json; charset=utf-8')) { Stop-EloRequest 415 'json_required' }
     switch -CaseSensitive ($Request.Target) {

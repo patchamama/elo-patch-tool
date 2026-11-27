@@ -457,6 +457,13 @@ ConvertTo-EloUiResults $s ([pscustomobject]@{Results=@($fixture)})
 Assert ($s.Results.Count -eq 1 -and $s.Results[0].status -ceq 'patched') 'exact parent-verified Temurin build maps to patched'
 Assert ($s.Results[0].path -ceq $fixture.Location) 'result path identifies actual java.exe'
 $security=(Invoke-EloApi $s (Request -Path /api/results)).security
+$keptOptions=$s.Adapters.ReportOptions
+$s.Adapters.ReportOptions={ @{Machine='-XX:-UseBASE64Intrinsics password=secret-fixture';User=$null;Process='-XX:-UseBASE64Intrinsics'} }
+$withEnv=Invoke-EloApi $s (Request -Path /api/results)
+Assert ($withEnv.environment.machine -ceq 'Present' -and $withEnv.environment.user -ceq 'Absent' -and $withEnv.results[0].status -ceq 'patched' -and -not ($withEnv | ConvertTo-Json -Depth 8).Contains('secret-fixture')) 'the results report the environment option state only, and statuses are unchanged'
+$s.Adapters.ReportOptions={ throw 'registry unavailable' }
+Assert ((Invoke-EloApi $s (Request -Path /api/results)).environment.machine -ceq 'Unknown') 'an unreadable environment is unknown, never absent'
+$s.Adapters.ReportOptions=$keptOptions
 Assert ($security.verifiedOn -ceq '2026-11-23' -and $security.advisories.Count -eq 4) 'parent-verified advisory date and complete metadata'
 $openjdk=@($security.advisories | Where-Object { $_.id -ceq 'openjdk-2026-11-17' })[0]
 Assert ($openjdk.title.en.Contains('user-supplied text') -and $openjdk.title.en.Contains('not fetched')) 'OpenJDK provenance is not presented as a direct fetch'

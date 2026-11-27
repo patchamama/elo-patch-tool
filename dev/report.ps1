@@ -480,6 +480,13 @@ function ConvertTo-EloTechnicalReportHtml {
     foreach ($scope in @('Machine','User','Process')) { if ($optionLabels.ContainsKey([string]$r.Options[$scope])) { $optionItems+='<li>'+$scopeLabels[$scope]+': '+$optionLabels[$r.Options[$scope]]+'</li>' } }
     if ($optionItems.Count -gt 0) {
         $lines.Add('<h2>JAVA_TOOL_OPTIONS</h2><ul>'+($optionItems -join '')+'</ul>')
+        # Present on the server but not applied by this session: set outside the tool or in an earlier session.
+        $onServer=@(@('Machine','User') | Where-Object { [string]$r.Options[$_] -ceq 'Present' }).Count -gt 0
+        $ownAction=@($r.Actions | Where-Object { $_.Kind -eq 'Mitigation' -and $_.Status -eq 'Proven' }).Count -gt 0
+        if ($onServer -and -not $ownAction) {
+            $unrecorded=@{en='The option is present in the environment, but this session has no record of applying it: it may have been set outside this tool or in an earlier session.';de='Die Option ist in der Umgebung vorhanden, wurde in dieser Sitzung aber nicht als angewendet verzeichnet: Sie kann ausserhalb dieses Werkzeugs oder in einer frueheren Sitzung gesetzt worden sein.';es='La opción está presente en el entorno, pero no consta como aplicada en esta sesión: pudo configurarse fuera de esta herramienta o en una sesión anterior.'}
+            $lines.Add('<p>'+$unrecorded[$Language]+'</p>')
+        }
         if ($Language -eq 'es') { $lines.Add('<p>Los valores del entorno no prueban que los procesos de ELO existentes estén protegidos.</p>') } elseif ($Language -eq 'de') { $lines.Add('<p>Umgebungswerte beweisen keinen Schutz bestehender ELO-Prozesse.</p>') } else { $lines.Add('<p>Environment values do not prove protection of existing ELO processes.</p>') }
     }
     if (@($r.Actions | Where-Object { $_.Kind -eq 'Update' -and $_.Status -eq 'Failed' }).Count -gt 0 -or @($r.Actions | Where-Object { $_.Kind -eq 'Backup' -and $_.Status -eq 'Proven' }).Count -gt 0) {

@@ -195,6 +195,17 @@ $failed = New-EloTechnicalReport -ResourceCollector $resources -Actions @(@{Kind
 Assert ((ConvertTo-EloTechnicalReportHtml $failed en).Contains('Manual recovery') -and -not (ConvertTo-EloTechnicalReportHtml $failed en).Contains('Expand-Archive')) 'failed update without evidence shows guidance but no invented command'
 $recoverActions=@(@{Kind='Update';Status='Failed';RuntimeIndex=1},@{Kind='Backup';Status='Proven';RuntimeIndex=1;Verified=$true;BackupVerified=$true;EvidenceVerified=$true;EvidenceCode='BackupManifestMatched'})
 $evidence=@{Validated=$true;RuntimeIndex=1;Archive="C:\backups\java's.zip";Original='C:\ELO\java';Destination='C:\isolated\recovery'}
+# An option the session did not apply is said to be unrecorded; one it applied is not.
+$envOnly={ @{Machine='-XX:-UseBASE64Intrinsics';User=$null;Process=$null} }
+$external=New-EloTechnicalReport -ResourceCollector $resources -OptionsCollector $envOnly
+foreach ($pair in @(@('en','no record of applying it'),@('de','nicht als angewendet verzeichnet'),@('es','no consta como aplicada en esta sesi'))) {
+    Assert ((ConvertTo-EloTechnicalReportHtml $external $pair[0]).Contains($pair[1])) "external mitigation is declared unrecorded ($($pair[0]))"
+}
+$ownAction=@{Kind='Mitigation';Status='Proven';Verified=$true;RuntimeIndex=1;EvidenceCode='MachineOptionSet';EvidenceVerified=$true}
+$applied=New-EloTechnicalReport -ResourceCollector $resources -OptionsCollector $envOnly -JvmEvidence @(@{Version='17.0.10';Verified=$true}) -Actions @($ownAction)
+Assert (-not (ConvertTo-EloTechnicalReportHtml $applied 'en').Contains('no record of applying it')) 'a mitigation applied in this session is not called unrecorded'
+$processOnly=New-EloTechnicalReport -ResourceCollector $resources -OptionsCollector { @{Machine=$null;User=$null;Process='-XX:-UseBASE64Intrinsics'} }
+Assert (-not (ConvertTo-EloTechnicalReportHtml $processOnly 'en').Contains('no record of applying it')) 'the tool process environment alone is not reported as a server mitigation'
 $recoveryReport=New-EloTechnicalReport -ResourceCollector $resources -OptionsCollector { $null } -JvmEvidence @(@{Version='17.0.10';Verified=$true}) -Actions $recoverActions -RecoveryEvidence $evidence
 foreach ($lang in @('en','de')) {
     $h=ConvertTo-EloTechnicalReportHtml $recoveryReport $lang

@@ -40,7 +40,7 @@ function boot(hash = '#token=test-session-token', storage = null, local = memory
  const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(m => [m[1],new Element(m[1])]));
  const translated = [...html.matchAll(/data-i18n="([^"]+)"/g)].map(m => { const el=new Element(); el.dataset.i18n=m[1]; return el; });
  const calls=[],downloads=[],timers=[];
- let status={state:'completed',progress:100,checked:4}, results=[row()], security=securityFixture(), backups=null, vulns=null, communityHandler=null;
+ let status={state:'completed',progress:100,checked:4}, results=[row()], security=securityFixture(), backups=null, vulns=null, environment=null, communityHandler=null;
  let preview={previewId:'preview_1',summary:both('Backup then change <script>unsafe()</script>','Sichern, dann ändern'),warnings:[both('Check compatibility','Kompatibilität prüfen')]};
  let failure=null, errorBody={error:'operation_failed',warnings:[]}, raw=null, ack={ok:true};
  const history={replaceState(...args) { history.args=args; }};
@@ -63,13 +63,13 @@ function boot(hash = '#token=test-session-token', storage = null, local = memory
  assert.deepEqual(Object.keys(JSON.parse(options.body)),['language'],'no client-provided evidence');
  return new Response(JSON.stringify({html:'<!doctype html><html lang="'+language+'"><body>safe report</body></html>',pdf:btoa('%PDF-1.4 safe'),fileName:'elo-technical-SRV01-'+language}));
  }
- const body=path.endsWith('/status') ? status : path.endsWith('/results') ? {results,security,...(backups === null ? {} : {backups}),...(vulns === null ? {} : {vulnerabilities:vulns})} : path.endsWith('/preview') ? preview : ack;
+ const body=path.endsWith('/status') ? status : path.endsWith('/results') ? {results,security,...(backups === null ? {} : {backups}),...(vulns === null ? {} : {vulnerabilities:vulns}),...(environment === null ? {} : {environment})} : path.endsWith('/preview') ? preview : ack;
  return new Response(JSON.stringify(body));
  }};
  vm.runInNewContext(scripts[0][1],context,{timeout:2000});
  return {local,el:id => elements.get(id),calls,downloads,history,translated,document,
  poll:async () => { await timers[0](); await tick(); },
- status:value => { status=value; },backups:value => { backups=value; },vulns:value => { vulns=value; },community:value => { communityHandler=value; },results:value => { results=value; },security:value => { security=value; },preview:value => { preview=value; },failure:(value,body={error:'operation_failed',warnings:[]}) => { failure=value; errorBody=body; },raw:value => { raw=value; },ack:value => { ack=value; }};
+ status:value => { status=value; },backups:value => { backups=value; },vulns:value => { vulns=value; },community:value => { communityHandler=value; },results:value => { results=value; },environment:value => { environment=value; },security:value => { security=value; },preview:value => { preview=value; },failure:(value,body={error:'operation_failed',warnings:[]}) => { failure=value; errorBody=body; },raw:value => { raw=value; },ack:value => { ack=value; }};
 }
 (async () => {
  const technical=boot(); await tick();
@@ -732,6 +732,16 @@ function boot(hash = '#token=test-session-token', storage = null, local = memory
  assert(okUi.el('scanOk').textContent.includes('1 runtime(s) could not be evaluated') && okUi.el('scanOk').textContent.includes('does not prove they are safe'));
  changeLocale(okUi,'es'); assert(okUi.el('scanOk').textContent.startsWith('No se ha detectado ningún problema de seguridad')); changeLocale(okUi,'en');
  okUi.results([row({status:'vulnerable'})]); await okUi.poll(); assert.equal(okUi.el('scanOk').attrs.hidden,''); assert.equal(okUi.el('vulnOk').attrs.hidden,'');
+ // ---- a mitigation found in the environment is announced without removing the red warning
+ const envUi = boot(); await tick();
+ envUi.results([row({status:'vulnerable'})]); await envUi.poll();
+ assert.equal(envUi.el('envNote').attrs.hidden,'');
+ envUi.environment({machine:'Present',user:'Absent'}); await envUi.poll();
+ for (const id of ['envNote','envNote2']) { assert.equal(envUi.el(id).attrs.hidden,undefined); assert(envUi.el(id).textContent.includes('Mitigation present in the environment (Machine), not verified in ELO')); }
+ assert.equal(envUi.el('scanAlert').attrs.hidden,undefined,'the red warning stays');
+ changeLocale(envUi,'es'); assert(envUi.el('envNote').textContent.includes('Mitigación presente en el entorno (Máquina), sin verificar en ELO')); changeLocale(envUi,'en');
+ envUi.environment({machine:'Conflict',user:'Unknown'}); await envUi.poll(); assert.equal(envUi.el('envNote').attrs.hidden,'');
+ envUi.environment({machine:'yes',user:'Absent'}); await envUi.poll(); assert(envUi.el('error').textContent.includes('invalid response'));
  console.log('PASS: JVM evidence/export, exact advisory allowlist, bounded errors/warnings, admin/access denial, rollback/recovery lock, unavailable update, locales and token security');
 })().catch(error => { console.error(error); process.exitCode=1; });
 '@
