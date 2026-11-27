@@ -120,7 +120,7 @@ function Invoke-EloJavaSelfTest {
 function Get-EloUpdateGaps {
     @('Supported: Eclipse Temurin and Azul Zulu, Windows x86/x64/ARM64, JDK or JRE of the same branch; the newest GA release is resolved from the vendor API at preview time. Other vendors are refused.',
       'Backups and restores cover content, owner, group and DACL; SACL (auditing) entries are not captured.',
-      'Quiescence is checked fail-closed (no process or service with the runtime loaded, exclusive open of java binaries); services are stopped only with explicit confirmation and restarted afterwards. ELO compatibility is never assumed.')
+      'Quiescence is checked fail-closed (no process or service with the runtime loaded, exclusive open of java binaries); every active ELO service is stopped only with explicit confirmation, restarted afterwards and checked for loading. ELO compatibility is never assumed.')
 }
 function New-EloUpdateContext {
     param([hashtable]$Adapters=@{}, [switch]$Simulation, [switch]$Production)
@@ -623,14 +623,14 @@ function Test-EloSameJavaRelease {
     }
 }
 function Get-EloRuntimeUsers {
-    # Running services and other processes that have the runtime loaded: their image
+    # Active services and other processes that have the runtime loaded: their image
     # or any loaded module lives below the runtime directory. Read-only; protected
     # processes whose modules cannot be listed are skipped (and cannot be proven idle).
     param([string]$Path)
     $prefix=[IO.Path]::GetFullPath($Path).TrimEnd('\')+'\'
     $services=@{}
     foreach ($service in @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop)) {
-        if ([int]$service.ProcessId -gt 0 -and [string]$service.State -ceq 'Running') { $services[[int]$service.ProcessId]=$service }
+        if (@(Get-EloActiveServiceMap @($service)).Count -eq 1) { $services[[int]$service.ProcessId]=$service }
     }
     $found=@{Services=@();Processes=@()}
     $all=@(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
@@ -663,6 +663,87 @@ function Get-EloRuntimeUsers {
         } else { $found.Processes+=@(@{Id=$id;Name=[string]$process.Name}) }
     }
     return $found
+}
+function Get-EloActiveServiceMap {
+    # Every service that still owns a process. A service in Stop Pending (or any other
+    # pending/paused state) is still a service, never a foreign process.
+    param($Services)
+    return @($Services | Where-Object { [int]$_.ProcessId -gt 0 -and [string]$_.State -cne 'Stopped' })
+}
+function Select-EloStackServices {
+    # The active ELO services: named ELO*, or installed below the ELO folder that holds the
+    # runtime. A drive root is never used as that folder.
+    param($Services,[string]$EloRoot)
+    $prefix=''
+    if ($EloRoot -and $EloRoot.TrimEnd('\') -cnotmatch '^[A-Za-z]:$') { $prefix=$EloRoot.TrimEnd('\')+'\' }
+    return @(Get-EloActiveServiceMap $Services | Where-Object {
+        $image=([string]$_.PathName).TrimStart('"')
+        ([string]$_.Name -match '^ELO([-_ ]|$)') -or ($prefix -and $image.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase))
+    })
+}
+function Get-EloServiceOrder {
+    # ELO-Basis hosts what the other ELO services depend on: it stops last and starts first.
+    param([string[]]$Names,[switch]$Start)
+    $unique=@($Names | Where-Object { $_ } | Select-Object -Unique)
+    $basis=@($unique | Where-Object { $_ -match '(?i)^ELO[-_ ]Basis' }); $others=@($unique | Where-Object { $_ -notmatch '(?i)^ELO[-_ ]Basis' })
+    if ($Start) { return @($basis+$others) }
+    return @($others+$basis)
+}
+function Get-EloAffectedServices {
+    # What a runtime change has to stop: whatever has the runtime loaded plus every active ELO service.
+    param([string]$Path)
+    $users=Get-EloRuntimeUsers $Path
+    $all=@(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop)
+    $found=@{}; foreach ($service in $users.Services) { $found[[string]$service.Name]=$service }
+    foreach ($service in @(Select-EloStackServices $all ([IO.Path]::GetDirectoryName($Path.TrimEnd('\'))))) {
+        if (-not $found.ContainsKey([string]$service.Name)) { $found[[string]$service.Name]=@{Name=[string]$service.Name;DisplayName=[string]$service.DisplayName;ProcessId=[int]$service.ProcessId} }
+    }
+    $states=@{}; foreach ($service in $all) { $states[[string]$service.Name]=[string]$service.State }
+    $services=@(Get-EloServiceOrder @($found.Keys | Sort-Object) | ForEach-Object { $item=$found[$_]; $item.State=$states[$_]; $item })
+    return @{Services=$services;Processes=$users.Processes}
+}
+function Stop-EloOneService {
+    # One stop request, never a process kill. A Stop Pending service is only waited for.
+    param([string]$Name,[hashtable]$Control)
+    $pending=([string](& $Control.Status $Name) -ceq 'StopPending')
+    if (-not $pending) { $null=& $Control.Stop $Name }
+    if (-not (& $Control.WaitStopped $Name)) {
+        if ($pending) { throw ('service_stuck_stop_pending:'+$Name) }
+        throw ('service_stop_timeout:'+$Name)
+    }
+}
+function Test-EloServicesLoaded {
+    # Loaded = Running with every previously listening port listening again, and still so
+    # after the settle time. Returns the names of the services that did not load.
+    param([hashtable]$Expected,[scriptblock]$Probe,[scriptblock]$Clock,[scriptblock]$Sleep,[int]$TimeoutSeconds=300,[int]$SettleSeconds=20)
+    $failing={
+        foreach ($name in @($Expected.Keys | Sort-Object)) {
+            $sample=& $Probe $name
+            if ([string]$sample.Status -cne 'Running' -or @($Expected[$name] | Where-Object { @($sample.Ports) -notcontains $_ }).Count -gt 0) { $name }
+        }
+    }
+    $begin=& $Clock
+    while ($true) {
+        $failed=@(& $failing)
+        if ($failed.Count -eq 0) { break }
+        if (((& $Clock)-$begin) -ge $TimeoutSeconds) { return $failed }
+        $null=& $Sleep 5
+    }
+    $null=& $Sleep $SettleSeconds
+    return @(& $failing)
+}
+function Get-EloServiceSample {
+    # Status of one service and the fixed (non-ephemeral) TCP ports its process tree listens on.
+    param([string]$Name)
+    $service=Get-CimInstance -ClassName Win32_Service -Filter ("Name='"+$Name.Replace("'","''")+"'") -ErrorAction Stop
+    if (-not $service) { return @{Status='Missing';Ports=@()} }
+    $status=([string]$service.State) -replace ' ',''
+    if ([int]$service.ProcessId -le 0) { return @{Status=$status;Ports=@()} }
+    $tree=@{}; $tree[[int]$service.ProcessId]=$true
+    $all=@(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
+    do { $added=$false; foreach ($process in $all) { if ($tree.ContainsKey([int]$process.ParentProcessId) -and -not $tree.ContainsKey([int]$process.ProcessId)) { $tree[[int]$process.ProcessId]=$true; $added=$true } } } while ($added)
+    $ports=@(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $tree.ContainsKey([int]$_.OwningProcess) -and [int]$_.LocalPort -lt 49152 } | ForEach-Object { [int]$_.LocalPort } | Sort-Object -Unique)
+    return @{Status=$status;Ports=$ports}
 }
 function Test-EloRuntimeQuiescent {
     # Strict: nothing uses the runtime and its java binaries can be opened exclusively.
@@ -756,7 +837,7 @@ function Invoke-EloBackupRestore {
         $null=Assert-EloWindowsBoundary $Root $path
         if (Test-Path -LiteralPath $path) { throw 'recovery_or_staging_path_exists' }
     }
-    $input=[IO.File]::OpenRead($Backup); $zip=$null; $quiesced=$false; $aclExact=$true
+    $input=[IO.File]::OpenRead($Backup); $zip=$null; $quiesced=$false; $aclExact=$true; $outcome=$null
     try {
         $zip=New-Object IO.Compression.ZipArchive($input,[IO.Compression.ZipArchiveMode]::Read,$true)
         $manifestEntry=$zip.GetEntry('manifest.json')
@@ -828,17 +909,19 @@ function Invoke-EloBackupRestore {
             if ($moved -and -not (Test-Path -LiteralPath $Runtime)) { [IO.Directory]::Move($replaced,$Runtime) }
             throw
         }
-        return @{Restored=$true;Replaced=$(if ($moved) { $replaced } else { $null });AclExact=$aclExact}
+        $outcome=@{Restored=$true;Replaced=$(if ($moved) { $replaced } else { $null });AclExact=$aclExact;ServiceError=$null}
+        return $outcome
     } finally {
         if ($zip) { $zip.Dispose() }; $input.Dispose()
-        if ($quiesced -and $Resume) { try { $null=& $Resume } catch { } }
+        # $outcome is the object already returned: a failed restart or load check is added to it.
+        if ($quiesced -and $Resume) { try { $null=& $Resume } catch { if ($outcome) { $outcome.ServiceError=$_.Exception.Message } } }
     }
 }
 function New-EloWindowsUpdateAdapters {
     param([Parameter(Mandatory=$true)][string]$ApprovedRoot,[Parameter(Mandatory=$true)][string]$Runtime,[switch]$AllowServiceStop)
     # Factory itself performs no IO. Only direct, explicitly invoked adapter calls
     # can do work. Engine production gate remains closed regardless of injection.
-    $state=@{Root=$ApprovedRoot;Runtime=$Runtime;Original=$null;Staged=$null;FailedPath=$null;Stopped=(New-Object 'System.Collections.Generic.List[string]');AllowServiceStop=[bool]$AllowServiceStop}
+    $state=@{Root=$ApprovedRoot;Runtime=$Runtime;Original=$null;Staged=$null;FailedPath=$null;Stopped=(New-Object 'System.Collections.Generic.List[string]');Ports=@{};AllowServiceStop=[bool]$AllowServiceStop}
     $adapters=@{
         EloWindowsAdapters=$true
         Clock={ [DateTime]::UtcNow }
@@ -931,30 +1014,49 @@ function New-EloWindowsUpdateAdapters {
         }.GetNewClosure()
     }
     if ($AllowServiceStop) {
-        # Opt-in (the user confirmed the services listed in the preview). Only services that
-        # actually use this runtime are stopped, dependents are restarted, and Resume runs
-        # on success and on failure alike.
+        # Opt-in (the user confirmed the services listed in the preview). Every active ELO
+        # service and every service using this runtime is stopped; Resume starts them again
+        # on success and on failure alike, then checks that they loaded.
         $adapters.Quiesce={ param($Paths)
-            $users=Get-EloRuntimeUsers $Paths.Runtime
+            $users=Get-EloAffectedServices $Paths.Runtime
             if ($users.Processes.Count -gt 0) { throw 'runtime_in_use_by_process' }
-            foreach ($user in $users.Services) {
-                $service=Get-Service -Name $user.Name -ErrorAction Stop
-                $state.Stopped.Add([string]$user.Name)
-                foreach ($dependent in @($service.DependentServices | Where-Object { $_.Status -eq 'Running' })) { $state.Stopped.Add([string]$dependent.Name) }
-                Stop-Service -Name $user.Name -Force -ErrorAction Stop
-                $service.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(90))
+            # Listening ports are recorded before anything stops: they are the load check afterwards.
+            foreach ($user in $users.Services) { $state.Ports[[string]$user.Name]=@((Get-EloServiceSample $user.Name).Ports) }
+            $control=@{
+                Status={ param($n) [string](Get-Service -Name $n -ErrorAction Stop).Status }
+                Stop={ param($n) Stop-Service -Name $n -Force -NoWait -ErrorAction Stop }
+                WaitStopped={ param($n) try { (Get-Service -Name $n -ErrorAction Stop).WaitForStatus('Stopped',[TimeSpan]::FromSeconds(180)); $true } catch [System.ServiceProcess.TimeoutException] { $false } }
+            }
+            foreach ($name in @(Get-EloServiceOrder @($users.Services | ForEach-Object { [string]$_.Name }))) {
+                $service=Get-Service -Name $name -ErrorAction Stop
+                if ([string]$service.Status -ceq 'Stopped') { if (-not $state.Stopped.Contains($name)) { $state.Stopped.Add($name) }; continue }
+                foreach ($dependent in @($service.DependentServices | Where-Object { $_.Status -ne 'Stopped' })) {
+                    if (-not $state.Stopped.Contains([string]$dependent.Name)) { $state.Stopped.Add([string]$dependent.Name) }
+                    Stop-EloOneService ([string]$dependent.Name) $control
+                }
+                if (-not $state.Stopped.Contains($name)) { $state.Stopped.Add($name) }
+                Stop-EloOneService $name $control
             }
             if (-not (Test-EloRuntimeQuiescent $Paths.Runtime)) { throw 'runtime_still_in_use_after_service_stop' }
             @($state.Stopped)
         }.GetNewClosure()
         $adapters.Resume={ param($Paths,$Stopped)
             $failed=New-Object 'System.Collections.Generic.List[string]'
-            foreach ($name in @($state.Stopped)) {
-                try { $service=Get-Service -Name $name -ErrorAction Stop; if ($service.Status -ne 'Running') { Start-Service -Name $name -ErrorAction Stop; $service.WaitForStatus('Running',[TimeSpan]::FromSeconds(90)) } }
-                catch { $failed.Add($name) }
+            $expected=@{}
+            foreach ($name in @(Get-EloServiceOrder @($state.Stopped) -Start)) {
+                try {
+                    $service=Get-Service -Name $name -ErrorAction Stop
+                    if ($service.Status -ne 'Running') { Start-Service -Name $name -ErrorAction Stop; $service.WaitForStatus('Running',[TimeSpan]::FromSeconds(180)) }
+                    $expected[$name]=@($state.Ports[$name] | Where-Object { $null -ne $_ })
+                } catch { $failed.Add($name) }
             }
-            $state.Stopped.Clear()
+            $state.Stopped.Clear(); $state.Ports.Clear()
             if ($failed.Count -gt 0) { throw ('service_restart_failed:'+($failed -join '+')) }
+            if ($expected.Count -gt 0) {
+                $watch=[Diagnostics.Stopwatch]::StartNew()
+                $unhealthy=@(Test-EloServicesLoaded -Expected $expected -Probe { param($n) Get-EloServiceSample $n } -Clock { $watch.Elapsed.TotalSeconds }.GetNewClosure() -Sleep { param($seconds) Start-Sleep -Seconds $seconds })
+                if ($unhealthy.Count -gt 0) { throw ('service_unhealthy:'+($unhealthy -join '+')) }
+            }
         }.GetNewClosure()
     }
     return $adapters

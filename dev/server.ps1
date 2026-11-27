@@ -74,7 +74,7 @@ function New-EloServerSession {
             Identity={ param($Path) Get-EloRuntimeIdentity $Path }
             EloVersion={ param($Roots) Get-EloInstalledIndexserverVersion $Roots }
             ResolveRelease={ param($Identity) Resolve-EloLatestRelease -Vendor $Identity.Vendor -Branch $Identity.Branch -Architecture $Identity.Architecture -ImageType $Identity.ImageType }
-            RuntimeUsers={ param($Path) Get-EloRuntimeUsers $Path }
+            RuntimeUsers={ param($Path) Get-EloAffectedServices $Path }
             RestoreBackup={ param($Root,$Runtime,$Backup,$StopServices,$Stamp)
                 $services=New-EloWindowsUpdateAdapters -ApprovedRoot $Root -Runtime $Runtime -AllowServiceStop:([bool]$StopServices)
                 $quiesce=$null; $resume=$null
@@ -638,6 +638,24 @@ function Get-EloUpdateUsers {
     if ($blockers.Count -gt 0) { Stop-EloRequestDetail 409 'update_preview_refused' ('runtime_in_use_by_'+($blockers -join '+')) }
     return @($users.Services)
 }
+function Get-EloStopPendingWarning {
+    param($Services)
+    $names=@($Services | Where-Object { [string]$_.State -ceq 'Stop Pending' } | ForEach-Object { [string]$_.Name })
+    if ($names.Count -eq 0) { return @() }
+    $list=$names -join ', '
+    return @(@{en="Already in Stop Pending: $list. The tool waits up to 3 minutes for it to stop and never kills it. If it stays stuck, the change is refused.";de="Bereits im Status Stop Pending: $list. Das Werkzeug wartet bis zu 3 Minuten auf das Beenden und erzwingt es nie. Bleibt der Dienst haengen, wird die Aenderung abgelehnt.";es="Ya están en Stop Pending: $list. La herramienta espera hasta 3 minutos a que se detengan y nunca los mata. Si siguen colgados, el cambio se rechaza."})
+}
+function Get-EloServiceOutcome {
+    # The Java change succeeded but ELO did not come back cleanly: say it, and say that restoring is possible.
+    param($Session,[string]$ServiceError)
+    $code=ConvertTo-EloUpdateCode $ServiceError
+    $services=([string]$ServiceError -replace '^[a-z_]+:?','') -replace '\+',', '
+    $kind='services_not_restarted'
+    if ($code -clike 'service_unhealthy*') { $kind='services_unhealthy' }
+    Write-EloLog $Session "WARNING: $kind $services"
+    $warning=@{en="Java was changed, but these ELO services did not start or load correctly: $services. The new Java version may be incompatible with ELO. Check the ELO logs; you can restore the previous version from the backup.";de="Java wurde geaendert, aber diese ELO-Dienste sind nicht korrekt gestartet oder geladen: $services. Die neue Java-Version ist moeglicherweise nicht mit ELO kompatibel. ELO-Logs pruefen; die vorherige Version kann aus dem Backup wiederhergestellt werden.";es="Se cambió Java, pero estos servicios de ELO no arrancaron o no cargaron bien: $services. La nueva versión de Java puede ser incompatible con ELO. Revisa los logs de ELO; puedes restaurar la versión anterior desde la copia."}
+    return @{ok=$true;warning=$kind;warnings=@($warning)}
+}
 function Format-EloServiceList {
     param($Services)
     return ((@($Services | ForEach-Object { [string]$_.Name } | Select-Object -First 12)) -join ', ')
@@ -674,7 +692,7 @@ function New-EloRuntimeUpdatePreview {
         @{en='The download is limited to the vendor''s official release host and its published SHA256. Installing the vendor package with its installer remains the preferred long-term fix.';de='Der Download ist auf den offiziellen Herstellerhost und die veroeffentlichte SHA256 beschraenkt. Die Installation des Herstellerpakets mit dem Installer bleibt die bevorzugte langfristige Loesung.'})
     if ($services.Count -gt 0) {
         $list=Format-EloServiceList $services
-        $warnings=@(@{en="These services use the runtime and will be STOPPED before the replacement and started again afterwards: $list. ELO is unavailable meanwhile. Confirming accepts this.";de="Diese Dienste verwenden die Runtime und werden vor dem Austausch BEENDET und danach wieder gestartet: $list. ELO ist in dieser Zeit nicht verfuegbar. Mit der Bestaetigung wird dies akzeptiert."})+$warnings
+        $warnings=@(@{en="All active ELO services (and any other service using this runtime) will be STOPPED before the replacement and started again afterwards: $list. ELO is unavailable meanwhile. Confirming accepts this.";de="Alle aktiven ELO-Dienste (und jeder weitere Dienst, der diese Runtime verwendet) werden vor dem Austausch BEENDET und danach wieder gestartet: $list. ELO ist in dieser Zeit nicht verfuegbar. Mit der Bestaetigung wird dies akzeptiert.";es="Todos los servicios de ELO activos (y cualquier otro servicio que use este runtime) se DETENDRÁN antes de la sustitución y se volverán a arrancar después: $list. ELO no está disponible mientras tanto. Al confirmar aceptas esto."})+@(Get-EloStopPendingWarning $services)+$warnings
     }
     return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe;es=$summaryEs};warnings=$warnings}
 }
@@ -730,7 +748,7 @@ function Invoke-EloRuntimeUpdateAction {
     $serviceNote=''; if ($result.ServiceError) { $serviceNote=ConvertTo-EloUpdateCode $result.ServiceError }
     switch ([string]$result.Status) {
         { $_ -in @('Success','SimulatedSuccess') } {
-            if ($serviceNote) { return @{ok=$true;warning='services_not_restarted'} }
+            if ($serviceNote) { return (Get-EloServiceOutcome $Session ([string]$result.ServiceError)) }
             return @{ok=$true}
         }
         'RolledBack' { Stop-EloRequestDetail 422 'update_failed_rolled_back' $failure }
@@ -775,7 +793,7 @@ function New-EloRestorePreview {
     $warnings=@(Get-EloRestoreSecurityWarning ([string]$source.Risk) $assessment.Vulnerability $vend $ver)
     if ($services.Count -gt 0) {
         $list=Format-EloServiceList $services
-        $warnings=@(@{en="The restore requires STOPPING the ELO services (Tomcat) that use this runtime: $list. ELO is unavailable while the runtime is swapped; they are started again afterwards. Confirming accepts this.";de="Die Wiederherstellung erfordert das BEENDEN der ELO-Dienste (Tomcat), die diese Runtime verwenden: $list. ELO ist waehrend des Austauschs nicht verfuegbar; die Dienste werden danach wieder gestartet. Mit der Bestaetigung wird dies akzeptiert."})+$warnings
+        $warnings=@(@{en="The restore requires STOPPING all active ELO services (Tomcat) and any other service using this runtime: $list. ELO is unavailable while the runtime is swapped; they are started again afterwards. Confirming accepts this.";de="Die Wiederherstellung erfordert das BEENDEN aller aktiven ELO-Dienste (Tomcat) und jedes weiteren Dienstes, der diese Runtime verwendet: $list. ELO ist waehrend des Austauschs nicht verfuegbar; die Dienste werden danach wieder gestartet. Mit der Bestaetigung wird dies akzeptiert.";es="La restauración exige DETENER todos los servicios de ELO (Tomcat) activos y cualquier otro servicio que use este runtime: $list. ELO no está disponible mientras se cambia el runtime; después se vuelven a arrancar. Al confirmar aceptas esto."})+@(Get-EloStopPendingWarning $services)+$warnings
     } else {
         $warnings=@(@{en='No running service or process uses this runtime right now. If the ELO Tomcat services run on it, stop them first (ELO will be unavailable) or the restore is refused.';de='Zurzeit verwendet kein laufender Dienst oder Prozess diese Runtime. Laufen die ELO-Tomcat-Dienste darauf, diese zuerst beenden (ELO ist dann nicht verfuegbar), sonst wird die Wiederherstellung abgelehnt.'})+$warnings
     }
@@ -793,7 +811,7 @@ function Invoke-EloRestoreAction {
     }
     $index=[int]$preview.Index
     try {
-        $null=& $Session.Adapters.RestoreBackup $preview.Root $preview.Runtime $preview.Backup ($preview.Services.Count -gt 0) $preview.Stamp
+        $swap=& $Session.Adapters.RestoreBackup $preview.Root $preview.Runtime $preview.Backup ($preview.Services.Count -gt 0) $preview.Stamp
         $restored=& $Session.Adapters.Identity $preview.Runtime
         if ([string]$preview.ToVersion -and [string]$preview.ToVersion -cne 'unknown' -and -not (Test-EloSameJavaRelease ([string]$restored.Version) ([string]$preview.ToVersion))) { throw 'restored_version_mismatch' }
     } catch {
@@ -815,6 +833,7 @@ function Invoke-EloRestoreAction {
     $logName='logRestoreFixed'; if ($classification -ceq 'PotentiallyVulnerable') { $logName='logRestoreVulnerable' } elseif ($classification -ceq 'Unknown') { $logName='logRestoreUnknown' }
     if ($logAssessment.Vulnerability -and $logAssessment.Vulnerability.messages.$logName) { Write-EloLog $Session (Format-EloVulnText ([string]$logAssessment.Vulnerability.messages.$logName) $logValues) }
     $Session.LastUpdate=$null; $Session.BackupsCache=$null
+    if ($swap -and $swap.ServiceError) { return (Get-EloServiceOutcome $Session ([string]$swap.ServiceError)) }
     return @{ok=$true}
 }function Get-EloSessionReportBundle {
     # One report in both formats, named after the server it describes.
@@ -1279,8 +1298,6 @@ function Add-EloSpanish {
     if ($Item -isnot [hashtable] -or -not $Item.ContainsKey('en') -or $Item.ContainsKey('es')) { return $Item }
     $en=[string]$Item.en
     if ($script:EloSpanishStatic.ContainsKey($en)) { $Item.es=$script:EloSpanishStatic[$en]; return $Item }
-    if ($en -cmatch '^These services use the runtime and will be STOPPED before the replacement and started again afterwards: (.+)\. ELO is unavailable meanwhile\. Confirming accepts this\.$') { $Item.es='Estos servicios usan el runtime y se DETENDRÁN antes de la sustitución y se volverán a arrancar después: '+$Matches[1]+'. ELO no está disponible mientras tanto. Al confirmar aceptas esto.'; return $Item }
-    if ($en -cmatch '^The restore requires STOPPING the ELO services \(Tomcat\) that use this runtime: (.+)\. ELO is unavailable while the runtime is swapped; they are started again afterwards\. Confirming accepts this\.$') { $Item.es='La restauración exige DETENER los servicios de ELO (Tomcat) que usan este runtime: '+$Matches[1]+'. ELO no está disponible mientras se cambia el runtime; después se vuelven a arrancar. Al confirmar aceptas esto.'; return $Item }
     return $Item
 }
 function ConvertTo-EloErrorResponse {
@@ -1323,6 +1340,8 @@ function ConvertTo-EloErrorResponse {
         'update_failed_rolled_back' { $warnings+=@{en="The new runtime failed validation.$detail The original runtime was restored and verified; the failed runtime and the backup ZIP were kept.";de="Die neue Runtime bestand die Pruefung nicht.$detail Die urspruengliche Runtime wurde wiederhergestellt und geprueft; fehlgeschlagene Runtime und Backup-ZIP bleiben erhalten."} }
         'update_manual_recovery_required' { $warnings+=@{en="Automatic restore failed.$detail Further actions are locked. Restore manually from the backup ZIP using the commands in the technical report.";de="Automatische Wiederherstellung fehlgeschlagen.$detail Weitere Aktionen sind gesperrt. Manuell aus dem Backup-ZIP wiederherstellen; Befehle stehen im technischen Bericht."} }
     }
+    if ($detail -cmatch '\[runtime_in_use_by_') { $warnings+=@{en="A process that does not belong to an active service is using this Java runtime.$detail Close it and try again.";de="Ein Prozess ohne aktiven Dienst verwendet diese Java-Runtime.$detail Beenden und erneut versuchen.";es="Un proceso que no pertenece a un servicio activo está usando este runtime de Java.$detail Ciérralo y vuelve a intentarlo."} }
+    if ($detail -cmatch '\[service_(stuck_stop_pending|stop_timeout):') { $warnings+=@{en="A service did not stop in time.$detail The tool never kills processes: check the service log, end it manually or reboot the server, then try again.";de="Ein Dienst wurde nicht rechtzeitig beendet.$detail Das Werkzeug beendet nie Prozesse zwangsweise: Dienstprotokoll pruefen, manuell beenden oder Server neu starten und erneut versuchen.";es="Un servicio no se detuvo a tiempo.$detail La herramienta nunca mata procesos: revisa el log del servicio, ciérralo a mano o reinicia el servidor y vuelve a intentarlo."} }
     return @{Status=$status;Body=@{error=$code;warnings=@($warnings | ForEach-Object { Add-EloSpanish $_ })}}
 }
 function New-EloLoopbackListener {

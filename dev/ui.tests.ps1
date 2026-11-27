@@ -724,6 +724,14 @@ function boot(hash = '#token=test-session-token', storage = null, local = memory
  assert.equal(mitUi.el('mitigateHint').attrs.hidden,undefined,'and the page explains what that means'); assert.equal(mitUi.el('update').disabled,false,'the update stays available');
  mitUi.results([row({status:'vulnerable'})]); await mitUi.poll();
  assert.equal(mitUi.el('mitigate').disabled,false); assert.equal(mitUi.el('mitigateHint').attrs.hidden,'');
+ // ---- a finished scan without findings says so, and never calls unevaluated runtimes safe
+ const okUi = boot(); await tick();
+ okUi.results([row({status:'patched'})]); await okUi.poll();
+ for (const id of ['scanOk','vulnOk']) { assert.equal(okUi.el(id).attrs.hidden,undefined); assert(okUi.el(id).textContent.startsWith('No security problem was detected in the 1 Java runtime(s) found.')); assert(okUi.el(id).textContent.includes('step 3')); }
+ okUi.results([row({status:'inconclusive'})]); await okUi.poll();
+ assert(okUi.el('scanOk').textContent.includes('1 runtime(s) could not be evaluated') && okUi.el('scanOk').textContent.includes('does not prove they are safe'));
+ changeLocale(okUi,'es'); assert(okUi.el('scanOk').textContent.startsWith('No se ha detectado ningún problema de seguridad')); changeLocale(okUi,'en');
+ okUi.results([row({status:'vulnerable'})]); await okUi.poll(); assert.equal(okUi.el('scanOk').attrs.hidden,''); assert.equal(okUi.el('vulnOk').attrs.hidden,'');
  console.log('PASS: JVM evidence/export, exact advisory allowlist, bounded errors/warnings, admin/access denial, rollback/recovery lock, unavailable update, locales and token security');
 })().catch(error => { console.error(error); process.exitCode=1; });
 '@

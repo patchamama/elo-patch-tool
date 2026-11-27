@@ -318,7 +318,7 @@ $e=Get-ErrorCode { UpdatePreview }
 Assert ($e.Status -eq 409 -and $e.Body.error -ceq 'update_not_needed' -and $m.State.Events.Count -eq 0) 'no update offered when the newest release is installed'
 # Services that use the runtime are listed, stopped only because the preview said so.
 $m=Reset-UpdateSession 'services'; $up=UpdatePreview
-Assert ($up.warnings[0].en.Contains('ELO-SRV01-1') -and $up.warnings[0].en.Contains('STOPPED') -and $m.State.StopServices -eq $true) 'preview lists the services to stop and asks the backend for service control'
+Assert ($up.warnings[0].en.Contains('ELO-SRV01-1') -and $up.warnings[0].en.Contains('STOPPED') -and $up.warnings[0].es.Contains('ELO-SRV01-1') -and $up.warnings[0].es -match 'DETENDR' -and $m.State.StopServices -eq $true) 'preview lists the services to stop and asks the backend for service control'
 $m=Reset-UpdateSession 'ok'; $up=UpdatePreview
 Assert ($m.State.StopServices -eq $false) 'no service control without services'
 # Another process using the runtime blocks the change.
@@ -346,6 +346,28 @@ try {
     $rp=RestorePreview
     $e=Get-ErrorCode { RestoreApply $rp.previewId }
     Assert ($e.Status -eq 422 -and $e.Body.error -ceq 'restore_failed_no_change' -and $e.Body.warnings[0].en.Contains('backup_entry_mismatch') -and @($s.ReportActions | Where-Object { $_.Kind -ceq 'Restore' -and $_.Status -ceq 'Failed' }).Count -eq 1) 'rejected restore is reported and changes nothing'
+} finally { Remove-Item -LiteralPath $fakeBackup -Force -ErrorAction SilentlyContinue }
+# A successful change whose ELO services do not load again is a warning that offers the restore.
+$m=Reset-UpdateSession 'services'
+$s.Adapters.NewUpdateContext={ param($Root,$Runtime,$StopServices) $c=& $m.Factory $Root $Runtime $StopServices; $c.Adapters.Quiesce={ param($Paths) }; $c.Adapters.Resume={ param($Paths,$Stopped) throw 'service_unhealthy:ELO-Basis+ELO-iSearch' }; $c }.GetNewClosure()
+$up=UpdatePreview; $done=UpdateApply $up.previewId
+Assert ($done.ok -and $done.warning -ceq 'services_unhealthy' -and $done.warnings[0].en.Contains('ELO-Basis, ELO-iSearch') -and $done.warnings[0].es.Contains('restaurar') -and $m.State.Installed -eq 'new' -and $null -ne $s.LastUpdate) 'unhealthy ELO services are reported, name the services and keep the restore available'
+# A service already in Stop Pending is announced in the preview.
+$m=Reset-UpdateSession 'ok'; $s.Adapters.RuntimeUsers={ param($Path) @{Services=@(@{Name='ELO-Basis';State='Stop Pending'});Processes=@()} }
+$up=UpdatePreview
+Assert ((@($up.warnings | ForEach-Object { $_.en }) -join ' ').Contains('Already in Stop Pending: ELO-Basis') -and $m.State.StopServices -eq $true) 'a Stop Pending service is handled as a service and announced'
+# A foreign process gets a message that names the real cause.
+$m=Reset-UpdateSession 'process'; $e=Get-ErrorCode { UpdatePreview }
+Assert ((@($e.Body.warnings | ForEach-Object { $_.en }) -join ' ').Contains('does not belong to an active service')) 'the foreign process refusal explains the cause'
+# A restore whose services do not come back warns too.
+$m=Reset-UpdateSession 'ok'; $up=UpdatePreview; $null=UpdateApply $up.previewId
+$fakeBackup=Join-Path ([IO.Path]::GetTempPath()) ('elo-fake-backup-'+[guid]::NewGuid().ToString('N')+'.zip'); [IO.File]::WriteAllText($fakeBackup,'x')
+try {
+    $s.LastUpdate.Backup=$fakeBackup
+    $s.Adapters.Identity={ param($Path) @{Vendor='Eclipse Adoptium';Branch='17';Architecture='x64';ImageType='jdk';Version='17.0.2+8'} }
+    $s.Adapters.RestoreBackup={ param($Root,$Runtime,$Backup,$StopServices,$Stamp) @{Restored=$true;ServiceError='service_restart_failed:ELO-Basis'} }
+    $rp=RestorePreview; $done=RestoreApply $rp.previewId
+    Assert ($done.ok -and $done.warning -ceq 'services_not_restarted' -and $done.warnings[0].en.Contains('ELO-Basis')) 'a restore that cannot restart ELO says so'
 } finally { Remove-Item -LiteralPath $fakeBackup -Force -ErrorAction SilentlyContinue }
 # Existing backups (also from earlier sessions) are listed first and can be restored by server-side id.
 $bkRoot=Join-Path ([IO.Path]::GetTempPath()) ('elo-bk-test-'+[guid]::NewGuid().ToString('N'))
@@ -595,8 +617,6 @@ Assert ($resultsEs.vulnerabilities[0].title.es -match 'Java4Shell' -and $results
 $esErr = Get-ErrorCode { Invoke-EloApi $s (Request POST /api/preview '{"actionId":"mitigate","resultId":"nope"}') }
 $warn = Add-EloSpanish @{en='This runtime is already the newest release of its branch. Nothing to update.';de='x'}
 Assert ($warn.es -ceq 'Este runtime ya es la última versión de su rama. No hay nada que actualizar.') 'static backend warnings are translated from a table'
-$svc = Add-EloSpanish @{en='These services use the runtime and will be STOPPED before the replacement and started again afterwards: ELO-SRV01-1. ELO is unavailable meanwhile. Confirming accepts this.';de='x'}
-Assert ($svc.es -match 'ELO-SRV01-1' -and $svc.es -match 'DETENDRÁN') 'dynamic warnings with a service list are translated by pattern'
 $other = Add-EloSpanish @{en='A text nobody translated';de='x'}
 Assert (-not $other.ContainsKey('es')) 'an untranslated text simply has no es (the UI falls back to English)'
 $evidenceSession.Adapters.Resources={ @{ServerName='SRV01';WindowsVersion='10.0';WindowsBuild='20348';Disks=@()} }; $evidenceSession.State='completed'

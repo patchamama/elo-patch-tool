@@ -325,6 +325,7 @@ pre.cmd .c-str{color:#fca5a5}
 <progress id="progress" max="100" aria-label="Progress" hidden></progress><p id="progressText" class="muted"></p>
 <p id="scanSummary" class="muted" role="status"></p>
 <div id="scanAlert" class="alert" role="alert" hidden><h3><svg class="i"><use href="#i-info"/></svg><span id="scanAlertTitle"></span></h3><div id="scanAlertList"></div></div>
+<p id="scanOk" class="notice" role="status" hidden></p>
 <p id="resultNotice" class="muted" role="status"></p>
 <details><summary><svg class="i"><use href="#i-list"/></svg><span data-i18n="advanced"></span></summary><div class="body">
 <label class="field"><span data-i18n="searchPath"></span><input id="searchPath" type="text" maxlength="1024" autocomplete="off" spellcheck="false" aria-describedby="searchHelp"></label>
@@ -341,6 +342,7 @@ pre.cmd .c-str{color:#fca5a5}
 <h2 id="h2s"><span class="ico"><svg class="i"><use href="#i-cpu"/></svg></span><span data-i18n="step2Title"></span></h2>
 <p class="lead" data-i18n="step2Text"></p>
 <div id="vulnAlert" class="alert" role="alert" hidden><div id="vulnList"></div></div>
+<p id="vulnOk" class="notice" role="status" hidden></p>
 <div class="cards" id="cards" role="radiogroup" aria-labelledby="h2s"></div>
 <label class="field" hidden><span data-i18n="results"></span><select id="results"></select></label>
 <details><summary><svg class="i"><use href="#i-info"/></svg><span data-i18n="evidence"></span></summary><div class="body">
@@ -385,6 +387,8 @@ pre.cmd .c-str{color:#fca5a5}
 <section class="panel" id="step5" aria-labelledby="h5s" hidden>
 <h2 id="h5s"><span class="ico"><svg class="i"><use href="#i-file"/></svg></span><span data-i18n="step5Title"></span></h2>
 <p id="finalNotice" class="done" role="status"></p>
+<div id="serviceAlert" class="alert" role="alert" hidden><h3><svg class="i"><use href="#i-info"/></svg><span data-i18n="serviceAlertTitle"></span></h3><p id="serviceAlertText"></p></div>
+<p id="loadCheck" class="muted" hidden data-i18n="loadCheck"></p>
 <p class="lead" data-i18n="reportText"></p>
 <div class="row">
 <button id="exportTechnical" class="btn primary" type="button"><svg class="i"><use href="#i-download"/></svg><span data-i18n="technicalReport"></span></button>
@@ -413,8 +417,9 @@ const messages = {
  step1Title:'Find Java runtimes',step1Text:'A read-only scan looks for Java in X:\\java\\bin and X:\\<folder>\\java\\bin (for example ELO\\java\\bin) on every drive (C: to Z:). Nothing is changed.',
  step2Title:'Choose a runtime',step2Text:'Select the Java runtime you want to work on.',step3Title:'Choose an action',step4Title:'Review and confirm',step5Title:'Report and next steps',
  continue:'Continue',back:'Back',startOver:'Scan again',advanced:'Advanced: search another folder',evidence:'Technical evidence',
+ noIssue:'No security problem was detected in the {n} Java runtime(s) found.',noIssueUnknown:'No security problem was detected. However, {n} runtime(s) could not be evaluated against the vulnerability catalog, so this does not prove they are safe.',noIssueUpdate:'You can still update the Java used by ELO in step 3.',serviceAlertTitle:'ELO did not come back cleanly',loadCheck:'The services and their ports were checked. Also sign in to ELO to confirm that it works; if it does not, restore the previous version.',
  scanningNow:'Scanning drives',foundN:'Java runtimes found: {n}.',foundNone:'No Java runtime found. Open “Advanced” to search another folder, then scan again.',
- updateDesc:'Installs the newest release of the same Java branch and vendor. Includes a verified backup, a Java self-test and automatic rollback.',
+ updateDesc:'Installs the newest release of the same Java branch and vendor, even without a detected vulnerability. Verified backup, Java self-test, stop and restart of all ELO services, load check and rollback.',
  mitigateDesc:'Adds -XX:-UseBASE64Intrinsics to the machine environment. Quick and temporary; it is not a Java update.',
  doneUpdate:'The runtime was updated and verified. The backup ZIP and the previous runtime were kept. Scan again to confirm the new version.',
  doneMitigation:'The mitigation was applied and verified for newly started JVMs. Running processes stay unprotected until they are restarted. The protection is fragile: it stops working if the machine variable JAVA_TOOL_OPTIONS is removed or overwritten. Update Java for a lasting fix.',
@@ -474,8 +479,9 @@ restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: this versi
  step1Title:'Java-Runtimes finden',step1Text:'Ein schreibgeschützter Scan sucht Java in X:\\java\\bin und X:\\<Ordner>\\java\\bin (zum Beispiel ELO\\java\\bin) auf allen Laufwerken (C: bis Z:). Es wird nichts geändert.',
  step2Title:'Runtime auswählen',step2Text:'Wählen Sie die Java-Runtime, die Sie bearbeiten möchten.',step3Title:'Aktion wählen',step4Title:'Prüfen und bestätigen',step5Title:'Bericht und nächste Schritte',
  continue:'Weiter',back:'Zurück',startOver:'Erneut scannen',advanced:'Erweitert: anderen Ordner durchsuchen',evidence:'Technische Nachweise',
+ noIssue:'In den {n} gefundenen Java-Runtimes wurde kein Sicherheitsproblem erkannt.',noIssueUnknown:'Es wurde kein Sicherheitsproblem erkannt. Allerdings konnten {n} Runtime(s) nicht anhand des Schwachstellenkatalogs bewertet werden; das beweist nicht, dass sie sicher sind.',noIssueUpdate:'Das von ELO verwendete Java kann in Schritt 3 trotzdem aktualisiert werden.',serviceAlertTitle:'ELO wurde nicht korrekt wieder gestartet',loadCheck:'Dienste und Ports wurden geprüft. Melden Sie sich zusätzlich bei ELO an; funktioniert es nicht, stellen Sie die vorherige Version wieder her.',
  scanningNow:'Laufwerke werden durchsucht',foundN:'Gefundene Java-Runtimes: {n}.',foundNone:'Keine Java-Runtime gefunden. Öffnen Sie „Erweitert“, um einen anderen Ordner zu durchsuchen, und scannen Sie erneut.',
- updateDesc:'Installiert die neueste Version desselben Java-Branches und Herstellers. Mit geprüftem Backup, Java-Selbsttest und automatischer Wiederherstellung.',
+ updateDesc:'Installiert die neueste Version desselben Java-Branches und Herstellers, auch ohne erkannte Schwachstelle. Geprüftes Backup, Java-Selbsttest, Stopp und Neustart aller ELO-Dienste, Ladeprüfung und Wiederherstellung.',
  mitigateDesc:'Ergänzt -XX:-UseBASE64Intrinsics in der Systemumgebung. Schnell und vorübergehend; kein Java-Update.',
  doneUpdate:'Die Runtime wurde aktualisiert und geprüft. Backup-ZIP und vorherige Runtime blieben erhalten. Scannen Sie erneut, um die neue Version zu bestätigen.',
  doneMitigation:'Die Risikominderung wurde angewendet und für neu gestartete JVMs geprüft. Laufende Prozesse bleiben bis zum Neustart ungeschützt. Der Schutz ist fragil: Er wirkt nicht mehr, wenn die Systemvariable JAVA_TOOL_OPTIONS entfernt oder überschrieben wird. Für eine dauerhafte Behebung Java aktualisieren.',
@@ -535,8 +541,9 @@ restoreShort:'Dieses Backup wiederherstellen',backupRisk_vulnerable:'Verwundbar:
  step1Title:'Buscar runtimes de Java',step1Text:'Un escaneo de solo lectura busca Java en X:\\java\\bin y X:\\<carpeta>\\java\\bin (por ejemplo ELO\\java\\bin) en cada unidad (C: a Z:). No se cambia nada.',
  step2Title:'Elegir un runtime',step2Text:'Selecciona el runtime de Java con el que quieres trabajar.',step3Title:'Elegir una acción',step4Title:'Revisar y confirmar',step5Title:'Informe y siguientes pasos',
  continue:'Continuar',back:'Atrás',startOver:'Escanear de nuevo',advanced:'Avanzado: buscar en otra carpeta',evidence:'Evidencia técnica',
+ noIssue:'No se ha detectado ningún problema de seguridad en los {n} runtimes de Java encontrados.',noIssueUnknown:'No se ha detectado ningún problema de seguridad. Sin embargo, {n} runtime(s) no se pudieron evaluar con el catálogo de vulnerabilidades, así que esto no demuestra que sean seguros.',noIssueUpdate:'Igualmente puedes actualizar el Java que usa ELO en el paso 3.',serviceAlertTitle:'ELO no volvió a levantar correctamente',loadCheck:'Se comprobaron los servicios y sus puertos. Además, inicia sesión en ELO para confirmar que funciona; si no, restaura la versión anterior.',
  scanningNow:'Escaneando unidades',foundN:'Runtimes de Java encontrados: {n}.',foundNone:'No se encontró ningún runtime de Java. Abre «Avanzado» para buscar en otra carpeta y vuelve a escanear.',
- updateDesc:'Instala la última versión de la misma rama y fabricante de Java. Incluye copia de seguridad verificada, prueba de Java y reversión automática.',
+ updateDesc:'Instala la última versión de la misma rama y fabricante de Java, aunque no se haya detectado una vulnerabilidad. Copia verificada, prueba de Java, parada y arranque de todos los servicios de ELO, comprobación de carga y reversión.',
  mitigateDesc:'Añade -XX:-UseBASE64Intrinsics al entorno de la máquina. Rápido y temporal; no es una actualización de Java.',
  doneUpdate:'El runtime se actualizó y se verificó. Se conservaron el ZIP de la copia y el runtime anterior. Escanea de nuevo para confirmar la nueva versión.',
  doneMitigation:'La mitigación se aplicó y se verificó para las JVM que arranquen después. Los procesos en ejecución siguen sin protección hasta que se reinicien. La protección es frágil: deja de funcionar si se elimina o se sobrescribe la variable de máquina JAVA_TOOL_OPTIONS. Actualiza Java para una solución duradera.',
@@ -604,7 +611,7 @@ const forgetToken = () => { try { sessionStorage.removeItem('eloSessionToken'); 
 let language = 'en', state = 'idle', rows = [], preview = null, pending = false, polling = false, lastError = '';
 let vulns = [], backups = [], backupsKey = '', progress = null, checked = null, lastSuccessfulRefresh = null, security = {verifiedOn:null,advisories:[]};
 let lastWarnings = [], errorFromPoll = false, recoveryRequired = false, recoveryWarnings = [];
-let step = 1, awaitingScan = false, scanStartedAt = null, finalKind = '', canRestore = false, cardsKey = '';
+let step = 1, awaitingScan = false, scanStartedAt = null, finalKind = '', canRestore = false, cardsKey = '', serviceWarning = null;
 const events = [], states = ['idle','scanning','cancelling','completed','cancelled','error'];
 const t = key => messages[language][key] || messages.en[key] || messages[language].unknown;
 const safeText = value => typeof value === 'string' ? (token ? value.split(token).join('[redacted]') : value).slice(0,16000) : '';
@@ -887,6 +894,14 @@ function renderScanAlert() {
  $('scanAlertTitle').textContent = found.length ? t('scanFound').replace('{n}',() => String(found.length)) : '';
  $('scanAlertList').replaceChildren(); found.forEach(block => $('scanAlertList').append(block));
  toggle('scanAlert',found.length === 0);
+ renderNoIssue(found.length);
+}
+// A finished scan without findings says so; runtimes the catalog cannot judge are never called safe.
+function renderNoIssue(findings) {
+ const show = state === 'completed' && !lastError && !running() && rows.length > 0 && findings === 0 && !rows.some(item => item.status === 'vulnerable');
+ const unknown = rows.filter(item => !['patched','safe','not-affected','mitigated'].includes(item.status)).length;
+ const message = show ? t(unknown ? 'noIssueUnknown' : 'noIssue').replace('{n}',() => String(unknown || rows.length))+' '+t('noIssueUpdate') : '';
+ ['scanOk','vulnOk'].forEach(id => { $(id).textContent = message; toggle(id,!show); });
 }
 function renderAdvice(row) {
  renderScanAlert();
@@ -1269,7 +1284,10 @@ $('aiProvider').onchange = () => { $('aiModel').replaceChildren(); cModels = [];
  toggle('restore', !canRestore); toggle('restoreHint', !canRestore);
  $('restore').disabled = pending || running() || !row || !token || recoveryRequired || !canRestore;
  const done = {'mitigate':'doneMitigation','update-runtime':'doneUpdate','restore-backup':'doneRestore'}[finalKind];
- $('finalNotice').textContent = done && !lastError ? t(done) : '';
+ $('finalNotice').textContent = done && !lastError && !serviceWarning ? t(done) : '';
+ const alertText = serviceWarning && !lastError ? serviceWarning.map(localized).join('\n') : '';
+ $('serviceAlertText').textContent = alertText; toggle('serviceAlert',!alertText);
+ toggle('loadCheck',!(finalKind === 'update-runtime' || finalKind === 'restore-backup') || !!lastError);
 }
 async function refresh() {
  if (polling || pending || !token) return;
@@ -1329,7 +1347,10 @@ $('apply').onclick = () => {
  if (!preview || !$('confirm').checked || running() || lastError || recoveryRequired) return;
  const request = {actionId:preview.actionId,resultId:preview.resultId,previewId:preview.previewId};
  return perform(async () => {
- clearPreview(); await acknowledge('action',request); log('actionSent');
+ clearPreview(); serviceWarning = null; const outcome = await api('action',request);
+ // A successful change may still report that ELO did not start or load again.
+ if (!keys(outcome,['ok'],['warning','warnings']) || outcome.ok !== true || (outcome.warning !== undefined && (!['services_not_restarted','services_unhealthy'].includes(outcome.warning) || !Array.isArray(outcome.warnings) || outcome.warnings.length < 1 || outcome.warnings.length > 4 || outcome.warnings.some(w => !bilingual(w,2048))))) throw 'failed';
+ serviceWarning = outcome.warning ? outcome.warnings : null; log('actionSent');
  finalKind = request.actionId; canRestore = request.actionId === 'update-runtime'; step = 5;
  });
 };
@@ -1339,7 +1360,7 @@ $('toStep3').onclick = () => goto(3);
 $('back2').onclick = () => goto(1);
 $('back3').onclick = () => goto(2);
 $('back4').onclick = () => { clearPreview(); goto(3); };
-$('startOver').onclick = () => { clearPreview(); finalKind = ''; step = 1; render(); };
+$('startOver').onclick = () => { clearPreview(); finalKind = ''; serviceWarning = null; step = 1; render(); };
 // The authenticated backend creates the sanitized report; no UI rows, paths,
 // raw diagnostics or client action claims are submitted as evidence.
 async function exportTechnicalReport(format) {

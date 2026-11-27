@@ -71,7 +71,7 @@ Every update first writes a verified backup ZIP next to the runtime, for example
 
 **1. In the app (same session, one click).** After an update the *Report* step shows **Restore previous version**. Confirm the preview and the app:
 
-1. stops the services that use the runtime (if any) and restarts them afterwards;
+1. stops all active ELO services (and any other service using the runtime), restarts them afterwards and checks that they loaded;
 2. extracts the ZIP into a sibling directory, checking the SHA256 of every file against the manifest;
 3. re-applies the permissions (DACL, and owner when permitted);
 4. swaps it in. The updated runtime is kept as `java.replaced-<timestamp>`; nothing is deleted.
@@ -167,7 +167,7 @@ The web UI, the technical report and the catalog texts are available in **Englis
 
 ## Safety and limitations
 
-- **Services.** A runtime in use cannot be replaced. The preview lists the Windows services that use it (found through loaded modules and process ancestry, e.g. ELO's Procrun services); confirming stops exactly those right before the swap and starts them again afterwards, also after a failure. Any other process using the runtime blocks the update; the tool never kills processes.
+- **Services.** A runtime in use cannot be replaced. The preview lists every active ELO service (named `ELO*` or installed below the ELO folder that holds the runtime) plus any other service using the runtime, including services in `Stop Pending`. Confirming stops them right before the swap (`ELO-Basis` last) and starts the ones that were active again (`ELO-Basis` first), also after a failure. They are then checked: running, the previously listening TCP ports listening again, and still so 20 seconds later. If not, the page warns that the new Java may be incompatible and the previous version can be restored. This check does not prove ELO works: sign in and verify. A process without an active service blocks the change; the tool never kills processes, so a service stuck in `Stop Pending` must be ended manually or by a reboot.
 - **Compatibility.** No ELO compatibility approval is claimed. Installing the vendor package with its installer remains the preferred long-term fix; the report says so.
 - **Backups** cover content, owner, group and DACL. SACL (auditing) entries are not captured.
 - **Quiescence** is checked fail-closed (nothing has the runtime loaded; java binaries open exclusively), but a service started by something else mid-swap cannot be excluded.

@@ -1019,7 +1019,7 @@ function New-EloServerSession {
             Identity={ param($Path) Get-EloRuntimeIdentity $Path }
             EloVersion={ param($Roots) Get-EloInstalledIndexserverVersion $Roots }
             ResolveRelease={ param($Identity) Resolve-EloLatestRelease -Vendor $Identity.Vendor -Branch $Identity.Branch -Architecture $Identity.Architecture -ImageType $Identity.ImageType }
-            RuntimeUsers={ param($Path) Get-EloRuntimeUsers $Path }
+            RuntimeUsers={ param($Path) Get-EloAffectedServices $Path }
             RestoreBackup={ param($Root,$Runtime,$Backup,$StopServices,$Stamp)
                 $services=New-EloWindowsUpdateAdapters -ApprovedRoot $Root -Runtime $Runtime -AllowServiceStop:([bool]$StopServices)
                 $quiesce=$null; $resume=$null
@@ -1583,6 +1583,24 @@ function Get-EloUpdateUsers {
     if ($blockers.Count -gt 0) { Stop-EloRequestDetail 409 'update_preview_refused' ('runtime_in_use_by_'+($blockers -join '+')) }
     return @($users.Services)
 }
+function Get-EloStopPendingWarning {
+    param($Services)
+    $names=@($Services | Where-Object { [string]$_.State -ceq 'Stop Pending' } | ForEach-Object { [string]$_.Name })
+    if ($names.Count -eq 0) { return @() }
+    $list=$names -join ', '
+    return @(@{en="Already in Stop Pending: $list. The tool waits up to 3 minutes for it to stop and never kills it. If it stays stuck, the change is refused.";de="Bereits im Status Stop Pending: $list. Das Werkzeug wartet bis zu 3 Minuten auf das Beenden und erzwingt es nie. Bleibt der Dienst haengen, wird die Aenderung abgelehnt.";es="Ya están en Stop Pending: $list. La herramienta espera hasta 3 minutos a que se detengan y nunca los mata. Si siguen colgados, el cambio se rechaza."})
+}
+function Get-EloServiceOutcome {
+    # The Java change succeeded but ELO did not come back cleanly: say it, and say that restoring is possible.
+    param($Session,[string]$ServiceError)
+    $code=ConvertTo-EloUpdateCode $ServiceError
+    $services=([string]$ServiceError -replace '^[a-z_]+:?','') -replace '\+',', '
+    $kind='services_not_restarted'
+    if ($code -clike 'service_unhealthy*') { $kind='services_unhealthy' }
+    Write-EloLog $Session "WARNING: $kind $services"
+    $warning=@{en="Java was changed, but these ELO services did not start or load correctly: $services. The new Java version may be incompatible with ELO. Check the ELO logs; you can restore the previous version from the backup.";de="Java wurde geaendert, aber diese ELO-Dienste sind nicht korrekt gestartet oder geladen: $services. Die neue Java-Version ist moeglicherweise nicht mit ELO kompatibel. ELO-Logs pruefen; die vorherige Version kann aus dem Backup wiederhergestellt werden.";es="Se cambió Java, pero estos servicios de ELO no arrancaron o no cargaron bien: $services. La nueva versión de Java puede ser incompatible con ELO. Revisa los logs de ELO; puedes restaurar la versión anterior desde la copia."}
+    return @{ok=$true;warning=$kind;warnings=@($warning)}
+}
 function Format-EloServiceList {
     param($Services)
     return ((@($Services | ForEach-Object { [string]$_.Name } | Select-Object -First 12)) -join ', ')
@@ -1619,7 +1637,7 @@ function New-EloRuntimeUpdatePreview {
         @{en='The download is limited to the vendor''s official release host and its published SHA256. Installing the vendor package with its installer remains the preferred long-term fix.';de='Der Download ist auf den offiziellen Herstellerhost und die veroeffentlichte SHA256 beschraenkt. Die Installation des Herstellerpakets mit dem Installer bleibt die bevorzugte langfristige Loesung.'})
     if ($services.Count -gt 0) {
         $list=Format-EloServiceList $services
-        $warnings=@(@{en="These services use the runtime and will be STOPPED before the replacement and started again afterwards: $list. ELO is unavailable meanwhile. Confirming accepts this.";de="Diese Dienste verwenden die Runtime und werden vor dem Austausch BEENDET und danach wieder gestartet: $list. ELO ist in dieser Zeit nicht verfuegbar. Mit der Bestaetigung wird dies akzeptiert."})+$warnings
+        $warnings=@(@{en="All active ELO services (and any other service using this runtime) will be STOPPED before the replacement and started again afterwards: $list. ELO is unavailable meanwhile. Confirming accepts this.";de="Alle aktiven ELO-Dienste (und jeder weitere Dienst, der diese Runtime verwendet) werden vor dem Austausch BEENDET und danach wieder gestartet: $list. ELO ist in dieser Zeit nicht verfuegbar. Mit der Bestaetigung wird dies akzeptiert.";es="Todos los servicios de ELO activos (y cualquier otro servicio que use este runtime) se DETENDRÁN antes de la sustitución y se volverán a arrancar después: $list. ELO no está disponible mientras tanto. Al confirmar aceptas esto."})+@(Get-EloStopPendingWarning $services)+$warnings
     }
     return @{previewId=$preview.Id;summary=@{en=$summaryEn;de=$summaryDe;es=$summaryEs};warnings=$warnings}
 }
@@ -1675,7 +1693,7 @@ function Invoke-EloRuntimeUpdateAction {
     $serviceNote=''; if ($result.ServiceError) { $serviceNote=ConvertTo-EloUpdateCode $result.ServiceError }
     switch ([string]$result.Status) {
         { $_ -in @('Success','SimulatedSuccess') } {
-            if ($serviceNote) { return @{ok=$true;warning='services_not_restarted'} }
+            if ($serviceNote) { return (Get-EloServiceOutcome $Session ([string]$result.ServiceError)) }
             return @{ok=$true}
         }
         'RolledBack' { Stop-EloRequestDetail 422 'update_failed_rolled_back' $failure }
@@ -1720,7 +1738,7 @@ function New-EloRestorePreview {
     $warnings=@(Get-EloRestoreSecurityWarning ([string]$source.Risk) $assessment.Vulnerability $vend $ver)
     if ($services.Count -gt 0) {
         $list=Format-EloServiceList $services
-        $warnings=@(@{en="The restore requires STOPPING the ELO services (Tomcat) that use this runtime: $list. ELO is unavailable while the runtime is swapped; they are started again afterwards. Confirming accepts this.";de="Die Wiederherstellung erfordert das BEENDEN der ELO-Dienste (Tomcat), die diese Runtime verwenden: $list. ELO ist waehrend des Austauschs nicht verfuegbar; die Dienste werden danach wieder gestartet. Mit der Bestaetigung wird dies akzeptiert."})+$warnings
+        $warnings=@(@{en="The restore requires STOPPING all active ELO services (Tomcat) and any other service using this runtime: $list. ELO is unavailable while the runtime is swapped; they are started again afterwards. Confirming accepts this.";de="Die Wiederherstellung erfordert das BEENDEN aller aktiven ELO-Dienste (Tomcat) und jedes weiteren Dienstes, der diese Runtime verwendet: $list. ELO ist waehrend des Austauschs nicht verfuegbar; die Dienste werden danach wieder gestartet. Mit der Bestaetigung wird dies akzeptiert.";es="La restauración exige DETENER todos los servicios de ELO (Tomcat) activos y cualquier otro servicio que use este runtime: $list. ELO no está disponible mientras se cambia el runtime; después se vuelven a arrancar. Al confirmar aceptas esto."})+@(Get-EloStopPendingWarning $services)+$warnings
     } else {
         $warnings=@(@{en='No running service or process uses this runtime right now. If the ELO Tomcat services run on it, stop them first (ELO will be unavailable) or the restore is refused.';de='Zurzeit verwendet kein laufender Dienst oder Prozess diese Runtime. Laufen die ELO-Tomcat-Dienste darauf, diese zuerst beenden (ELO ist dann nicht verfuegbar), sonst wird die Wiederherstellung abgelehnt.'})+$warnings
     }
@@ -1738,7 +1756,7 @@ function Invoke-EloRestoreAction {
     }
     $index=[int]$preview.Index
     try {
-        $null=& $Session.Adapters.RestoreBackup $preview.Root $preview.Runtime $preview.Backup ($preview.Services.Count -gt 0) $preview.Stamp
+        $swap=& $Session.Adapters.RestoreBackup $preview.Root $preview.Runtime $preview.Backup ($preview.Services.Count -gt 0) $preview.Stamp
         $restored=& $Session.Adapters.Identity $preview.Runtime
         if ([string]$preview.ToVersion -and [string]$preview.ToVersion -cne 'unknown' -and -not (Test-EloSameJavaRelease ([string]$restored.Version) ([string]$preview.ToVersion))) { throw 'restored_version_mismatch' }
     } catch {
@@ -1760,6 +1778,7 @@ function Invoke-EloRestoreAction {
     $logName='logRestoreFixed'; if ($classification -ceq 'PotentiallyVulnerable') { $logName='logRestoreVulnerable' } elseif ($classification -ceq 'Unknown') { $logName='logRestoreUnknown' }
     if ($logAssessment.Vulnerability -and $logAssessment.Vulnerability.messages.$logName) { Write-EloLog $Session (Format-EloVulnText ([string]$logAssessment.Vulnerability.messages.$logName) $logValues) }
     $Session.LastUpdate=$null; $Session.BackupsCache=$null
+    if ($swap -and $swap.ServiceError) { return (Get-EloServiceOutcome $Session ([string]$swap.ServiceError)) }
     return @{ok=$true}
 }function Get-EloSessionReportBundle {
     # One report in both formats, named after the server it describes.
@@ -2224,8 +2243,6 @@ function Add-EloSpanish {
     if ($Item -isnot [hashtable] -or -not $Item.ContainsKey('en') -or $Item.ContainsKey('es')) { return $Item }
     $en=[string]$Item.en
     if ($script:EloSpanishStatic.ContainsKey($en)) { $Item.es=$script:EloSpanishStatic[$en]; return $Item }
-    if ($en -cmatch '^These services use the runtime and will be STOPPED before the replacement and started again afterwards: (.+)\. ELO is unavailable meanwhile\. Confirming accepts this\.$') { $Item.es='Estos servicios usan el runtime y se DETENDRÁN antes de la sustitución y se volverán a arrancar después: '+$Matches[1]+'. ELO no está disponible mientras tanto. Al confirmar aceptas esto.'; return $Item }
-    if ($en -cmatch '^The restore requires STOPPING the ELO services \(Tomcat\) that use this runtime: (.+)\. ELO is unavailable while the runtime is swapped; they are started again afterwards\. Confirming accepts this\.$') { $Item.es='La restauración exige DETENER los servicios de ELO (Tomcat) que usan este runtime: '+$Matches[1]+'. ELO no está disponible mientras se cambia el runtime; después se vuelven a arrancar. Al confirmar aceptas esto.'; return $Item }
     return $Item
 }
 function ConvertTo-EloErrorResponse {
@@ -2268,6 +2285,8 @@ function ConvertTo-EloErrorResponse {
         'update_failed_rolled_back' { $warnings+=@{en="The new runtime failed validation.$detail The original runtime was restored and verified; the failed runtime and the backup ZIP were kept.";de="Die neue Runtime bestand die Pruefung nicht.$detail Die urspruengliche Runtime wurde wiederhergestellt und geprueft; fehlgeschlagene Runtime und Backup-ZIP bleiben erhalten."} }
         'update_manual_recovery_required' { $warnings+=@{en="Automatic restore failed.$detail Further actions are locked. Restore manually from the backup ZIP using the commands in the technical report.";de="Automatische Wiederherstellung fehlgeschlagen.$detail Weitere Aktionen sind gesperrt. Manuell aus dem Backup-ZIP wiederherstellen; Befehle stehen im technischen Bericht."} }
     }
+    if ($detail -cmatch '\[runtime_in_use_by_') { $warnings+=@{en="A process that does not belong to an active service is using this Java runtime.$detail Close it and try again.";de="Ein Prozess ohne aktiven Dienst verwendet diese Java-Runtime.$detail Beenden und erneut versuchen.";es="Un proceso que no pertenece a un servicio activo está usando este runtime de Java.$detail Ciérralo y vuelve a intentarlo."} }
+    if ($detail -cmatch '\[service_(stuck_stop_pending|stop_timeout):') { $warnings+=@{en="A service did not stop in time.$detail The tool never kills processes: check the service log, end it manually or reboot the server, then try again.";de="Ein Dienst wurde nicht rechtzeitig beendet.$detail Das Werkzeug beendet nie Prozesse zwangsweise: Dienstprotokoll pruefen, manuell beenden oder Server neu starten und erneut versuchen.";es="Un servicio no se detuvo a tiempo.$detail La herramienta nunca mata procesos: revisa el log del servicio, ciérralo a mano o reinicia el servidor y vuelve a intentarlo."} }
     return @{Status=$status;Body=@{error=$code;warnings=@($warnings | ForEach-Object { Add-EloSpanish $_ })}}
 }
 function New-EloLoopbackListener {
@@ -2670,6 +2689,7 @@ pre.cmd .c-str{color:#fca5a5}
 <progress id="progress" max="100" aria-label="Progress" hidden></progress><p id="progressText" class="muted"></p>
 <p id="scanSummary" class="muted" role="status"></p>
 <div id="scanAlert" class="alert" role="alert" hidden><h3><svg class="i"><use href="#i-info"/></svg><span id="scanAlertTitle"></span></h3><div id="scanAlertList"></div></div>
+<p id="scanOk" class="notice" role="status" hidden></p>
 <p id="resultNotice" class="muted" role="status"></p>
 <details><summary><svg class="i"><use href="#i-list"/></svg><span data-i18n="advanced"></span></summary><div class="body">
 <label class="field"><span data-i18n="searchPath"></span><input id="searchPath" type="text" maxlength="1024" autocomplete="off" spellcheck="false" aria-describedby="searchHelp"></label>
@@ -2686,6 +2706,7 @@ pre.cmd .c-str{color:#fca5a5}
 <h2 id="h2s"><span class="ico"><svg class="i"><use href="#i-cpu"/></svg></span><span data-i18n="step2Title"></span></h2>
 <p class="lead" data-i18n="step2Text"></p>
 <div id="vulnAlert" class="alert" role="alert" hidden><div id="vulnList"></div></div>
+<p id="vulnOk" class="notice" role="status" hidden></p>
 <div class="cards" id="cards" role="radiogroup" aria-labelledby="h2s"></div>
 <label class="field" hidden><span data-i18n="results"></span><select id="results"></select></label>
 <details><summary><svg class="i"><use href="#i-info"/></svg><span data-i18n="evidence"></span></summary><div class="body">
@@ -2730,6 +2751,8 @@ pre.cmd .c-str{color:#fca5a5}
 <section class="panel" id="step5" aria-labelledby="h5s" hidden>
 <h2 id="h5s"><span class="ico"><svg class="i"><use href="#i-file"/></svg></span><span data-i18n="step5Title"></span></h2>
 <p id="finalNotice" class="done" role="status"></p>
+<div id="serviceAlert" class="alert" role="alert" hidden><h3><svg class="i"><use href="#i-info"/></svg><span data-i18n="serviceAlertTitle"></span></h3><p id="serviceAlertText"></p></div>
+<p id="loadCheck" class="muted" hidden data-i18n="loadCheck"></p>
 <p class="lead" data-i18n="reportText"></p>
 <div class="row">
 <button id="exportTechnical" class="btn primary" type="button"><svg class="i"><use href="#i-download"/></svg><span data-i18n="technicalReport"></span></button>
@@ -2758,8 +2781,9 @@ const messages = {
  step1Title:'Find Java runtimes',step1Text:'A read-only scan looks for Java in X:\\java\\bin and X:\\<folder>\\java\\bin (for example ELO\\java\\bin) on every drive (C: to Z:). Nothing is changed.',
  step2Title:'Choose a runtime',step2Text:'Select the Java runtime you want to work on.',step3Title:'Choose an action',step4Title:'Review and confirm',step5Title:'Report and next steps',
  continue:'Continue',back:'Back',startOver:'Scan again',advanced:'Advanced: search another folder',evidence:'Technical evidence',
+ noIssue:'No security problem was detected in the {n} Java runtime(s) found.',noIssueUnknown:'No security problem was detected. However, {n} runtime(s) could not be evaluated against the vulnerability catalog, so this does not prove they are safe.',noIssueUpdate:'You can still update the Java used by ELO in step 3.',serviceAlertTitle:'ELO did not come back cleanly',loadCheck:'The services and their ports were checked. Also sign in to ELO to confirm that it works; if it does not, restore the previous version.',
  scanningNow:'Scanning drives',foundN:'Java runtimes found: {n}.',foundNone:'No Java runtime found. Open “Advanced” to search another folder, then scan again.',
- updateDesc:'Installs the newest release of the same Java branch and vendor. Includes a verified backup, a Java self-test and automatic rollback.',
+ updateDesc:'Installs the newest release of the same Java branch and vendor, even without a detected vulnerability. Verified backup, Java self-test, stop and restart of all ELO services, load check and rollback.',
  mitigateDesc:'Adds -XX:-UseBASE64Intrinsics to the machine environment. Quick and temporary; it is not a Java update.',
  doneUpdate:'The runtime was updated and verified. The backup ZIP and the previous runtime were kept. Scan again to confirm the new version.',
  doneMitigation:'The mitigation was applied and verified for newly started JVMs. Running processes stay unprotected until they are restarted. The protection is fragile: it stops working if the machine variable JAVA_TOOL_OPTIONS is removed or overwritten. Update Java for a lasting fix.',
@@ -2819,8 +2843,9 @@ restoreShort:'Restore this backup',backupRisk_vulnerable:'Vulnerable: this versi
  step1Title:'Java-Runtimes finden',step1Text:'Ein schreibgeschützter Scan sucht Java in X:\\java\\bin und X:\\<Ordner>\\java\\bin (zum Beispiel ELO\\java\\bin) auf allen Laufwerken (C: bis Z:). Es wird nichts geändert.',
  step2Title:'Runtime auswählen',step2Text:'Wählen Sie die Java-Runtime, die Sie bearbeiten möchten.',step3Title:'Aktion wählen',step4Title:'Prüfen und bestätigen',step5Title:'Bericht und nächste Schritte',
  continue:'Weiter',back:'Zurück',startOver:'Erneut scannen',advanced:'Erweitert: anderen Ordner durchsuchen',evidence:'Technische Nachweise',
+ noIssue:'In den {n} gefundenen Java-Runtimes wurde kein Sicherheitsproblem erkannt.',noIssueUnknown:'Es wurde kein Sicherheitsproblem erkannt. Allerdings konnten {n} Runtime(s) nicht anhand des Schwachstellenkatalogs bewertet werden; das beweist nicht, dass sie sicher sind.',noIssueUpdate:'Das von ELO verwendete Java kann in Schritt 3 trotzdem aktualisiert werden.',serviceAlertTitle:'ELO wurde nicht korrekt wieder gestartet',loadCheck:'Dienste und Ports wurden geprüft. Melden Sie sich zusätzlich bei ELO an; funktioniert es nicht, stellen Sie die vorherige Version wieder her.',
  scanningNow:'Laufwerke werden durchsucht',foundN:'Gefundene Java-Runtimes: {n}.',foundNone:'Keine Java-Runtime gefunden. Öffnen Sie „Erweitert“, um einen anderen Ordner zu durchsuchen, und scannen Sie erneut.',
- updateDesc:'Installiert die neueste Version desselben Java-Branches und Herstellers. Mit geprüftem Backup, Java-Selbsttest und automatischer Wiederherstellung.',
+ updateDesc:'Installiert die neueste Version desselben Java-Branches und Herstellers, auch ohne erkannte Schwachstelle. Geprüftes Backup, Java-Selbsttest, Stopp und Neustart aller ELO-Dienste, Ladeprüfung und Wiederherstellung.',
  mitigateDesc:'Ergänzt -XX:-UseBASE64Intrinsics in der Systemumgebung. Schnell und vorübergehend; kein Java-Update.',
  doneUpdate:'Die Runtime wurde aktualisiert und geprüft. Backup-ZIP und vorherige Runtime blieben erhalten. Scannen Sie erneut, um die neue Version zu bestätigen.',
  doneMitigation:'Die Risikominderung wurde angewendet und für neu gestartete JVMs geprüft. Laufende Prozesse bleiben bis zum Neustart ungeschützt. Der Schutz ist fragil: Er wirkt nicht mehr, wenn die Systemvariable JAVA_TOOL_OPTIONS entfernt oder überschrieben wird. Für eine dauerhafte Behebung Java aktualisieren.',
@@ -2880,8 +2905,9 @@ restoreShort:'Dieses Backup wiederherstellen',backupRisk_vulnerable:'Verwundbar:
  step1Title:'Buscar runtimes de Java',step1Text:'Un escaneo de solo lectura busca Java en X:\\java\\bin y X:\\<carpeta>\\java\\bin (por ejemplo ELO\\java\\bin) en cada unidad (C: a Z:). No se cambia nada.',
  step2Title:'Elegir un runtime',step2Text:'Selecciona el runtime de Java con el que quieres trabajar.',step3Title:'Elegir una acción',step4Title:'Revisar y confirmar',step5Title:'Informe y siguientes pasos',
  continue:'Continuar',back:'Atrás',startOver:'Escanear de nuevo',advanced:'Avanzado: buscar en otra carpeta',evidence:'Evidencia técnica',
+ noIssue:'No se ha detectado ningún problema de seguridad en los {n} runtimes de Java encontrados.',noIssueUnknown:'No se ha detectado ningún problema de seguridad. Sin embargo, {n} runtime(s) no se pudieron evaluar con el catálogo de vulnerabilidades, así que esto no demuestra que sean seguros.',noIssueUpdate:'Igualmente puedes actualizar el Java que usa ELO en el paso 3.',serviceAlertTitle:'ELO no volvió a levantar correctamente',loadCheck:'Se comprobaron los servicios y sus puertos. Además, inicia sesión en ELO para confirmar que funciona; si no, restaura la versión anterior.',
  scanningNow:'Escaneando unidades',foundN:'Runtimes de Java encontrados: {n}.',foundNone:'No se encontró ningún runtime de Java. Abre «Avanzado» para buscar en otra carpeta y vuelve a escanear.',
- updateDesc:'Instala la última versión de la misma rama y fabricante de Java. Incluye copia de seguridad verificada, prueba de Java y reversión automática.',
+ updateDesc:'Instala la última versión de la misma rama y fabricante de Java, aunque no se haya detectado una vulnerabilidad. Copia verificada, prueba de Java, parada y arranque de todos los servicios de ELO, comprobación de carga y reversión.',
  mitigateDesc:'Añade -XX:-UseBASE64Intrinsics al entorno de la máquina. Rápido y temporal; no es una actualización de Java.',
  doneUpdate:'El runtime se actualizó y se verificó. Se conservaron el ZIP de la copia y el runtime anterior. Escanea de nuevo para confirmar la nueva versión.',
  doneMitigation:'La mitigación se aplicó y se verificó para las JVM que arranquen después. Los procesos en ejecución siguen sin protección hasta que se reinicien. La protección es frágil: deja de funcionar si se elimina o se sobrescribe la variable de máquina JAVA_TOOL_OPTIONS. Actualiza Java para una solución duradera.',
@@ -2949,7 +2975,7 @@ const forgetToken = () => { try { sessionStorage.removeItem('eloSessionToken'); 
 let language = 'en', state = 'idle', rows = [], preview = null, pending = false, polling = false, lastError = '';
 let vulns = [], backups = [], backupsKey = '', progress = null, checked = null, lastSuccessfulRefresh = null, security = {verifiedOn:null,advisories:[]};
 let lastWarnings = [], errorFromPoll = false, recoveryRequired = false, recoveryWarnings = [];
-let step = 1, awaitingScan = false, scanStartedAt = null, finalKind = '', canRestore = false, cardsKey = '';
+let step = 1, awaitingScan = false, scanStartedAt = null, finalKind = '', canRestore = false, cardsKey = '', serviceWarning = null;
 const events = [], states = ['idle','scanning','cancelling','completed','cancelled','error'];
 const t = key => messages[language][key] || messages.en[key] || messages[language].unknown;
 const safeText = value => typeof value === 'string' ? (token ? value.split(token).join('[redacted]') : value).slice(0,16000) : '';
@@ -3232,6 +3258,14 @@ function renderScanAlert() {
  $('scanAlertTitle').textContent = found.length ? t('scanFound').replace('{n}',() => String(found.length)) : '';
  $('scanAlertList').replaceChildren(); found.forEach(block => $('scanAlertList').append(block));
  toggle('scanAlert',found.length === 0);
+ renderNoIssue(found.length);
+}
+// A finished scan without findings says so; runtimes the catalog cannot judge are never called safe.
+function renderNoIssue(findings) {
+ const show = state === 'completed' && !lastError && !running() && rows.length > 0 && findings === 0 && !rows.some(item => item.status === 'vulnerable');
+ const unknown = rows.filter(item => !['patched','safe','not-affected','mitigated'].includes(item.status)).length;
+ const message = show ? t(unknown ? 'noIssueUnknown' : 'noIssue').replace('{n}',() => String(unknown || rows.length))+' '+t('noIssueUpdate') : '';
+ ['scanOk','vulnOk'].forEach(id => { $(id).textContent = message; toggle(id,!show); });
 }
 function renderAdvice(row) {
  renderScanAlert();
@@ -3614,7 +3648,10 @@ $('aiProvider').onchange = () => { $('aiModel').replaceChildren(); cModels = [];
  toggle('restore', !canRestore); toggle('restoreHint', !canRestore);
  $('restore').disabled = pending || running() || !row || !token || recoveryRequired || !canRestore;
  const done = {'mitigate':'doneMitigation','update-runtime':'doneUpdate','restore-backup':'doneRestore'}[finalKind];
- $('finalNotice').textContent = done && !lastError ? t(done) : '';
+ $('finalNotice').textContent = done && !lastError && !serviceWarning ? t(done) : '';
+ const alertText = serviceWarning && !lastError ? serviceWarning.map(localized).join('\n') : '';
+ $('serviceAlertText').textContent = alertText; toggle('serviceAlert',!alertText);
+ toggle('loadCheck',!(finalKind === 'update-runtime' || finalKind === 'restore-backup') || !!lastError);
 }
 async function refresh() {
  if (polling || pending || !token) return;
@@ -3674,7 +3711,10 @@ $('apply').onclick = () => {
  if (!preview || !$('confirm').checked || running() || lastError || recoveryRequired) return;
  const request = {actionId:preview.actionId,resultId:preview.resultId,previewId:preview.previewId};
  return perform(async () => {
- clearPreview(); await acknowledge('action',request); log('actionSent');
+ clearPreview(); serviceWarning = null; const outcome = await api('action',request);
+ // A successful change may still report that ELO did not start or load again.
+ if (!keys(outcome,['ok'],['warning','warnings']) || outcome.ok !== true || (outcome.warning !== undefined && (!['services_not_restarted','services_unhealthy'].includes(outcome.warning) || !Array.isArray(outcome.warnings) || outcome.warnings.length < 1 || outcome.warnings.length > 4 || outcome.warnings.some(w => !bilingual(w,2048))))) throw 'failed';
+ serviceWarning = outcome.warning ? outcome.warnings : null; log('actionSent');
  finalKind = request.actionId; canRestore = request.actionId === 'update-runtime'; step = 5;
  });
 };
@@ -3684,7 +3724,7 @@ $('toStep3').onclick = () => goto(3);
 $('back2').onclick = () => goto(1);
 $('back3').onclick = () => goto(2);
 $('back4').onclick = () => { clearPreview(); goto(3); };
-$('startOver').onclick = () => { clearPreview(); finalKind = ''; step = 1; render(); };
+$('startOver').onclick = () => { clearPreview(); finalKind = ''; serviceWarning = null; step = 1; render(); };
 // The authenticated backend creates the sanitized report; no UI rows, paths,
 // raw diagnostics or client action claims are submitted as evidence.
 async function exportTechnicalReport(format) {
@@ -4357,7 +4397,7 @@ function Invoke-EloJavaSelfTest {
 function Get-EloUpdateGaps {
     @('Supported: Eclipse Temurin and Azul Zulu, Windows x86/x64/ARM64, JDK or JRE of the same branch; the newest GA release is resolved from the vendor API at preview time. Other vendors are refused.',
       'Backups and restores cover content, owner, group and DACL; SACL (auditing) entries are not captured.',
-      'Quiescence is checked fail-closed (no process or service with the runtime loaded, exclusive open of java binaries); services are stopped only with explicit confirmation and restarted afterwards. ELO compatibility is never assumed.')
+      'Quiescence is checked fail-closed (no process or service with the runtime loaded, exclusive open of java binaries); every active ELO service is stopped only with explicit confirmation, restarted afterwards and checked for loading. ELO compatibility is never assumed.')
 }
 function New-EloUpdateContext {
     param([hashtable]$Adapters=@{}, [switch]$Simulation, [switch]$Production)
@@ -4860,14 +4900,14 @@ function Test-EloSameJavaRelease {
     }
 }
 function Get-EloRuntimeUsers {
-    # Running services and other processes that have the runtime loaded: their image
+    # Active services and other processes that have the runtime loaded: their image
     # or any loaded module lives below the runtime directory. Read-only; protected
     # processes whose modules cannot be listed are skipped (and cannot be proven idle).
     param([string]$Path)
     $prefix=[IO.Path]::GetFullPath($Path).TrimEnd('\')+'\'
     $services=@{}
     foreach ($service in @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop)) {
-        if ([int]$service.ProcessId -gt 0 -and [string]$service.State -ceq 'Running') { $services[[int]$service.ProcessId]=$service }
+        if (@(Get-EloActiveServiceMap @($service)).Count -eq 1) { $services[[int]$service.ProcessId]=$service }
     }
     $found=@{Services=@();Processes=@()}
     $all=@(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
@@ -4900,6 +4940,87 @@ function Get-EloRuntimeUsers {
         } else { $found.Processes+=@(@{Id=$id;Name=[string]$process.Name}) }
     }
     return $found
+}
+function Get-EloActiveServiceMap {
+    # Every service that still owns a process. A service in Stop Pending (or any other
+    # pending/paused state) is still a service, never a foreign process.
+    param($Services)
+    return @($Services | Where-Object { [int]$_.ProcessId -gt 0 -and [string]$_.State -cne 'Stopped' })
+}
+function Select-EloStackServices {
+    # The active ELO services: named ELO*, or installed below the ELO folder that holds the
+    # runtime. A drive root is never used as that folder.
+    param($Services,[string]$EloRoot)
+    $prefix=''
+    if ($EloRoot -and $EloRoot.TrimEnd('\') -cnotmatch '^[A-Za-z]:$') { $prefix=$EloRoot.TrimEnd('\')+'\' }
+    return @(Get-EloActiveServiceMap $Services | Where-Object {
+        $image=([string]$_.PathName).TrimStart('"')
+        ([string]$_.Name -match '^ELO([-_ ]|$)') -or ($prefix -and $image.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase))
+    })
+}
+function Get-EloServiceOrder {
+    # ELO-Basis hosts what the other ELO services depend on: it stops last and starts first.
+    param([string[]]$Names,[switch]$Start)
+    $unique=@($Names | Where-Object { $_ } | Select-Object -Unique)
+    $basis=@($unique | Where-Object { $_ -match '(?i)^ELO[-_ ]Basis' }); $others=@($unique | Where-Object { $_ -notmatch '(?i)^ELO[-_ ]Basis' })
+    if ($Start) { return @($basis+$others) }
+    return @($others+$basis)
+}
+function Get-EloAffectedServices {
+    # What a runtime change has to stop: whatever has the runtime loaded plus every active ELO service.
+    param([string]$Path)
+    $users=Get-EloRuntimeUsers $Path
+    $all=@(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop)
+    $found=@{}; foreach ($service in $users.Services) { $found[[string]$service.Name]=$service }
+    foreach ($service in @(Select-EloStackServices $all ([IO.Path]::GetDirectoryName($Path.TrimEnd('\'))))) {
+        if (-not $found.ContainsKey([string]$service.Name)) { $found[[string]$service.Name]=@{Name=[string]$service.Name;DisplayName=[string]$service.DisplayName;ProcessId=[int]$service.ProcessId} }
+    }
+    $states=@{}; foreach ($service in $all) { $states[[string]$service.Name]=[string]$service.State }
+    $services=@(Get-EloServiceOrder @($found.Keys | Sort-Object) | ForEach-Object { $item=$found[$_]; $item.State=$states[$_]; $item })
+    return @{Services=$services;Processes=$users.Processes}
+}
+function Stop-EloOneService {
+    # One stop request, never a process kill. A Stop Pending service is only waited for.
+    param([string]$Name,[hashtable]$Control)
+    $pending=([string](& $Control.Status $Name) -ceq 'StopPending')
+    if (-not $pending) { $null=& $Control.Stop $Name }
+    if (-not (& $Control.WaitStopped $Name)) {
+        if ($pending) { throw ('service_stuck_stop_pending:'+$Name) }
+        throw ('service_stop_timeout:'+$Name)
+    }
+}
+function Test-EloServicesLoaded {
+    # Loaded = Running with every previously listening port listening again, and still so
+    # after the settle time. Returns the names of the services that did not load.
+    param([hashtable]$Expected,[scriptblock]$Probe,[scriptblock]$Clock,[scriptblock]$Sleep,[int]$TimeoutSeconds=300,[int]$SettleSeconds=20)
+    $failing={
+        foreach ($name in @($Expected.Keys | Sort-Object)) {
+            $sample=& $Probe $name
+            if ([string]$sample.Status -cne 'Running' -or @($Expected[$name] | Where-Object { @($sample.Ports) -notcontains $_ }).Count -gt 0) { $name }
+        }
+    }
+    $begin=& $Clock
+    while ($true) {
+        $failed=@(& $failing)
+        if ($failed.Count -eq 0) { break }
+        if (((& $Clock)-$begin) -ge $TimeoutSeconds) { return $failed }
+        $null=& $Sleep 5
+    }
+    $null=& $Sleep $SettleSeconds
+    return @(& $failing)
+}
+function Get-EloServiceSample {
+    # Status of one service and the fixed (non-ephemeral) TCP ports its process tree listens on.
+    param([string]$Name)
+    $service=Get-CimInstance -ClassName Win32_Service -Filter ("Name='"+$Name.Replace("'","''")+"'") -ErrorAction Stop
+    if (-not $service) { return @{Status='Missing';Ports=@()} }
+    $status=([string]$service.State) -replace ' ',''
+    if ([int]$service.ProcessId -le 0) { return @{Status=$status;Ports=@()} }
+    $tree=@{}; $tree[[int]$service.ProcessId]=$true
+    $all=@(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
+    do { $added=$false; foreach ($process in $all) { if ($tree.ContainsKey([int]$process.ParentProcessId) -and -not $tree.ContainsKey([int]$process.ProcessId)) { $tree[[int]$process.ProcessId]=$true; $added=$true } } } while ($added)
+    $ports=@(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $tree.ContainsKey([int]$_.OwningProcess) -and [int]$_.LocalPort -lt 49152 } | ForEach-Object { [int]$_.LocalPort } | Sort-Object -Unique)
+    return @{Status=$status;Ports=$ports}
 }
 function Test-EloRuntimeQuiescent {
     # Strict: nothing uses the runtime and its java binaries can be opened exclusively.
@@ -4993,7 +5114,7 @@ function Invoke-EloBackupRestore {
         $null=Assert-EloWindowsBoundary $Root $path
         if (Test-Path -LiteralPath $path) { throw 'recovery_or_staging_path_exists' }
     }
-    $input=[IO.File]::OpenRead($Backup); $zip=$null; $quiesced=$false; $aclExact=$true
+    $input=[IO.File]::OpenRead($Backup); $zip=$null; $quiesced=$false; $aclExact=$true; $outcome=$null
     try {
         $zip=New-Object IO.Compression.ZipArchive($input,[IO.Compression.ZipArchiveMode]::Read,$true)
         $manifestEntry=$zip.GetEntry('manifest.json')
@@ -5065,17 +5186,19 @@ function Invoke-EloBackupRestore {
             if ($moved -and -not (Test-Path -LiteralPath $Runtime)) { [IO.Directory]::Move($replaced,$Runtime) }
             throw
         }
-        return @{Restored=$true;Replaced=$(if ($moved) { $replaced } else { $null });AclExact=$aclExact}
+        $outcome=@{Restored=$true;Replaced=$(if ($moved) { $replaced } else { $null });AclExact=$aclExact;ServiceError=$null}
+        return $outcome
     } finally {
         if ($zip) { $zip.Dispose() }; $input.Dispose()
-        if ($quiesced -and $Resume) { try { $null=& $Resume } catch { } }
+        # $outcome is the object already returned: a failed restart or load check is added to it.
+        if ($quiesced -and $Resume) { try { $null=& $Resume } catch { if ($outcome) { $outcome.ServiceError=$_.Exception.Message } } }
     }
 }
 function New-EloWindowsUpdateAdapters {
     param([Parameter(Mandatory=$true)][string]$ApprovedRoot,[Parameter(Mandatory=$true)][string]$Runtime,[switch]$AllowServiceStop)
     # Factory itself performs no IO. Only direct, explicitly invoked adapter calls
     # can do work. Engine production gate remains closed regardless of injection.
-    $state=@{Root=$ApprovedRoot;Runtime=$Runtime;Original=$null;Staged=$null;FailedPath=$null;Stopped=(New-Object 'System.Collections.Generic.List[string]');AllowServiceStop=[bool]$AllowServiceStop}
+    $state=@{Root=$ApprovedRoot;Runtime=$Runtime;Original=$null;Staged=$null;FailedPath=$null;Stopped=(New-Object 'System.Collections.Generic.List[string]');Ports=@{};AllowServiceStop=[bool]$AllowServiceStop}
     $adapters=@{
         EloWindowsAdapters=$true
         Clock={ [DateTime]::UtcNow }
@@ -5168,30 +5291,49 @@ function New-EloWindowsUpdateAdapters {
         }.GetNewClosure()
     }
     if ($AllowServiceStop) {
-        # Opt-in (the user confirmed the services listed in the preview). Only services that
-        # actually use this runtime are stopped, dependents are restarted, and Resume runs
-        # on success and on failure alike.
+        # Opt-in (the user confirmed the services listed in the preview). Every active ELO
+        # service and every service using this runtime is stopped; Resume starts them again
+        # on success and on failure alike, then checks that they loaded.
         $adapters.Quiesce={ param($Paths)
-            $users=Get-EloRuntimeUsers $Paths.Runtime
+            $users=Get-EloAffectedServices $Paths.Runtime
             if ($users.Processes.Count -gt 0) { throw 'runtime_in_use_by_process' }
-            foreach ($user in $users.Services) {
-                $service=Get-Service -Name $user.Name -ErrorAction Stop
-                $state.Stopped.Add([string]$user.Name)
-                foreach ($dependent in @($service.DependentServices | Where-Object { $_.Status -eq 'Running' })) { $state.Stopped.Add([string]$dependent.Name) }
-                Stop-Service -Name $user.Name -Force -ErrorAction Stop
-                $service.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(90))
+            # Listening ports are recorded before anything stops: they are the load check afterwards.
+            foreach ($user in $users.Services) { $state.Ports[[string]$user.Name]=@((Get-EloServiceSample $user.Name).Ports) }
+            $control=@{
+                Status={ param($n) [string](Get-Service -Name $n -ErrorAction Stop).Status }
+                Stop={ param($n) Stop-Service -Name $n -Force -NoWait -ErrorAction Stop }
+                WaitStopped={ param($n) try { (Get-Service -Name $n -ErrorAction Stop).WaitForStatus('Stopped',[TimeSpan]::FromSeconds(180)); $true } catch [System.ServiceProcess.TimeoutException] { $false } }
+            }
+            foreach ($name in @(Get-EloServiceOrder @($users.Services | ForEach-Object { [string]$_.Name }))) {
+                $service=Get-Service -Name $name -ErrorAction Stop
+                if ([string]$service.Status -ceq 'Stopped') { if (-not $state.Stopped.Contains($name)) { $state.Stopped.Add($name) }; continue }
+                foreach ($dependent in @($service.DependentServices | Where-Object { $_.Status -ne 'Stopped' })) {
+                    if (-not $state.Stopped.Contains([string]$dependent.Name)) { $state.Stopped.Add([string]$dependent.Name) }
+                    Stop-EloOneService ([string]$dependent.Name) $control
+                }
+                if (-not $state.Stopped.Contains($name)) { $state.Stopped.Add($name) }
+                Stop-EloOneService $name $control
             }
             if (-not (Test-EloRuntimeQuiescent $Paths.Runtime)) { throw 'runtime_still_in_use_after_service_stop' }
             @($state.Stopped)
         }.GetNewClosure()
         $adapters.Resume={ param($Paths,$Stopped)
             $failed=New-Object 'System.Collections.Generic.List[string]'
-            foreach ($name in @($state.Stopped)) {
-                try { $service=Get-Service -Name $name -ErrorAction Stop; if ($service.Status -ne 'Running') { Start-Service -Name $name -ErrorAction Stop; $service.WaitForStatus('Running',[TimeSpan]::FromSeconds(90)) } }
-                catch { $failed.Add($name) }
+            $expected=@{}
+            foreach ($name in @(Get-EloServiceOrder @($state.Stopped) -Start)) {
+                try {
+                    $service=Get-Service -Name $name -ErrorAction Stop
+                    if ($service.Status -ne 'Running') { Start-Service -Name $name -ErrorAction Stop; $service.WaitForStatus('Running',[TimeSpan]::FromSeconds(180)) }
+                    $expected[$name]=@($state.Ports[$name] | Where-Object { $null -ne $_ })
+                } catch { $failed.Add($name) }
             }
-            $state.Stopped.Clear()
+            $state.Stopped.Clear(); $state.Ports.Clear()
             if ($failed.Count -gt 0) { throw ('service_restart_failed:'+($failed -join '+')) }
+            if ($expected.Count -gt 0) {
+                $watch=[Diagnostics.Stopwatch]::StartNew()
+                $unhealthy=@(Test-EloServicesLoaded -Expected $expected -Probe { param($n) Get-EloServiceSample $n } -Clock { $watch.Elapsed.TotalSeconds }.GetNewClosure() -Sleep { param($seconds) Start-Sleep -Seconds $seconds })
+                if ($unhealthy.Count -gt 0) { throw ('service_unhealthy:'+($unhealthy -join '+')) }
+            }
         }.GetNewClosure()
     }
     return $adapters

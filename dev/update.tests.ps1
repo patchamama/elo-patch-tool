@@ -427,4 +427,42 @@ Assert-UpdateThrows { Assert-EloWindowsBoundary $driveRoot 'D:\other' } 'outside
 Assert-UpdateThrows { Assert-EloWindowsBoundary ($driveRoot+'x') ($driveRoot+'y') } 'outside_approved_boundary'
 Assert-EloUpdatePaths @{Runtime=($driveRoot+'java');Old=($driveRoot+'java.old-1');Stage=($driveRoot+'java.stage-1');Backup=($driveRoot+'java.backup-1.zip');Download=($driveRoot+'java.download-1.zip')}
 Write-Output 'PASS: drive-root runtimes'
+# ELO service lifecycle (pure selection, ordering, stop and health logic; no real service is touched).
+function New-Svc($Name,$State,$ProcId,$PathName) { [pscustomobject]@{Name=$Name;DisplayName=$Name;State=$State;ProcessId=$ProcId;PathName=$PathName} }
+$all=@(
+    (New-Svc 'ELO-Basis' 'Stop Pending' 10 'F:\ELO\servers\ELO-Basis\bin\ELO-Basis.exe //RS//ELO-Basis'),
+    (New-Svc 'ELO-iSearch' 'Running' 11 '"F:\ELO\servers\ELO-iSearch\bin\ELO-iSearch-x64.exe" //RS//ELO-iSearch'),
+    (New-Svc 'ELO-Automation' 'Stopped' 0 'F:\ELO\servers\ELO-Automation\bin\ELO-Automation.exe'),
+    (New-Svc 'Renamed Tomcat' 'Running' 12 'F:\ELO\servers\x\bin\x.exe //RS//x'),
+    (New-Svc 'Document Mass Import' 'Running' 13 'F:\DMI for ELO\DMI.exe'),
+    (New-Svc 'Spooler' 'Running' 14 'C:\Windows\System32\spoolsv.exe'))
+$active=@(Get-EloActiveServiceMap $all)
+Assert-UpdateTest ($active.Count -eq 5 -and (Get-EloActiveServiceMap $all).Name -contains 'ELO-Basis') 'a Stop Pending service counts as a service; a stopped one does not'
+$names=@(Select-EloStackServices $all 'F:\ELO' | ForEach-Object { $_.Name })
+Assert-UpdateTest (($names | Sort-Object) -join ',' -ceq 'ELO-Basis,ELO-iSearch,Renamed Tomcat') 'ELO services are the active ELO-named ones and those installed below the ELO folder'
+$names=@(Select-EloStackServices $all 'F:\' | ForEach-Object { $_.Name })
+Assert-UpdateTest (($names | Sort-Object) -join ',' -ceq 'ELO-Basis,ELO-iSearch') 'a drive root never selects every service on the drive'
+Assert-UpdateTest ((@(Get-EloServiceOrder @('ELO-iSearch','ELO-Basis','ELO-Textreader-1')) -join ',') -ceq 'ELO-iSearch,ELO-Textreader-1,ELO-Basis') 'ELO-Basis stops last'
+Assert-UpdateTest ((@(Get-EloServiceOrder @('ELO-iSearch','ELO-Basis','ELO-Textreader-1') -Start) -join ',') -ceq 'ELO-Basis,ELO-iSearch,ELO-Textreader-1') 'ELO-Basis starts first'
+# Stop: a Stop Pending service is only waited for; a stuck one fails by name and nothing is killed.
+$log=New-Object 'System.Collections.Generic.List[string]'
+$control=@{ Status={ 'StopPending' }; Stop={ param($n) $log.Add("stop:$n") }.GetNewClosure(); WaitStopped={ param($n) $true } }
+Stop-EloOneService 'ELO-Basis' $control
+Assert-UpdateTest ($log.Count -eq 0) 'no second stop request is sent to a Stop Pending service'
+$control.WaitStopped={ param($n) $false }
+Assert-UpdateThrows { Stop-EloOneService 'ELO-Basis' $control } 'service_stuck_stop_pending:ELO-Basis'
+$control.Status={ 'Running' }
+Assert-UpdateThrows { Stop-EloOneService 'ELO-Basis' $control } 'service_stop_timeout:ELO-Basis'
+Assert-UpdateTest (($log -join ',') -ceq 'stop:ELO-Basis') 'a running service gets one stop request'
+# Health: loaded means Running, previous ports listening again, and still so after the settle time.
+function Test-Health($Samples,$Expected) {
+    $t=@{Now=0;Samples=$Samples}
+    $probe={ param($n) & $t.Samples $t.Now $n }.GetNewClosure()
+    Test-EloServicesLoaded -Expected $Expected -Probe $probe -Clock { $t.Now }.GetNewClosure() -Sleep { param($s) $t.Now+=$s }.GetNewClosure() -TimeoutSeconds 300 -SettleSeconds 20
+}
+$want=@{'ELO-Basis'=@(9090,9093)}
+Assert-UpdateTest (@(Test-Health { param($now,$n) @{Status='Running';Ports=$(if ($now -ge 60) { @(9090,9093,50000) } else { @() })} } $want).Count -eq 0) 'services that come back with their ports are healthy'
+Assert-UpdateTest ((@(Test-Health { param($now,$n) @{Status='Running';Ports=@(9090)} } $want) -join ',') -ceq 'ELO-Basis') 'a port that never comes back is unhealthy'
+Assert-UpdateTest ((@(Test-Health { param($now,$n) @{Status=$(if ($now -ge 10) { 'Stopped' } else { 'Running' });Ports=@()} } @{'ELO-Basis'=@()}) -join ',') -ceq 'ELO-Basis') 'a service that dies during the settle time is unhealthy'
+Write-Output 'PASS: ELO service selection, ordering, Stop Pending and health logic'
 Write-Output 'ALL UPDATE TESTS PASSED (synthetic filesystem and mocks; no production safety claim)'
